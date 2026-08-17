@@ -72,12 +72,12 @@ fn main() {
         eprintln!("rect 1 sum (image 90,25-94,32) = {}", sii.rect_sum(90, 25, 94, 32));
         // Per-feature detail
         let f0 = &cascade.features_debug()[0];
-        let r0 = f0.eval(&sii, &sri, fx, fy, ww, wh);
+        let r0 = f0.eval(&sii, &sri, fx, fy, ww, wh, nw, nh);
         eprintln!("feature 0 response = {} (expected: -0.953)", r0);
         // All features in stage 0
         for (i, w) in cascade.stages_debug()[0].weak_features.iter().enumerate() {
             let f = &cascade.features_debug()[w.feature_index as usize];
-            let r = f.eval(&sii, &sri, fx, fy, ww, wh);
+            let r = f.eval(&sii, &sri, fx, fy, ww, wh, nw, nh);
             eprintln!("stage 0 weak {}: feat {} r={} thr={} → {}", i, w.feature_index, r, w.threshold,
                 if r > w.threshold { format!("right={}", w.right_val) } else { format!("left={}", w.left_val) });
         }
@@ -87,7 +87,7 @@ fn main() {
         let mut stage0_sum = 0.0f32;
         for w in &cascade.stages_debug()[0].weak_features {
             let f = &cascade.features_debug()[w.feature_index as usize];
-            let r = f.eval(&sii, &sri, fx, fy, ww, wh);
+            let r = f.eval(&sii, &sri, fx, fy, ww, wh, nw, nh);
             let v = if r > w.threshold { w.right_val } else { w.left_val };
             stage0_sum += v;
         }
@@ -98,7 +98,7 @@ fn main() {
             let mut stage_sum = 0.0f32;
             for w in &cascade.stages_debug()[stage_idx].weak_features {
                 let f = &cascade.features_debug()[w.feature_index as usize];
-                let r = f.eval(&sii, &sri, fx, fy, ww, wh);
+                let r = f.eval(&sii, &sri, fx, fy, ww, wh, nw, nh);
                 let v = if r > w.threshold { w.right_val } else { w.left_val };
                 stage_sum += v;
             }

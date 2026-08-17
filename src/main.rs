@@ -91,7 +91,7 @@ fn main() {
     };
 
     // Load cascade.
-    let cascade = if let Some(p) = cascade_path {
+    let mut cascade = if let Some(p) = cascade_path {
         match Cascade::load(&p) {
             Ok(c) => c,
             Err(e) => { eprintln!("failed to load cascade {}: {}", p.display(), e); std::process::exit(2); }
@@ -99,6 +99,10 @@ fn main() {
     } else {
         rsface::haar::params::demo_face_cascade()
     };
+    if let Some(b) = std::env::var("RS_FACE_CASCADE_BIAS").ok().and_then(|s| s.parse().ok()) {
+        cascade.stage_bias = b;
+        eprintln!("[rs-face] stage_bias overridden to {}", b);
+    }
     println!("[rs-face] cascade: {} stages, {} features, window {}x{}",
              cascade.num_stages(), cascade.num_features(), cascade.window_w, cascade.window_h);
 

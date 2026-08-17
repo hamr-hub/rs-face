@@ -225,17 +225,18 @@ transfer overhead beats the CPU path. Tunable via `--no-gpu`.
 
 This project is an exercise in zero-dep classical CV. Two known caveats:
 
-1. **Real-face detection is unreliable on the bundled OpenCV cascade.**
-   The OpenCV XML loads correctly (parser smoke tests pass; `2913` features
-   / `25` stages materialise as expected), but on real photographs the
-   variance normalisation + area-averaging resize diverge from OpenCV's
-   reference by a few percent — enough that almost no windows pass the
-   cascade. The demo cascade (8 stages, hand-tuned) over-detects on the
-   synthetic test pattern by design and is **not** intended for real images.
-   If you need reliable face detection today, use a maintained detector
-   (`opencv` Rust crate, `dlib`, etc.). If you want to fix this in `rs-face`,
-   the right next step is aligning the integral image construction +
-   resize with OpenCV's `cascadedetect.hpp` reference implementation.
+1. **Real-face detection on the OpenCV Haar cascade is unreliable.**
+   The cascade XML parses correctly (parser smoke tests pass; `2913`
+   features / `25` stages materialise as expected). On real photographs
+   the variance normalisation + area-averaging resize + per-feature
+   `normfactor` diverge from OpenCV's reference by enough that almost no
+   windows pass the cascade. The demo cascade (8 stages, hand-tuned)
+   over-detects on the synthetic test pattern by design and is **not**
+   intended for real images. If you need reliable face detection today,
+   use a maintained detector (`opencv` Rust crate, `dlib`, etc.). If
+   you want to fix this in `rs-face`, the right next step is aligning
+   the feature eval + resize with OpenCV's `cascadedetect.hpp` reference
+   implementation more carefully than we have so far.
 
 2. **Tilted (45°) Haar features evaluate to 0.** The rotated integral's
    two-pass formulation is non-trivial to keep correct under Rust's borrow

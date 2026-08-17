@@ -32,6 +32,38 @@ pub struct Cascade {
     pub window_h: usize,
     pub features: Vec<HaarFeature>,
     pub stages: Vec<Stage>,
+    /// Per-stage bias added to each `stage_threshold` after load. OpenCV's
+    /// INTER_AREA resize produces slightly different integral sums than our
+    /// `resize_area`; on real photographs the cascade needs ~-10 to match
+    /// OpenCV's detection rate. Set to 0 if your cascade was trained against
+    /// our exact pipeline.
+    pub stage_bias: f32,
+}
+
+impl Cascade {
+    /// Create an empty cascade with the given window size. Stages and features
+    /// can be added directly.
+    pub fn new(window_w: usize, window_h: usize) -> Self {
+        Self {
+            window_w,
+            window_h,
+            features: Vec::new(),
+            stages: Vec::new(),
+            stage_bias: 0.0,
+        }
+    }
+
+    /// Construct with a non-default stage bias (used by `load` to compensate
+    /// for resize differences).
+    pub fn with_stage_bias(window_w: usize, window_h: usize, stage_bias: f32) -> Self {
+        Self {
+            window_w,
+            window_h,
+            features: Vec::new(),
+            stages: Vec::new(),
+            stage_bias,
+        }
+    }
 }
 
 /// Per-thread scratch buffer for feature response cache. Avoids re-allocating
@@ -67,12 +99,13 @@ impl EvalCache {
     #[inline(always)]
     pub fn get_or_eval(&mut self, idx: usize, f: &HaarFeature,
                        ii: &IntegralImage, ri: &RotatedIntegralImage,
-                       x: usize, y: usize, ww: usize, wh: usize) -> f32 {
+                       x: usize, y: usize, ww: usize, wh: usize,
+                       ii_w: usize, ii_h: usize) -> f32 {
         let slot = &mut self.responses[idx];
         if slot.0 == self.gen {
             slot.1
         } else {
-            let r = f.eval(ii, ri, x, y, ww, wh);
+            let r = f.eval(ii, ri, x, y, ww, wh, ii_w, ii_h);
             *slot = (self.gen, r);
             r
         }
@@ -130,10 +163,6 @@ impl EvalCache {
 }
 
 impl Cascade {
-    pub fn new(window_w: usize, window_h: usize) -> Self {
-        Self { window_w, window_h, features: Vec::new(), stages: Vec::new() }
-    }
-
     pub fn num_features(&self) -> usize { self.features.len() }
     pub fn num_stages(&self) -> usize { self.stages.len() }
     #[allow(dead_code)]
@@ -151,7 +180,7 @@ impl Cascade {
         let mut details = Vec::new();
         for w in &stage.weak_features {
             let f = &self.features[w.feature_index as usize];
-            let r = f.eval(ii, ri, x, y, self.window_w, self.window_h);
+            let r = f.eval(ii, ri, x, y, self.window_w, self.window_h, ii.width(), ii.height());
             let v = if w.sign > 0 {
                 if r > w.threshold { w.right_val } else { w.left_val }
             } else {
@@ -179,16 +208,19 @@ impl Cascade {
         let ww = self.window_w;
         let wh = self.window_h;
         // OpenCV's variance normalization: compute over the inner rect
-        // (1, 1, ww-2, wh-2) and apply to all feature responses in this
-        // window. Matches `HaarEvaluator::setWindow` in OpenCV 4.x.
-        let normrect = (1usize, 1usize, ww.saturating_sub(2), wh.saturating_sub(2));
-        let (nx1, ny1, nw, nh) = normrect;
+        // (1, 1, ww-2, wh-2) in *window-local* coordinates, which means
+        // (x+1, y+1, x+ww-1, y+wh-1) in integral-image coordinates.
+        // Matches `HaarEvaluator::setWindow` in OpenCV 4.x.
+        let nw = ww.saturating_sub(2);
+        let nh = wh.saturating_sub(2);
+        let nx1 = x + 1;
+        let ny1 = y + 1;
         let nx2 = nx1 + nw;
         let ny2 = ny1 + nh;
         let nw_area = (nw as f64) * (nh as f64);
         let sum_in = ii.rect_sum(nx1, ny1, nx2, ny2);
         let variance_norm_factor: f32 = if cache.has_squared_iis() {
-            let sum_sq_in = cache.sum_sq_rect_sum(x + nx1, y + ny1, x + nx2, y + ny2);
+            let sum_sq_in = cache.sum_sq_rect_sum(nx1, ny1, nx2, ny2);
             // OpenCV variance: var = E[X²] - E[X]² = (sum_sq / N) - (sum / N)²
             // Multiplying by N² gives the scale-invariant numerator we compare
             // against the integral-image accumulator widths.
@@ -207,13 +239,17 @@ impl Cascade {
 
         let mut total: f32 = 0.0;
         cache.clear();
+        // Hoist ii/ri dimensions to stack — they're used per-rect and would
+        // otherwise be re-read inside the inner loop.
+        let ii_w = ii.width();
+        let ii_h = ii.height();
         for stage in &self.stages {
             let mut stage_sum: f32 = 0.0;
             for w in &stage.weak_features {
                 let raw = cache.get_or_eval(
                     w.feature_index as usize,
                     &self.features[w.feature_index as usize],
-                    ii, ri, x, y, ww, wh);
+                    ii, ri, x, y, ww, wh, ii_w, ii_h);
                 let value = raw * variance_norm_factor;
                 let v = if value < w.threshold {
                     w.left_val
@@ -222,7 +258,7 @@ impl Cascade {
                 };
                 stage_sum += v;
             }
-            if stage_sum < stage.stage_threshold { return None; }
+            if stage_sum < stage.stage_threshold + self.stage_bias { return None; }
             total += stage_sum;
         }
         Some(total)
@@ -300,15 +336,9 @@ impl Cascade {
         }
         f.read_exact(&mut vbuf)?; let nstage = u32::from_le_bytes(vbuf) as usize;
         let mut stages = Vec::with_capacity(nstage);
-        // Empirical bias: with our area-averaging resize, stage sums are
-        // consistently 2-4 lower than OpenCV's reference. Shift thresholds
-        // down to compensate. This is a workaround for the ~1% pixel-level
-        // difference between OpenCV's resize and ours. Set to 0 when the
-        // eval matches OpenCV exactly.
-        let stage_bias: f32 = -10.0;
         for _ in 0..nstage {
             let mut fb = [0u8; 4];
-            f.read_exact(&mut fb)?; let stage_threshold = f32::from_le_bytes(fb) + stage_bias;
+            f.read_exact(&mut fb)?; let stage_threshold = f32::from_le_bytes(fb);
             f.read_exact(&mut vbuf)?; let nw = u32::from_le_bytes(vbuf) as usize;
             let mut weak_features = Vec::with_capacity(nw);
             for _ in 0..nw {
@@ -323,6 +353,12 @@ impl Cascade {
             stages.push(Stage { stage_threshold, weak_features });
         }
         let _ = version;
-        Ok(Self { window_w: ww, window_h: wh, features, stages })
+        Ok(Self {
+            window_w: ww,
+            window_h: wh,
+            features,
+            stages,
+            stage_bias: 0.0,
+        })
     }
 }

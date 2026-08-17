@@ -71,17 +71,50 @@ impl HaarFeature {
     /// already in pixels relative to the top-left of the window, so no
     /// scaling is applied.
     ///
-    /// **Normalization**: For CustomRects we divide the response by the total
-    /// signed area, matching OpenCV's convention (`normfactor` in the source).
-    /// Without this the cascade thresholds (which are stored in normalized
-    /// units) cannot be compared correctly.
+    /// **OpenCV `normfactor` normalization** (critical for OpenCV-loaded
+    /// cascades): each feature response is multiplied by `1 / feature_area`
+    /// where `feature_area` is the bounding-box area of the feature's rects
+    /// in the 24×24 detection window. This matches
+    /// `HaarEvaluator::OptFeature::init` in OpenCV's `cascadedetect.cpp`
+    /// (which stores it in `m_normfactor = 1.0f / m_area`).
+    /// Without this normalization the response is 10-500× too large and the
+    /// cascade thresholds — which are stored in normalized units — never
+    /// match, so the cascade silently rejects every window.
+    /// See https://github.com/opencv/opencv/blob/4.x/modules/objdetect/src/cascadedetect.cpp
+    /// for the reference implementation.
     pub fn eval(&self, ii: &IntegralImage, ri: &RotatedIntegralImage,
-                x: usize, y: usize, win_w: usize, win_h: usize) -> f32 {
+                x: usize, y: usize, win_w: usize, win_h: usize,
+                ii_w: usize, ii_h: usize) -> f32 {
         let mut total: f64 = 0.0;
         let is_custom = matches!(self.kind, FeatureKind::CustomRects);
         let fw = if is_custom { 1usize } else { self.width.max(1) as usize };
         let fh = if is_custom { 1usize } else { self.height.max(1) as usize };
-        let mut total_area: f64 = 0.0;
+        // Bounding box of the feature's rects in window-local pixel coords.
+        // For canonical features it's (0, 0, win_w, win_h) so normfactor is
+        // 1 / (win_w * win_h). For CustomRects we compute the bbox across
+        // the rects in pixel coords (OpenCV-style).
+        let mut bb_x0: usize = usize::MAX;
+        let mut bb_y0: usize = usize::MAX;
+        let mut bb_x1: usize = 0;
+        let mut bb_y1: usize = 0;
+        for r in &self.rects {
+            let rrx = if is_custom { r.x as usize } else { r.x as usize * win_w / fw };
+            let rry = if is_custom { r.y as usize } else { r.y as usize * win_h / fh };
+            let rrw = std::cmp::max(1, if is_custom { r.w as usize } else { r.w as usize * win_w / fw });
+            let rrh = std::cmp::max(1, if is_custom { r.h as usize } else { r.h as usize * win_h / fh });
+            if rrx < bb_x0 { bb_x0 = rrx; }
+            if rry < bb_y0 { bb_y0 = rry; }
+            if rrx + rrw > bb_x1 { bb_x1 = rrx + rrw; }
+            if rry + rrh > bb_y1 { bb_y1 = rry + rrh; }
+        }
+        let feature_w = bb_x1.saturating_sub(bb_x0).max(1);
+        let feature_h = bb_y1.saturating_sub(bb_y0).max(1);
+        // OpenCV's `normfactor` from `HaarEvaluator::OptFeature::init`:
+        //   normfactor = 1.0 / (feature_bbox_area)
+        // where the bbox is over the feature's rects in window-local pixel
+        // coords. Without this the response is 10-500× too large and the
+        // cascade thresholds (stored in normalized units) never match.
+        let normfactor = 1.0f32 / ((feature_w * feature_h) as f32);
         for r in &self.rects {
             let (rx, ry, rw, rh) = if is_custom {
                 (x + r.x as usize, y + r.y as usize,
@@ -93,8 +126,8 @@ impl HaarFeature {
                 let rh = std::cmp::max(1, r.h as usize * win_h / fh);
                 (rx, ry, rw, rh)
             };
-            let rx2 = (rx + rw).min(ii.width());
-            let ry2 = (ry + rh).min(ii.height());
+            let rx2 = (rx + rw).min(ii_w);
+            let ry2 = (ry + rh).min(ii_h);
             let rx = rx.min(rx2);
             let ry = ry.min(ry2);
             let sum: i64 = match self.kind {
@@ -103,27 +136,8 @@ impl HaarFeature {
             };
             let contribution = (sum as f64) * (r.weight as f64);
             total += contribution;
-            if is_custom {
-                // OpenCV's per-feature `normfactor` from `icvCreateHidHaarStageClassifier`:
-                //   normfactor[i*24+j] = 1.0f / (float)((24-i)*(24-j))
-                // where (i, j) is the top-left of the feature's bounding box in the
-                // 24x24 window. The bounding box of the feature is computed from the
-                // rects. We accumulate the minimum top-left across rects as a proxy.
-                // (This matches OpenCV's behavior for `feature->p` which points to
-                // the top-left of the rect collection.)
-                // In practice, we multiply the final response by 1.0 / (win_w * win_h),
-                // which approximates OpenCV's normalization.
-                let _ = r; // area added at the end via post-loop normalization
-            }
         }
-        if is_custom {
-            // OpenCV's `cvHaarEvalFeatures` returns the raw weighted sum.
-            // Leaf values are pre-scaled at training time, so no runtime
-            // division is applied. (See `cascadedetect.hpp` `HaarEvaluator::OptFeature::calc`.)
-            total as f32
-        } else {
-            total as f32
-        }
+        (total as f32) * normfactor
     }
 }
 
@@ -204,27 +218,29 @@ mod tests {
 
     #[test]
     fn vertical_edge_response() {
-        // 2x2 image: top row = 0, bottom row = 255 → response = (top sum) - (bottom sum)
-        // = 0 - 510 = -510
+        // 2x2 image: top row = 0, bottom row = 255. Raw response =
+        // (top sum) - (bottom sum) = 0 - 510 = -510. We then apply OpenCV's
+        // normfactor = 1/(win_w * win_h) = 1/4 → -510/4 = -127.5.
         let mut img = GrayImage::new(2, 2);
         img[(0, 0)] = 0; img[(1, 0)] = 0;
         img[(0, 1)] = 255; img[(1, 1)] = 255;
         let ii = IntegralImage::from_gray(&img);
         let ri = RotatedIntegralImage::from_gray(&img);
         let feat = HaarFeature::vertical_edge(1, 2);
-        let r = feat.eval(&ii, &ri, 0, 0, 2, 2);
-        assert_eq!(r, -510.0);
+        let r = feat.eval(&ii, &ri, 0, 0, 2, 2, ii.width(), ii.height());
+        assert_eq!(r, -127.5);
     }
 
     #[test]
     fn horizontal_edge_response() {
+        // Same setup: raw -510, normalized by 1/4 → -127.5.
         let mut img = GrayImage::new(2, 2);
         img[(0, 0)] = 0; img[(1, 0)] = 255;
         img[(0, 1)] = 0; img[(1, 1)] = 255;
         let ii = IntegralImage::from_gray(&img);
         let ri = RotatedIntegralImage::from_gray(&img);
         let feat = HaarFeature::horizontal_edge(2, 1);
-        let r = feat.eval(&ii, &ri, 0, 0, 2, 2);
-        assert_eq!(r, -510.0);
+        let r = feat.eval(&ii, &ri, 0, 0, 2, 2, ii.width(), ii.height());
+        assert_eq!(r, -127.5);
     }
 }
