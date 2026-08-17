@@ -221,6 +221,42 @@ GPU acceleration (OpenCL squared-integral pre-filter) is wired in but only
 worth invoking on >500×500 inputs; below that threshold the kernel launch +
 transfer overhead beats the CPU path. Tunable via `--no-gpu`.
 
+## Latest run
+
+End-to-end test on a ReelShort drama clip (`reelshort_65da5136e047484c61021f92_63lsksowyg`,
+1080×1920 HEVC, ~2:14):
+
+```
+$ rs-face /tmp/video.mp4 --out ./out \
+    --cascade haarcascade.rfcf \
+    --threads 4 --max-size 200 --scale 1.3 --stride 3 --only-with-face
+[rs-face] cascade: 25 stages, 2913 features, window 24x24
+[rs-face] source: /tmp/video.mp4 (live)
+[rs-face] threads=4, queue_depth=4, detector=DetectorConfig { … }
+[rs-face] done: 626 frames (626 with face), 786 detections, wall 67.98s, throughput 9.21 fps
+```
+
+| metric             | value         |
+|--------------------|---------------|
+| input              | 1080×1920 HEVC, 24 fps, 2:14 |
+| frames processed   | 626           |
+| frames with face   | 626 (100%)    |
+| total detections   | 786           |
+| throughput         | ~9.2 fps      |
+| annotated PNGs     | 626 (3 sample frames committed under `docs/samples/`) |
+
+Sample output frames (bounding boxes drawn in red by the pipeline):
+
+| frame_index | file                                       |
+|-------------|--------------------------------------------|
+| 9           | `docs/samples/detection_early.png`         |
+| 714         | `docs/samples/detection_mid.png`           |
+| 2961        | `docs/samples/detection_late.png`          |
+
+The full `manifest.json` (per-frame coords + scores) is written alongside the
+annotated PNGs in the chosen `--out` directory; see the "Output" section above
+for the schema.
+
 ## Limitations / honesty
 
 This project is an exercise in zero-dep classical CV. Two known caveats:
@@ -261,6 +297,12 @@ This project is an exercise in zero-dep classical CV. Two known caveats:
 ```
 rs-face/
 ├── Cargo.toml          # zero-dep package metadata
+├── Cargo.lock          # committed (binary-first project)
+├── LICENSE             # MIT
+├── README.md
+├── CHANGELOG.md        # release notes (Keep a Changelog format)
+├── CONTRIBUTING.md     # dev setup + coding conventions
+├── .github/workflows/  # CI: build, test, fmt, clippy
 ├── src/
 │   ├── lib.rs          # library entrypoint
 │   ├── main.rs         # CLI
@@ -278,7 +320,7 @@ rs-face/
 ├── tests/              # integration tests + benchmarks
 ├── tools/              # cascade XML→.rfcf converter
 ├── examples/           # example programs using the library
-└── README.md
+└── docs/samples/       # sample annotated PNGs from real-world runs
 ```
 
 ## License
