@@ -71,17 +71,17 @@ impl HaarFeature {
     /// already in pixels relative to the top-left of the window, so no
     /// scaling is applied.
     ///
-    /// **OpenCV `normfactor` normalization** (critical for OpenCV-loaded
-    /// cascades): each feature response is multiplied by `1 / feature_area`
-    /// where `feature_area` is the bounding-box area of the feature's rects
-    /// in the 24×24 detection window. This matches
-    /// `HaarEvaluator::OptFeature::init` in OpenCV's `cascadedetect.cpp`
-    /// (which stores it in `m_normfactor = 1.0f / m_area`).
-    /// Without this normalization the response is 10-500× too large and the
-    /// cascade thresholds — which are stored in normalized units — never
-    /// match, so the cascade silently rejects every window.
-    /// See https://github.com/opencv/opencv/blob/4.x/modules/objdetect/src/cascadedetect.cpp
-    /// for the reference implementation.
+    /// Evaluate the feature response as a raw weighted sum:
+///   `response = sum(weight_i * rect_sum_i)`
+    ///
+    /// Per OpenCV 4.x's `HaarEvaluator::OptFeature::calc` in
+    /// `cascadedetect.hpp` the only normalization applied to the response is
+    /// the per-window `varianceNormFactor` (the inverse sqrt of the variance
+    /// of the inner normrect). There is **no** per-feature `normfactor`
+    /// divided in at eval time — the older OpenCV code did this, and many
+    /// third-party ports keep it, but the current OpenCV reference omits it.
+    /// See https://github.com/opencv/opencv/blob/4.x/modules/objdetect/src/cascadedetect.hpp
+    /// for the canonical reference.
     pub fn eval(&self, ii: &IntegralImage, ri: &RotatedIntegralImage,
                 x: usize, y: usize, win_w: usize, win_h: usize,
                 ii_w: usize, ii_h: usize) -> f32 {
@@ -89,32 +89,6 @@ impl HaarFeature {
         let is_custom = matches!(self.kind, FeatureKind::CustomRects);
         let fw = if is_custom { 1usize } else { self.width.max(1) as usize };
         let fh = if is_custom { 1usize } else { self.height.max(1) as usize };
-        // Bounding box of the feature's rects in window-local pixel coords.
-        // For canonical features it's (0, 0, win_w, win_h) so normfactor is
-        // 1 / (win_w * win_h). For CustomRects we compute the bbox across
-        // the rects in pixel coords (OpenCV-style).
-        let mut bb_x0: usize = usize::MAX;
-        let mut bb_y0: usize = usize::MAX;
-        let mut bb_x1: usize = 0;
-        let mut bb_y1: usize = 0;
-        for r in &self.rects {
-            let rrx = if is_custom { r.x as usize } else { r.x as usize * win_w / fw };
-            let rry = if is_custom { r.y as usize } else { r.y as usize * win_h / fh };
-            let rrw = std::cmp::max(1, if is_custom { r.w as usize } else { r.w as usize * win_w / fw });
-            let rrh = std::cmp::max(1, if is_custom { r.h as usize } else { r.h as usize * win_h / fh });
-            if rrx < bb_x0 { bb_x0 = rrx; }
-            if rry < bb_y0 { bb_y0 = rry; }
-            if rrx + rrw > bb_x1 { bb_x1 = rrx + rrw; }
-            if rry + rrh > bb_y1 { bb_y1 = rry + rrh; }
-        }
-        let feature_w = bb_x1.saturating_sub(bb_x0).max(1);
-        let feature_h = bb_y1.saturating_sub(bb_y0).max(1);
-        // OpenCV's `normfactor` from `HaarEvaluator::OptFeature::init`:
-        //   normfactor = 1.0 / (feature_bbox_area)
-        // where the bbox is over the feature's rects in window-local pixel
-        // coords. Without this the response is 10-500× too large and the
-        // cascade thresholds (stored in normalized units) never match.
-        let normfactor = 1.0f32 / ((feature_w * feature_h) as f32);
         for r in &self.rects {
             let (rx, ry, rw, rh) = if is_custom {
                 (x + r.x as usize, y + r.y as usize,
@@ -137,7 +111,7 @@ impl HaarFeature {
             let contribution = (sum as f64) * (r.weight as f64);
             total += contribution;
         }
-        (total as f32) * normfactor
+        total as f32
     }
 }
 

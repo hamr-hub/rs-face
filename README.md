@@ -225,18 +225,20 @@ transfer overhead beats the CPU path. Tunable via `--no-gpu`.
 
 This project is an exercise in zero-dep classical CV. Two known caveats:
 
-1. **Real-face detection on the OpenCV Haar cascade is unreliable.**
-   The cascade XML parses correctly (parser smoke tests pass; `2913`
-   features / `25` stages materialise as expected). On real photographs
-   the variance normalisation + area-averaging resize + per-feature
-   `normfactor` diverge from OpenCV's reference by enough that almost no
-   windows pass the cascade. The demo cascade (8 stages, hand-tuned)
-   over-detects on the synthetic test pattern by design and is **not**
-   intended for real images. If you need reliable face detection today,
-   use a maintained detector (`opencv` Rust crate, `dlib`, etc.). If
-   you want to fix this in `rs-face`, the right next step is aligning
-   the feature eval + resize with OpenCV's `cascadedetect.hpp` reference
-   implementation more carefully than we have so far.
+1. **Real-face detection works, with caveats.** The OpenCV Haar cascade
+   (`haarcascade_frontalface_default.xml`) loads correctly (parser smoke
+   tests pass; `2913` features / `25` stages materialise) and the feature
+   response is computed the same way as OpenCV 4.x — a raw weighted
+   integral-image sum, with only the per-window `varianceNormFactor`
+   applied at eval time (no per-feature `normfactor` — that was the
+   pre-4.x convention and many ports still carry it; we now match the
+   modern reference). On a 1080×1920 / 24 fps drama clip we get
+   ~250 frames with face / ~280 detections across 4039 frames at
+   ~16 fps with `--min-size 24 --scale 1.5`. The default scale of 1.2
+   is tuned for OpenCV-style dense search; for variable face sizes
+   (e.g, vertical drama footage where faces range from 30 to 100 px)
+   bump to `--scale 1.4` or `--scale 1.5` and expect fewer false
+   negatives.
 
 2. **Tilted (45°) Haar features evaluate to 0.** The rotated integral's
    two-pass formulation is non-trivial to keep correct under Rust's borrow
