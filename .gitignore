@@ -1,0 +1,37 @@
+# ---- Rust / Cargo ----
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# ---- Build artifacts / generated files ----
+# Cascade converted from OpenCV XML via tools/convert_opencv_xml.py — re-run
+# the converter to regenerate. The XML itself is fetched from OpenCV's data
+# repo (see README).
+*.rfcf
+
+# ---- Local-only user state ----
+.claude/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Tooling scratch ----
+/scratch/
+/tmp/
+*.tmp
+*.bak
+
+# ---- Test outputs ----
+test_output/
+test_out/
+*.out.png
+*.test.png
+
+# ---- Generated test data ----
+# Frames extracted from test videos and binary fixtures used only by local
+# reproducers. Generated, not hand-edited.
+/fixtures/generated/

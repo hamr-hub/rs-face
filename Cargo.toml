@@ -1,0 +1,30 @@
+[package]
+name = "rs-face"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-dep Viola-Jones face detector in pure Rust, multi-threaded pipeline."
+license = "MIT"
+
+[lib]
+name = "rsface"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rs-face"
+path = "src/main.rs"
+
+[dependencies]
+
+# We intentionally keep ZERO runtime dependencies for the core library.
+# Video decoding falls back to a std-only path (HTTP image stream or
+# frame sequence) when no native decoder is compiled in.
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1
