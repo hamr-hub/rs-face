@@ -193,8 +193,14 @@ mod tests {
     #[test]
     fn vertical_edge_response() {
         // 2x2 image: top row = 0, bottom row = 255. Raw response =
-        // (top sum) - (bottom sum) = 0 - 510 = -510. We then apply OpenCV's
-        // normfactor = 1/(win_w * win_h) = 1/4 → -510/4 = -127.5.
+        // (top sum) - (bottom sum) = 0 - 510 = -510.
+        //
+        // Per OpenCV 4.x's `HaarEvaluator::OptFeature::calc` in
+        // cascadedetect.hpp the returned value is the raw weighted sum;
+        // the per-window `varianceNormFactor` is applied at the call site,
+        // and there is NO per-feature `1/(win_w * win_h)` division (older
+        // OpenCV did that, modern does not). See commit f6e4849 for the
+        // matching history on this file.
         let mut img = GrayImage::new(2, 2);
         img[(0, 0)] = 0; img[(1, 0)] = 0;
         img[(0, 1)] = 255; img[(1, 1)] = 255;
@@ -202,12 +208,12 @@ mod tests {
         let ri = RotatedIntegralImage::from_gray(&img);
         let feat = HaarFeature::vertical_edge(1, 2);
         let r = feat.eval(&ii, &ri, 0, 0, 2, 2, ii.width(), ii.height());
-        assert_eq!(r, -127.5);
+        assert_eq!(r, -510.0);
     }
 
     #[test]
     fn horizontal_edge_response() {
-        // Same setup: raw -510, normalized by 1/4 → -127.5.
+        // Same setup: raw -510.
         let mut img = GrayImage::new(2, 2);
         img[(0, 0)] = 0; img[(1, 0)] = 255;
         img[(0, 1)] = 0; img[(1, 1)] = 255;
@@ -215,6 +221,6 @@ mod tests {
         let ri = RotatedIntegralImage::from_gray(&img);
         let feat = HaarFeature::horizontal_edge(2, 1);
         let r = feat.eval(&ii, &ri, 0, 0, 2, 2, ii.width(), ii.height());
-        assert_eq!(r, -127.5);
+        assert_eq!(r, -510.0);
     }
 }

@@ -1,9 +1,10 @@
 //! ffmpeg pipe source — shell out to `ffmpeg` to decode arbitrary containers
-//! into raw grayscale frames.
+//! into raw RGB frames (gray derived for the detector; RGB kept for the
+//! annotation/face-crop sinks so they render true color).
 //!
 //! Zero Rust deps: requires `ffmpeg` and (optionally) `ffprobe` on PATH. Uses
 //! ffprobe to determine the source video dimensions, then asks ffmpeg to emit
-//! raw gray video via stdout with `scale=480:-2`. The decoder runs on a
+//! raw RGB video via stdout with `scale=480:-2`. The decoder runs on a
 //! background thread and pushes `Frame` values into a bounded `mpsc` channel
 //! so decode can overlap with detection.
 
@@ -46,9 +47,10 @@ impl FfmpegPipeSource {
                 "-hide_banner", "-loglevel", "error",
                 "-i", url,
                 "-an",
-                "-vf", &format!("fps={},scale=480:-2,format=gray", fps),
+                // RGB24:保留真实颜色(关键改动 — 旧实现 format=gray 把彩色源转灰了)。
+                "-vf", &format!("fps={},scale=480:-2,format=rgb24", fps),
                 "-f", "rawvideo",
-                "-pix_fmt", "gray",
+                "-pix_fmt", "rgb24",
                 "-",
             ])
             .stdout(Stdio::piped())
@@ -137,9 +139,9 @@ fn probe_even_height(url: &str, w: usize) -> Option<usize> {
             "-hide_banner", "-loglevel", "error",
             "-i", url,
             "-an",
-            "-vf", &format!("scale={}:-2", w),
+            "-vf", &format!("scale={}:-2,format=rgb24", w),
             "-f", "rawvideo",
-            "-pix_fmt", "gray",
+            "-pix_fmt", "rgb24",
             "-frames:v", "1",
             "-",
         ])
@@ -149,33 +151,34 @@ fn probe_even_height(url: &str, w: usize) -> Option<usize> {
         .ok()?;
     if !out.status.success() { return None; }
     if out.stdout.is_empty() { return None; }
-    let h = out.stdout.len() / w;
+    // 3 bytes per pixel (RGB24).
+    let h = out.stdout.len() / (w * 3);
     if h == 0 { None } else { Some(h) }
 }
 
-/// Background decoder thread: read `w*h` bytes per frame, convert to GrayImage
-/// + a grayscale-as-RGB RgbImage (so the sink can always draw boxes without
-/// separate RGB extraction), and push into the channel.
+/// Background decoder thread: read `w*h*3` bytes per frame, build a real
+/// RgbImage (not gray-replicated) and a derived GrayImage for the detector.
 fn decode_loop(mut stdout: BufReader<ChildStdout>, tx: mpsc::SyncSender<Frame>,
                w: usize, h: usize, fps: u64) {
-    let frame_bytes = w * h;
+    let frame_bytes = w * h * 3;
     let mut buf = vec![0u8; frame_bytes];
     let mut frame_index: u64 = 0;
     loop {
         match stdout.read_exact(&mut buf) {
             Ok(()) => {
-                let mut gray = GrayImage::new(w, h);
-                gray.as_mut_slice().copy_from_slice(&buf);
-                // Build a matching RGB by replicating gray into each channel.
+                // 直接把 buf 复制进 RgbImage(行内连续,正好 3 字节/像素)。
                 let mut rgb = RgbImage::new(w, h);
-                for y in 0..h {
-                    let grow = gray.row(y);
-                    let rrow = rgb.row_mut(y);
-                    for x in 0..w {
-                        let v = grow[x];
-                        rrow[x*3] = v;
-                        rrow[x*3+1] = v;
-                        rrow[x*3+2] = v;
+                rgb.as_mut_slice().copy_from_slice(&buf);
+                // 从 RGB 派生灰度(BT.601 加权)。
+                let mut gray = GrayImage::new(w, h);
+                {
+                    let g = gray.as_mut_slice();
+                    let r = rgb.as_slice();
+                    for i in 0..(w * h) {
+                        let r8 = r[i*3] as u32;
+                        let g8 = r[i*3+1] as u32;
+                        let b8 = r[i*3+2] as u32;
+                        g[i] = ((r8 * 299 + g8 * 587 + b8 * 114 + 500) / 1000) as u8;
                     }
                 }
                 let ts = if fps > 0 { frame_index * 1000 / fps } else { 0 };

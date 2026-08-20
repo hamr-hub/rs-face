@@ -83,6 +83,52 @@ impl GrayImage {
         }
     }
 
+    /// Histogram equalization — `cv::equalizeHist` reference.
+    ///
+    /// Maps each pixel `p` to `round(cdf[p] * 255 / total)` where `cdf` is
+    /// the cumulative distribution of the image histogram. This is the
+    /// preprocessing OpenCV's `detectMultiScale` callers are expected to
+    /// apply before running the cascade — the trained thresholds and
+    /// variance normalisation factors assume input in the equalized
+    /// luminance range. Without it the cascade's stage-0 weak features
+    /// (which are calibrated to "bright forehead over dark border"-type
+    /// responses on equalized data) consistently reject real faces on
+    /// raw photographs.
+    ///
+    /// Cost: one histogram pass + one CDF pass over 256 entries + one
+    /// pixel remap = O(W·H) for typical face window sizes.
+    pub fn equalize_hist_inplace(&mut self) {
+        if self.data.is_empty() { return; }
+        let mut hist = [0u32; 256];
+        for &p in &self.data { hist[p as usize] += 1; }
+        // Cumulative distribution, then scale into 0..=255.
+        let mut cdf = [0u32; 256];
+        let mut acc: u32 = 0;
+        for i in 0..256 {
+            acc += hist[i];
+            cdf[i] = acc;
+        }
+        // The OpenCV equalizeHist formula: `round(cdf[p] * 255 / total)`,
+        // but only using the part of the cdf after the first non-zero
+        // entry (`cdf_min`). This avoids a global brightness shift on
+        // mostly-dark images and matches `cv::equalizeHist` byte-for-byte.
+        let mut cdf_min: u32 = 0;
+        for i in 0..256 {
+            if cdf[i] != 0 { cdf_min = cdf[i]; break; }
+        }
+        let total = self.data.len() as u32;
+        let denom = total - cdf_min;
+        if denom == 0 { return; }
+        // Build a 256-entry LUT so the per-pixel remap is a single load.
+        let mut lut = [0u8; 256];
+        for i in 0..256 {
+            let num = cdf[i].saturating_sub(cdf_min) as u64;
+            let v = (num * 255 + (denom as u64 / 2)) / (denom as u64);
+            lut[i] = (v as u32).min(255) as u8;
+        }
+        for p in self.data.iter_mut() { *p = lut[*p as usize]; }
+    }
+
     /// Resize with bilinear interpolation.
     pub fn resize_bilinear(&self, new_w: usize, new_h: usize) -> GrayImage {
         if new_w == 0 || new_h == 0 || self.width == 0 || self.height == 0 {

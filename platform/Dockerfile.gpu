@@ -1,0 +1,53 @@
+# rsface-platform GPU 镜像(多阶段构建,支持 NVIDIA CUDA / OpenCL)
+# 构建上下文必须是仓库根(需要 core 源码):
+#   docker build -f platform/Dockerfile.gpu -t rsface-server:gpu .
+
+FROM rust:1.97-slim AS build
+WORKDIR /build
+# 先拷贝清单利用层缓存(core 零系统依赖,无需额外 apt 包)。
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY platform ./platform
+RUN cargo build --release --manifest-path platform/Cargo.toml
+
+# ---- 运行时镜像:Ubuntu 24.04 + CUDA 12.6 + OpenCL ICD + ffmpeg ----
+# 必须用 Ubuntu 24.04(noble)以匹配 rust:1.97-slim 的 glibc 2.39;Ubuntu 22.04 只有 2.35。
+FROM nvidia/cuda:12.6.0-runtime-ubuntu24.04
+
+# 防止 tzdata 交互
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 安装 ffmpeg + OpenCL ICD loader + 常用工具
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg ca-certificates \
+        ocl-icd-libopencl1 ocl-icd-opencl-dev \
+        libgcc-s1 libstdc++6 \
+        curl wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# 注册 NVIDIA OpenCL ICD vendor(让 ICD loader 找到 nvidia driver)
+RUN mkdir -p /etc/OpenCL/vendors \
+    && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
+
+# 复制构建产物
+COPY --from=build /build/platform/target/release/rsface-server /usr/local/bin/rsface-server
+COPY platform/web /app/web
+COPY cascade.rfcf /app/cascade.rfcf
+RUN mkdir -p /var/rsface-media
+
+ENV BIND_ADDR=0.0.0.0:8080 \
+    S3_ENDPOINT=http://rustfs:9000 \
+    S3_ACCESS_KEY=rsface \
+    S3_SECRET_KEY=rsface-secret \
+    S3_BUCKET=rsface \
+    WEB_DIR=/app/web \
+    RSFACE_CASCADE=/app/cascade.rfcf \
+    TMP_DIR=/tmp/rsface-jobs \
+    LOCAL_MEDIA_DIR=/var/rsface-media \
+    RSFACE_USE_GPU=1 \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    NVIDIA_VISIBLE_DEVICES=all
+
+EXPOSE 8080
+CMD ["rsface-server"]

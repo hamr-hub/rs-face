@@ -161,6 +161,12 @@ impl SquaredIntegralImage {
     ///   `sum_sq * N - sum² ≥ variance_threshold * N²`
     /// All operations are integer; N is the pixel count in the window.
     /// This is the canonical Viola-Jones first-stage rejection.
+    ///
+    /// Caller is responsible for picking a window rect that matches what the
+    /// cascade's `varianceNormFactor` is computed over — for the OpenCV Haar
+    /// cascade that is the INNER 22×22 normrect (`x+1, y+1, w-2, h-2`) of a
+    /// 24×24 detection window, not the full 24×24 window. The detector
+    /// passes the correct rect here.
     #[inline]
     pub fn passes_variance(&self, ii: &IntegralImage,
                            x: usize, y: usize, w: usize, h: usize,
@@ -191,6 +197,11 @@ impl SquaredIntegralImage {
 /// 2. **Pass 2**: transform to `R` using
 ///    `R[x, y] = R[x-1, y-1] + S[x, y] - S[x-1, y] - S[x, y-1] + S[x-1, y-1]`.
 ///
+/// The recurrence needs *both* the S values and the R values, so S must be
+/// kept in a separate buffer — in-place overwriting of S with R as you sweep
+/// loses the S(x, y-1) and S(x-1, y-1) terms. The previous implementation
+/// overwrote in place and produced wrong R values.
+///
 /// The tilted-rectangle sum (the diamond between four corners of a 45°
 /// rotated rectangle) is then a 6-term combination of `R` lookups.
 #[derive(Clone)]
@@ -207,28 +218,35 @@ impl RotatedIntegralImage {
         let w = img.width();
         let h = img.height();
         let stride = w + 1;
-        let mut data = vec![0i64; stride * (h + 1)];
-        // Pass 1: regular cumulative sum. Identical to IntegralImage::from_gray
-        // but in i64 to match rotated (which can grow during Pass 2).
+        // First, compute the regular integral image in a separate buffer.
+        // The rotated recurrence
+        //   R(x,y) = R(x-1,y-1) + S(x,y) - S(x-1,y) - S(x,y-1) + S(x-1,y-1)
+        // needs *both* the S values (regular integral) and the R values.
+        // The previous in-place implementation overwrote S with R as it
+        // iterated, which made S(x, y-1) and S(x-1, y-1) read R values
+        // instead — producing wrong R values downstream. We allocate S
+        // separately so the recurrence sees the true S at every cell.
+        let mut s = vec![0i64; stride * (h + 1)];
         for y in 1..=h {
             let mut row_acc: i64 = 0;
             for x in 1..=w {
                 row_acc += img[(x - 1, y - 1)] as i64;
-                let idx = y * stride + x;
-                data[idx] = row_acc + data[idx - stride];
+                s[y * stride + x] = row_acc + s[(y - 1) * stride + x];
             }
         }
-        // Pass 2: transform regular → rotated using the Lienhart recurrence.
-        // Indexing is bounded: at y=1 we read data[(y-1)*stride + x-1] which
-        // is data[0 * stride + x - 1] = data[x - 1], always in-bounds.
+        // Now compute R from S using the Lienhart recurrence. At y=1 or
+        // x=1 the R(x-1, y-1) term is 0 (out of bounds).
+        let mut data = vec![0i64; stride * (h + 1)];
         for y in 1..=h {
             for x in 1..=w {
-                let s = data[y * stride + x];
-                let r_prev = data[(y - 1) * stride + (x - 1).max(0)];
-                let s_up = data[(y - 1) * stride + x];
-                let s_left = data[y * stride + x - 1];
-                let s_up_left = data[(y - 1) * stride + x - 1];
-                data[y * stride + x] = r_prev + s - s_up - s_left + s_up_left;
+                let s_xy = s[y * stride + x];
+                let s_x1y = s[y * stride + (x - 1)];
+                let s_xy1 = s[(y - 1) * stride + x];
+                let s_x1y1 = s[(y - 1) * stride + (x - 1)];
+                let r_x1y1 = if x >= 2 && y >= 2 {
+                    data[(y - 1) * stride + (x - 1)]
+                } else { 0 };
+                data[y * stride + x] = r_x1y1 + s_xy - s_x1y - s_xy1 + s_x1y1;
             }
         }
         Self { data, width: w, height: h, stride }
@@ -305,5 +323,25 @@ mod tests {
         assert_eq!(ii.rect_sum(1, 1, 2, 2), 4);
         assert_eq!(ii.rect_sum(0, 0, 1, 1), 1);
         assert_eq!(ii.rect_sum(0, 0, 2, 1), 3); // top row 1+2
+    }
+
+    #[test]
+    fn rotated_rect_sum_compiles() {
+        // The rotated integral recurrence
+        //   R(x,y) = R(x-1,y-1) + S(x,y) - S(x-1,y) - S(x,y-1) + S(x-1,y-1)
+        // needs *both* S and R at neighbouring cells, so S cannot be
+        // overwritten in place. The previous implementation did overwrite,
+        // producing wrong R values for any image larger than 2 pixels.
+        // We just sanity-check that the recurrence completes, that the
+        // boundary cells (R(0,*), R(*,0)) are zero, and that tilted_rect_sum
+        // of a non-empty rect returns a non-zero value on a non-trivial image.
+        let mut img = GrayImage::new(2, 2);
+        img[(0, 0)] = 1; img[(1, 0)] = 2;
+        img[(0, 1)] = 3; img[(1, 1)] = 4;
+        let ri = RotatedIntegralImage::from_gray(&img);
+        assert_eq!(ri.at(0, 0), 0);
+        assert_eq!(ri.at(1, 0), 0);
+        assert_eq!(ri.at(0, 1), 0);
+        assert_ne!(ri.tilted_rect_sum(0, 0, 2, 2), 0);
     }
 }

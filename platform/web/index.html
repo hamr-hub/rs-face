@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>rs-face Platform</title><link rel="stylesheet" href="/style.css">
+</head><body>
+<header class="topbar" id="topbar">
+  <div class="tb-left"><span class="tb-logo">◐</span><div class="tb-titles"><h1 class="tb-title">rs-face</h1><span class="tb-sub">Platform</span></div></div>
+  <div class="tb-search"><span class="tb-search-icon">⌕</span><input id="tb-search" type="search" placeholder="搜索任务名 / id" autocomplete="off"></div>
+  <div class="tb-right"><button id="tb-settings" class="tb-icon-btn" title="设置">⚙</button><button id="tb-new" class="tb-new-btn" title="新建任务 (n)"><span class="tb-plus">+</span> 新建</button></div>
+</header>
+<aside class="sidebar" id="sidebar">
+  <div class="sb-filters" id="sb-filters">
+    <button class="sb-filter active" data-f="all">全部</button>
+    <button class="sb-filter" data-f="running">进行</button>
+    <button class="sb-filter" data-f="done">完成</button>
+    <button class="sb-filter" data-f="error">错误</button></div>
+  <div class="sb-scroll" id="sb-scroll" tabindex="0"><div class="sb-spacer" id="sb-spacer"></div><div class="sb-vp" id="sb-vp"></div></div>
+  <div class="sb-foot" id="sb-foot">0 任务</div>
+</aside>
+<main class="preview" id="preview">
+  <div class="pv-empty" id="pv-empty">
+    <div class="pv-empty-mark">◐</div><h2>rs-face Platform</h2>
+    <p>从左侧选择任务查看详情,或点击 <strong>+ 新建</strong> 开始识别</p>
+    <div class="pv-empty-kbd"><span><kbd>n</kbd> 新建</span><span><kbd>↑</kbd>/<kbd>↓</kbd> 切换</span><span><kbd>Esc</kbd> 关闭</span></div>
+  </div>
+  <div class="pv-detail hidden" id="pv-detail">
+    <div class="pv-head">
+      <div class="pv-title-row"><span class="pv-dot" id="pv-dot"></span><h2 id="pv-title" class="pv-title">…</h2><span class="pv-status" id="pv-status">…</span></div>
+      <div class="pv-meta"><span id="pv-kind" class="pv-tag">…</span><span id="pv-frames" class="pv-meta-item">0 帧</span><span id="pv-faces" class="pv-meta-item">0 张脸</span><span id="pv-time" class="pv-meta-item"></span><span id="pv-id" class="pv-meta-item mono">#…</span></div>
+      <div class="pv-actions">
+        <button id="pv-toggle-anno" class="pv-btn">标注 〇</button>
+        <button id="pv-cancel" class="pv-btn hidden">⏹ 取消</button>
+        <button id="pv-retry" class="pv-btn primary hidden" title="重新提交此任务">↻ 重跑</button>
+        <button id="pv-export-json" class="pv-btn ghost">↓ JSON</button>
+        <button id="pv-export-csv" class="pv-btn ghost">↓ CSV</button>
+        <button id="pv-close" class="pv-btn ghost">✕</button></div></div>
+    <div class="pv-stage" id="pv-stage">
+      <!-- 单图/流模式 -->
+      <img id="pv-img" class="pv-media" alt="原图" loading="lazy" decoding="async">
+      <!-- 双画面视频模式(video/stream job 用) -->
+      <div id="pv-double" class="pv-double hidden">
+        <div class="pv-half" id="pv-half-orig">
+          <div class="pv-half-label">原视频</div>
+          <video id="pv-orig" class="pv-media" preload="metadata" playsinline crossorigin="anonymous"></video>
+        </div>
+        <div class="pv-divider" id="pv-divider" title="拖动调整"></div>
+        <div class="pv-half" id="pv-half-anno">
+          <div class="pv-half-label">标注视频</div>
+          <video id="pv-anno" class="pv-media" preload="metadata" playsinline crossorigin="anonymous"></video>
+          <canvas id="pv-overlay" class="pv-overlay pv-overlay-anno"></canvas>
+        </div>
+      </div>
+      <div class="pv-stage-hint" id="pv-stage-hint">加载中…</div>
+      <div class="pv-error-banner hidden" id="pv-error-banner"></div>
+    </div>
+    <div class="pv-shared-controls hidden" id="pv-shared-controls">
+      <button id="pv-shared-play" class="pv-btn primary" title="播放/暂停 (Space)">▶</button>
+      <div class="pv-shared-track" id="pv-shared-track">
+        <div class="pv-shared-fill" id="pv-shared-fill"></div>
+        <div class="pv-shared-marks" id="pv-shared-marks"></div>
+        <div class="pv-shared-handle" id="pv-shared-handle"></div>
+      </div>
+      <span class="pv-shared-time" id="pv-shared-time">00:00 / 00:00</span>
+      <select id="pv-shared-rate" class="pv-btn" title="倍速">
+        <option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option>
+        <option value="1.5">1.5x</option>
+        <option value="2">2x</option>
+      </select>
+    </div>
+    <div class="pv-progress" id="pv-progress">
+      <div class="pv-prog-track"><div class="pv-prog-fill" id="pv-prog-fill"></div><div class="pv-prog-marks" id="pv-prog-marks"></div></div>
+      <div class="pv-prog-labels"><span id="pv-prog-text">0 / 0</span><span id="pv-prog-pct">0%</span></div></div>
+    <section class="pv-faces" id="pv-faces">
+      <div class="pv-faces-head"><h3>人脸卡片</h3><span id="pv-faces-count" class="pv-faces-count">—</span></div>
+      <div class="pv-faces-grid" id="pv-faces-grid"></div></section></div>
+</main>
+<div class="modal hidden" id="modal-new">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card">
+    <header class="modal-head"><h2>新建任务</h2><button class="pv-btn ghost modal-x" data-close>✕</button></header>
+    <div class="new-types">
+      <button class="new-type" data-type="image"><span class="new-icon">🖼</span><span>图片</span></button>
+      <button class="new-type" data-type="video"><span class="new-icon">🎬</span><span>视频</span></button>
+      <button class="new-type" data-type="stream"><span class="new-icon">📡</span><span>直播流</span></button></div>
+    <div class="new-pane hidden" id="pane-image">
+      <div class="dropzone" id="dz-image">
+        <input type="file" id="file-image" accept="image/*" multiple hidden>
+        <div class="dz-inner"><div class="dz-icon">🖼</div><p>点击选择 / 拖入图片(支持多选)</p><p class="hint">PNG / JPG / BMP · Ctrl+V 粘贴自动上传</p></div></div></div>
+    <div class="new-pane hidden" id="pane-video">
+      <div class="dropzone" id="dz-video">
+        <input type="file" id="file-video" accept="video/*" hidden>
+        <div class="dz-inner"><div class="dz-icon">🎬</div><p>点击选择 / 拖入视频文件</p><p class="hint">MP4 / MOV / MKV / WEBM</p></div></div>
+      <div class="url-row"><input id="video-url" type="text" placeholder="或视频 URL(http/https/rtsp)"><button id="video-url-go" class="pv-btn primary">识别</button></div></div>
+    <div class="new-pane hidden" id="pane-stream">
+      <div class="url-row"><input id="stream-url" type="text" placeholder="rtsp:// 或 http(s):// 流地址"><button id="stream-go" class="pv-btn primary">开始</button></div>
+      <p class="hint">实时识别流中每帧;任务会自动加入左侧列表。</p></div></div>
+</div>
+<div class="modal hidden" id="modal-settings">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card">
+    <header class="modal-head"><h2>设置</h2><button class="pv-btn ghost modal-x" data-close>✕</button></header>
+    <div class="settings-list">
+      <div class="setting-row"><span class="setting-label">检测模式</span><span id="set-mode" class="setting-val">…</span></div>
+      <div class="setting-row"><span class="setting-label">CNN 权重</span><span id="set-cnn" class="setting-val">…</span></div>
+      <div class="setting-row"><span class="setting-label">Haar cascade</span><span id="set-cascade" class="setting-val">…</span></div></div>
+    <p class="hint">服务进程启动时确定,需重启容器切换。</p></div>
+</div>
+<div class="toast hidden" id="toast"></div>
+<script src="/app.js"></script>
+</body></html>

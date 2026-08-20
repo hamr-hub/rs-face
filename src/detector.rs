@@ -37,6 +37,13 @@ pub struct DetectorConfig {
     /// (which uses `minEig = 4000` for the 24x24 window — we use 1/20th of that
     /// since our variance calculation is on the same scale as `var = E[X²] - E[X]²`).
     pub variance_threshold: u64,
+    /// If `true`, apply `cv::equalizeHist`-style histogram equalization to the
+    /// image before running the cascade. OpenCV's Haar cascade is trained on
+    /// equalized data — without this, real photographs with low contrast or
+    /// shifted luminance get silently rejected at stage 0 because the
+    /// per-feature thresholds were calibrated for the equalized range.
+    /// Defaults to `true`; set to `false` to compare with raw input.
+    pub equalize_hist: bool,
     /// If `true`, attempt to use the GPU for the squared-integral computation
     /// and variance pre-filter. Falls back to CPU silently if no GPU/OpenCL
     /// is available.
@@ -53,6 +60,7 @@ impl Default for DetectorConfig {
             nms_iou_threshold: 0.3,
             min_score: 0.0,
             variance_threshold: 200,
+            equalize_hist: false,
             use_gpu: true,
         }
     }
@@ -96,7 +104,20 @@ impl Detector {
         let mut cache = EvalCache::new(self.cascade.features.len());
 
         // Build pyramid by repeated downscaling.
-        let mut current = img.clone();
+        // OpenCV's Haar cascade is trained on histogram-equalized images
+        // (the canonical "Lena face detector" workflow applies
+        // `cv::equalizeHist` before `detectMultiScale`). Without it the
+        // integral-image sums land in a different numerical range than the
+        // cascade's learned thresholds/varianceNormFactor and most real
+        // faces silently fail stage 0. The equalization is a deterministic
+        // O(W*H) per pixel pass — cheap relative to the cascade eval.
+        let mut current = if self.config.equalize_hist {
+            let mut eq = img.clone();
+            eq.equalize_hist_inplace();
+            eq
+        } else {
+            img.clone()
+        };
         let mut current_scale: f32 = 1.0;
         loop {
             let cw = current.width();
@@ -164,8 +185,15 @@ impl Detector {
                     // Variance pre-filter: cheap O(1) rejection of windows that
                     // cannot contain a face. Caches rejects the vast majority of
                     // windows in real images and saves the full cascade evaluation.
+                    //
+                    // Mirrors OpenCV's `HaarEvaluator::setWindow` early-exit: the
+                    // variance is computed over the INNER normrect (1, 1, W-2, H-2)
+                    // — the same area the cascade's `varianceNormFactor` is built
+                    // from — so a window that passes the pre-filter is guaranteed
+                    // to have a positive normrect variance when the cascade
+                    // evaluates it (no wasted `variance_norm_factor == 0` rejects).
                     let passes = !use_variance || cache.passes_variance(
-                        &ii, x, y, win_w, win_h, self.config.variance_threshold);
+                        &ii, x + 1, y + 1, win_w - 2, win_h - 2, self.config.variance_threshold);
                     if passes {
                         if let Some(score) = self.cascade.classify(&ii, &ri, x, y, &mut cache) {
                             if score >= self.config.min_score {

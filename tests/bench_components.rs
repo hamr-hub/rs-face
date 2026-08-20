@@ -102,7 +102,7 @@ fn bench_classify_window() {
     let mut cache = EvalCache::new(c.features.len());
     println!("\n--- cascade::classify single window ---");
     time_it("classify(face region)", 500, || {
-        let _ = c.classify(&ii, Some(&ri), 200, 200, &mut cache);
+        let _ = c.classify(&ii, &ri, 200, 200, &mut cache);
     });
 }
 

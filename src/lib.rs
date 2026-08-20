@@ -22,8 +22,16 @@ pub mod output;
 pub mod gpu;
 pub mod pool;
 pub mod cnn;
+pub mod face_detector;
+pub mod yunet;
+pub mod mtcnn;
+pub mod hog_face;
 
 pub use detector::{Detection, Detector};
+pub use face_detector::FaceDetector;
 pub use haar::Cascade;
+pub use hog_face::{HogConfig, HogFaceDetector};
 pub use image::GrayImage;
+pub use mtcnn::{MtcnnConfig, MtcnnDetector};
 pub use pipeline::{Pipeline, PipelineConfig, PipelineStats};
+pub use yunet::{YunetConfig, YunetDetector};

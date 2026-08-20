@@ -3,6 +3,9 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# Platform server build artifacts (rebuild with `cargo build` inside platform/)
+platform/target/
+
 # ---- Build artifacts / generated files ----
 # Cascade converted from OpenCV XML via tools/convert_opencv_xml.py — re-run
 # the converter to regenerate. The XML itself is fetched from OpenCV's data
@@ -38,3 +41,14 @@ out/
 /fixtures/generated/
 data
 __pycache__/
+
+# ---- External skill (unrelated to rs-face) ----
+# noah-lever-drama-trans-download is a separate short-video download
+# tool, kept in the worktree but not part of the rs-face project.
+noah-lever-drama-trans-download/
+
+# ---- Platform test fixtures: large binaries only ----
+# Small reference images (lena/two-people/biden jpgs) are checked in;
+# the large mp4/HLS fixtures are not.
+platform/testdata/*.mp4
+platform/testdata/hls-loop/
