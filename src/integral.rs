@@ -28,7 +28,12 @@ impl IntegralImage {
     /// the GPU kernel). The buffer layout must be row-major with stride = W+1.
     pub fn from_owned(data: Vec<u32>, width: usize, height: usize) -> Self {
         let stride = width + 1;
-        Self { data, width, height, stride }
+        Self {
+            data,
+            width,
+            height,
+            stride,
+        }
     }
 
     /// Compute the integral image from a grayscale input.
@@ -48,14 +53,23 @@ impl IntegralImage {
                 data[dst_row * stride + x + 1] = acc + data[(dst_row - 1) * stride + x + 1];
             }
         }
-        Self { data, width: w, height: h, stride }
+        Self {
+            data,
+            width: w,
+            height: h,
+            stride,
+        }
     }
 
     #[inline]
-    pub fn width(&self) -> usize { self.width }
+    pub fn width(&self) -> usize {
+        self.width
+    }
 
     #[inline]
-    pub fn height(&self) -> usize { self.height }
+    pub fn height(&self) -> usize {
+        self.height
+    }
 
     /// Raw access to `(x, y)` accumulator (0 <= x <= W, 0 <= y <= H).
     #[inline]
@@ -67,10 +81,14 @@ impl IntegralImage {
     /// Returns 0 if the rectangle is empty.
     #[inline]
     pub fn rect_sum(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> u64 {
-        if x2 <= x1 || y2 <= y1 { return 0; }
+        if x2 <= x1 || y2 <= y1 {
+            return 0;
+        }
         let x2 = x2.min(self.width);
         let y2 = y2.min(self.height);
-        if x1 >= x2 || y1 >= y2 { return 0; }
+        if x1 >= x2 || y1 >= y2 {
+            return 0;
+        }
         let a = self.at(x1, y1) as u64;
         let b = self.at(x2, y1) as u64;
         let c = self.at(x1, y2) as u64;
@@ -89,8 +107,14 @@ impl IntegralImage {
     /// Delegates to [`RotatedIntegralImage::tilted_rect_sum`], which uses
     /// Lienhart's closed-form formula on the rotated integral image.
     #[inline]
-    pub fn tilted_rect_sum(&self, rotated: &RotatedIntegralImage,
-                           x1: usize, y1: usize, x2: usize, y2: usize) -> i64 {
+    pub fn tilted_rect_sum(
+        &self,
+        rotated: &RotatedIntegralImage,
+        x1: usize,
+        y1: usize,
+        x2: usize,
+        y2: usize,
+    ) -> i64 {
         rotated.tilted_rect_sum(x1, y1, x2, y2)
     }
 }
@@ -116,7 +140,12 @@ impl SquaredIntegralImage {
     /// Construct from a precomputed `(W+1) × (H+1)` u64 buffer.
     pub fn from_owned(data: Vec<u64>, width: usize, height: usize) -> Self {
         let stride = width + 1;
-        Self { data, width, height, stride }
+        Self {
+            data,
+            width,
+            height,
+            stride,
+        }
     }
 
     pub fn from_gray(img: &GrayImage) -> Self {
@@ -134,7 +163,12 @@ impl SquaredIntegralImage {
                 data[dst_row * stride + x + 1] = acc + data[(dst_row - 1) * stride + x + 1];
             }
         }
-        Self { data, width: w, height: h, stride }
+        Self {
+            data,
+            width: w,
+            height: h,
+            stride,
+        }
     }
 
     #[inline]
@@ -145,10 +179,14 @@ impl SquaredIntegralImage {
     /// Sum of squared pixel values in `[x1, x2) × [y1, y2)`.
     #[inline]
     pub fn rect_sum_sq(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> u64 {
-        if x2 <= x1 || y2 <= y1 { return 0; }
+        if x2 <= x1 || y2 <= y1 {
+            return 0;
+        }
         let x2 = x2.min(self.width);
         let y2 = y2.min(self.height);
-        if x1 >= x2 || y1 >= y2 { return 0; }
+        if x1 >= x2 || y1 >= y2 {
+            return 0;
+        }
         let a = self.at(x1, y1);
         let b = self.at(x2, y1);
         let c = self.at(x1, y2);
@@ -168,9 +206,15 @@ impl SquaredIntegralImage {
     /// 24×24 detection window, not the full 24×24 window. The detector
     /// passes the correct rect here.
     #[inline]
-    pub fn passes_variance(&self, ii: &IntegralImage,
-                           x: usize, y: usize, w: usize, h: usize,
-                           variance_threshold: u64) -> bool {
+    pub fn passes_variance(
+        &self,
+        ii: &IntegralImage,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        variance_threshold: u64,
+    ) -> bool {
         let sum = ii.rect_sum(x, y, x + w, y + h);
         let sum_sq = self.rect_sum_sq(x, y, x + w, y + h);
         let n = (w * h) as u64;
@@ -178,7 +222,9 @@ impl SquaredIntegralImage {
         sum_sq.checked_mul(n).map_or(false, |lhs| {
             let sum_sq_part = lhs;
             let sum_part = sum.checked_mul(sum).unwrap_or(u64::MAX);
-            let rhs = variance_threshold.checked_mul(n.checked_mul(n).unwrap_or(u64::MAX)).unwrap_or(u64::MAX);
+            let rhs = variance_threshold
+                .checked_mul(n.checked_mul(n).unwrap_or(u64::MAX))
+                .unwrap_or(u64::MAX);
             sum_sq_part >= sum_part + rhs
         })
     }
@@ -245,11 +291,18 @@ impl RotatedIntegralImage {
                 let s_x1y1 = s[(y - 1) * stride + (x - 1)];
                 let r_x1y1 = if x >= 2 && y >= 2 {
                     data[(y - 1) * stride + (x - 1)]
-                } else { 0 };
+                } else {
+                    0
+                };
                 data[y * stride + x] = r_x1y1 + s_xy - s_x1y - s_xy1 + s_x1y1;
             }
         }
-        Self { data, width: w, height: h, stride }
+        Self {
+            data,
+            width: w,
+            height: h,
+            stride,
+        }
     }
 
     /// Query the rotated integral at `(x, y)` (0 ≤ x ≤ width, 0 ≤ y ≤ height).
@@ -272,22 +325,24 @@ impl RotatedIntegralImage {
     /// the diamond into an upper and lower triangle; each triangle is the
     /// `R`-difference between two rectangles plus a single regular integral.
     pub fn tilted_rect_sum(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> i64 {
-        if x2 <= x1 || y2 <= y1 { return 0; }
+        if x2 <= x1 || y2 <= y1 {
+            return 0;
+        }
         // Clamp to image bounds (the rect_sum-equivalent does this; here we
         // operate on the R array which is sized to (W+1, H+1)).
         let x2 = x2.min(self.width);
         let y2 = y2.min(self.height);
-        if x1 >= x2 || y1 >= y2 { return 0; }
+        if x1 >= x2 || y1 >= y2 {
+            return 0;
+        }
         let xmid = (x1 + x2) / 2;
         let ymid = (y1 + y2) / 2;
         // Upper triangle: vertices (x1, ymid), (xmid, y1), (xmid, ymid+1).
         // Sum = R[xmid, y1] - R[x1, y1] - R[xmid, ymid] + R[x1, ymid]
-        let upper = self.at(xmid, y1) - self.at(x1, y1)
-                  - self.at(xmid, ymid) + self.at(x1, ymid);
+        let upper = self.at(xmid, y1) - self.at(x1, y1) - self.at(xmid, ymid) + self.at(x1, ymid);
         // Lower triangle: vertices (xmid, ymid), (x2, ymid), (xmid, y2).
         // Sum = R[x2, ymid] - R[xmid, ymid] - R[x2, y2] + R[xmid, y2]
-        let lower = self.at(x2, ymid) - self.at(xmid, ymid)
-                  - self.at(x2, y2) + self.at(xmid, y2);
+        let lower = self.at(x2, ymid) - self.at(xmid, ymid) - self.at(x2, y2) + self.at(xmid, y2);
         upper + lower
     }
 }
@@ -316,8 +371,10 @@ mod tests {
     fn rect_sum_known_pattern() {
         // 2x2: [[1,2],[3,4]]
         let mut img = GrayImage::new(2, 2);
-        img[(0, 0)] = 1; img[(1, 0)] = 2;
-        img[(0, 1)] = 3; img[(1, 1)] = 4;
+        img[(0, 0)] = 1;
+        img[(1, 0)] = 2;
+        img[(0, 1)] = 3;
+        img[(1, 1)] = 4;
         let ii = IntegralImage::from_gray(&img);
         assert_eq!(ii.rect_sum(0, 0, 2, 2), 10);
         assert_eq!(ii.rect_sum(1, 1, 2, 2), 4);
@@ -336,8 +393,10 @@ mod tests {
         // boundary cells (R(0,*), R(*,0)) are zero, and that tilted_rect_sum
         // of a non-empty rect returns a non-zero value on a non-trivial image.
         let mut img = GrayImage::new(2, 2);
-        img[(0, 0)] = 1; img[(1, 0)] = 2;
-        img[(0, 1)] = 3; img[(1, 1)] = 4;
+        img[(0, 0)] = 1;
+        img[(1, 0)] = 2;
+        img[(0, 1)] = 3;
+        img[(1, 1)] = 4;
         let ri = RotatedIntegralImage::from_gray(&img);
         assert_eq!(ri.at(0, 0), 0);
         assert_eq!(ri.at(1, 0), 0);

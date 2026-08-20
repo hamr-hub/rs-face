@@ -72,24 +72,61 @@ fn main() {
 
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--help" | "-h" => { print_help(); return; }
-            "--out" => { out = args.next().map(PathBuf::from); }
-            "--cascade" => { cascade_path = args.next().map(PathBuf::from); }
-            "--threads" => { threads = args.next().and_then(|s| s.parse().ok()); }
-            "--queue-depth" => { queue_depth = args.next().and_then(|s| s.parse().ok()); }
-            "--min-size" => { min_size = args.next().and_then(|s| s.parse().ok()); }
-            "--max-size" => { max_size = args.next().and_then(|s| s.parse().ok()); }
-            "--scale" => { scale = args.next().and_then(|s| s.parse().ok()); }
-            "--stride" => { stride = args.next().and_then(|s| s.parse().ok()); }
-            "--nms" => { nms = args.next().and_then(|s| s.parse().ok()); }
-            "--min-score" => { min_score = args.next().and_then(|s| s.parse().ok()); }
-            "--only-with-face" => { only_with_face = true; }
-            "--no-gpu" => { no_gpu = true; }
-            "--no-equalize" => { no_equalize = true; }
-            "--cnn" => { use_cnn = true; }
-            "--cnn-weights" => { cnn_weights_path = args.next().map(PathBuf::from); }
-            "--algo" => { algo = args.next().map(|s| s.to_ascii_lowercase()); }
-            other if !other.starts_with("--") && input.is_none() => { input = Some(other.to_string()); }
+            "--help" | "-h" => {
+                print_help();
+                return;
+            }
+            "--out" => {
+                out = args.next().map(PathBuf::from);
+            }
+            "--cascade" => {
+                cascade_path = args.next().map(PathBuf::from);
+            }
+            "--threads" => {
+                threads = args.next().and_then(|s| s.parse().ok());
+            }
+            "--queue-depth" => {
+                queue_depth = args.next().and_then(|s| s.parse().ok());
+            }
+            "--min-size" => {
+                min_size = args.next().and_then(|s| s.parse().ok());
+            }
+            "--max-size" => {
+                max_size = args.next().and_then(|s| s.parse().ok());
+            }
+            "--scale" => {
+                scale = args.next().and_then(|s| s.parse().ok());
+            }
+            "--stride" => {
+                stride = args.next().and_then(|s| s.parse().ok());
+            }
+            "--nms" => {
+                nms = args.next().and_then(|s| s.parse().ok());
+            }
+            "--min-score" => {
+                min_score = args.next().and_then(|s| s.parse().ok());
+            }
+            "--only-with-face" => {
+                only_with_face = true;
+            }
+            "--no-gpu" => {
+                no_gpu = true;
+            }
+            "--no-equalize" => {
+                no_equalize = true;
+            }
+            "--cnn" => {
+                use_cnn = true;
+            }
+            "--cnn-weights" => {
+                cnn_weights_path = args.next().map(PathBuf::from);
+            }
+            "--algo" => {
+                algo = args.next().map(|s| s.to_ascii_lowercase());
+            }
+            other if !other.starts_with("--") && input.is_none() => {
+                input = Some(other.to_string());
+            }
             other => {
                 eprintln!("unknown argument: {}", other);
                 print_help();
@@ -100,17 +137,29 @@ fn main() {
 
     let input = match input {
         Some(s) => s,
-        None => { print_help(); std::process::exit(2); }
+        None => {
+            print_help();
+            std::process::exit(2);
+        }
     };
     let out = match out {
         Some(p) => p,
-        None => { eprintln!("--out <DIR> is required"); std::process::exit(2); }
+        None => {
+            eprintln!("--out <DIR> is required");
+            std::process::exit(2);
+        }
     };
 
     // Resolve algorithm: --algo wins over --cnn for clarity.
     let algo_name = match algo {
         Some(s) => s,
-        None => if use_cnn { "cnn".to_string() } else { "haar".to_string() },
+        None => {
+            if use_cnn {
+                "cnn".to_string()
+            } else {
+                "haar".to_string()
+            }
+        }
     };
     println!("[rs-face] algorithm: {}", algo_name);
 
@@ -118,30 +167,56 @@ fn main() {
     let mut cascade = if let Some(p) = cascade_path {
         match Cascade::load(&p) {
             Ok(c) => c,
-            Err(e) => { eprintln!("failed to load cascade {}: {}", p.display(), e); std::process::exit(2); }
+            Err(e) => {
+                eprintln!("failed to load cascade {}: {}", p.display(), e);
+                std::process::exit(2);
+            }
         }
     } else {
         rsface::haar::params::demo_face_cascade()
     };
-    if let Some(b) = std::env::var("RS_FACE_CASCADE_BIAS").ok().and_then(|s| s.parse().ok()) {
+    if let Some(b) = std::env::var("RS_FACE_CASCADE_BIAS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         cascade.stage_bias = b;
         eprintln!("[rs-face] stage_bias overridden to {}", b);
     }
-    println!("[rs-face] cascade: {} stages, {} features, window {}x{}",
-             cascade.num_stages(), cascade.num_features(), cascade.window_w, cascade.window_h);
+    println!(
+        "[rs-face] cascade: {} stages, {} features, window {}x{}",
+        cascade.num_stages(),
+        cascade.num_features(),
+        cascade.window_w,
+        cascade.window_h
+    );
 
     // Debug: dump first 3 stages' weak features for sanity checking.
     if std::env::var("RS_FACE_DEBUG").is_ok() {
         for (i, st) in cascade.stages.iter().take(3).enumerate() {
-            eprintln!("[debug] stage {} threshold={:.4}, {} weak features", i, st.stage_threshold, st.weak_features.len());
+            eprintln!(
+                "[debug] stage {} threshold={:.4}, {} weak features",
+                i,
+                st.stage_threshold,
+                st.weak_features.len()
+            );
             for (j, w) in st.weak_features.iter().take(3).enumerate() {
-                eprintln!("[debug]   weak {}: feat_idx={} thr={:.4} sign={} left={:.4} right={:.4}",
-                    j, w.feature_index, w.threshold, w.sign, w.left_val, w.right_val);
+                eprintln!(
+                    "[debug]   weak {}: feat_idx={} thr={:.4} sign={} left={:.4} right={:.4}",
+                    j, w.feature_index, w.threshold, w.sign, w.left_val, w.right_val
+                );
                 let feat = &cascade.features[w.feature_index as usize];
-                eprintln!("[debug]     feature kind={:?} {}x{} rects={}",
-                    feat.kind, feat.width, feat.height, feat.rects.len());
+                eprintln!(
+                    "[debug]     feature kind={:?} {}x{} rects={}",
+                    feat.kind,
+                    feat.width,
+                    feat.height,
+                    feat.rects.len()
+                );
                 for r in &feat.rects {
-                    eprintln!("[debug]       rect {} {} {}x{} weight={}", r.x, r.y, r.w, r.h, r.weight);
+                    eprintln!(
+                        "[debug]       rect {} {} {}x{} weight={}",
+                        r.x, r.y, r.w, r.h, r.weight
+                    );
                 }
             }
         }
@@ -150,7 +225,10 @@ fn main() {
     // Open source.
     let mut src = match source::open(&input) {
         Ok(s) => s,
-        Err(e) => { eprintln!("failed to open source '{}': {}", input, e); std::process::exit(2); }
+        Err(e) => {
+            eprintln!("failed to open source '{}': {}", input, e);
+            std::process::exit(2);
+        }
     };
     if let Some(total) = src.total_hint() {
         println!("[rs-face] source: {} (≈{} frames)", input, total);
@@ -159,40 +237,64 @@ fn main() {
     }
 
     let mut cfg = PipelineConfig::default();
-    if let Some(t) = threads { cfg.threads = t; }
-    if let Some(q) = queue_depth { cfg.queue_depth = q; }
-    if let Some(v) = min_size { cfg.detector.min_size = v; }
-    if let Some(v) = max_size { cfg.detector.max_size = v; }
-    if let Some(v) = scale { cfg.detector.scale_factor = v; }
-    if let Some(v) = stride { cfg.detector.window_stride = v; }
-    if let Some(v) = nms { cfg.detector.nms_iou_threshold = v; }
-    if let Some(v) = min_score { cfg.min_score = v; }
+    if let Some(t) = threads {
+        cfg.threads = t;
+    }
+    if let Some(q) = queue_depth {
+        cfg.queue_depth = q;
+    }
+    if let Some(v) = min_size {
+        cfg.detector.min_size = v;
+    }
+    if let Some(v) = max_size {
+        cfg.detector.max_size = v;
+    }
+    if let Some(v) = scale {
+        cfg.detector.scale_factor = v;
+    }
+    if let Some(v) = stride {
+        cfg.detector.window_stride = v;
+    }
+    if let Some(v) = nms {
+        cfg.detector.nms_iou_threshold = v;
+    }
+    if let Some(v) = min_score {
+        cfg.min_score = v;
+    }
     cfg.only_with_face = only_with_face;
     cfg.detector.use_gpu = !no_gpu;
     cfg.detector.equalize_hist = !no_equalize;
 
-    println!("[rs-face] threads={}, queue_depth={}, detector={:?}", cfg.threads, cfg.queue_depth, cfg.detector);
+    println!(
+        "[rs-face] threads={}, queue_depth={}, detector={:?}",
+        cfg.threads, cfg.queue_depth, cfg.detector
+    );
 
     let t0 = Instant::now();
     let stats = match algo_name.as_str() {
-        "haar" => {
-            match Pipeline::run(&mut *src, cascade, &out, cfg) {
-                Ok(s) => s,
-                Err(e) => { eprintln!("pipeline error: {}", e); std::process::exit(1); }
+        "haar" => match Pipeline::run(&mut *src, cascade, &out, cfg) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("pipeline error: {}", e);
+                std::process::exit(1);
             }
-        }
-        "cnn" => {
-            match run_cnn_pipeline(&mut *src, &out, &cfg, cnn_weights_path.as_deref()) {
-                Ok(s) => s,
-                Err(e) => { eprintln!("cnn pipeline error: {}", e); std::process::exit(1); }
+        },
+        "cnn" => match run_cnn_pipeline(&mut *src, &out, &cfg, cnn_weights_path.as_deref()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("cnn pipeline error: {}", e);
+                std::process::exit(1);
             }
-        }
+        },
         "yunet" => {
             match run_algo_pipeline(&mut *src, &out, &cfg, |img: &GrayImage| {
                 YunetDetector::new(YunetConfig::default()).detect(img)
             }) {
                 Ok(s) => s,
-                Err(e) => { eprintln!("yunet pipeline error: {}", e); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("yunet pipeline error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         "mtcnn" => {
@@ -200,7 +302,10 @@ fn main() {
                 MtcnnDetector::new(MtcnnConfig::default()).detect(img)
             }) {
                 Ok(s) => s,
-                Err(e) => { eprintln!("mtcnn pipeline error: {}", e); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("mtcnn pipeline error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         "hog" => {
@@ -208,7 +313,10 @@ fn main() {
                 HogFaceDetector::new(HogConfig::default()).detect(img)
             }) {
                 Ok(s) => s,
-                Err(e) => { eprintln!("hog pipeline error: {}", e); std::process::exit(1); }
+                Err(e) => {
+                    eprintln!("hog pipeline error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         other => {
@@ -217,7 +325,11 @@ fn main() {
         }
     };
     let wall_ms = t0.elapsed().as_millis() as u64;
-    let fps = if wall_ms > 0 { stats.frames_processed as f32 * 1000.0 / wall_ms as f32 } else { 0.0 };
+    let fps = if wall_ms > 0 {
+        stats.frames_processed as f32 * 1000.0 / wall_ms as f32
+    } else {
+        0.0
+    };
     println!(
         "[rs-face] done: {} frames ({} with face), {} detections, wall {:.2}s, throughput {:.2} fps",
         stats.frames_processed, stats.frames_with_face, stats.total_detections,
@@ -237,8 +349,8 @@ fn run_cnn_pipeline(
     weights_path: Option<&std::path::Path>,
 ) -> std::io::Result<rsface::pipeline::PipelineStats> {
     use rsface::cnn::{CnnConfig, CnnDetector, CnnWeights};
-    use rsface::pipeline::PipelineStats;
     use rsface::output::PipelineSummary;
+    use rsface::pipeline::PipelineStats;
 
     std::fs::create_dir_all(out_dir)?;
     let cfg_cnn = CnnConfig {
@@ -266,7 +378,9 @@ fn run_cnn_pipeline(
 
     loop {
         let frame_opt = src.next_frame()?;
-        let Some(frame) = frame_opt else { break; };
+        let Some(frame) = frame_opt else {
+            break;
+        };
         let w = frame.gray.width();
         let h = frame.gray.height();
         // Convert u8 grayscale → f32 in [0, 1] for the CNN.
@@ -276,7 +390,9 @@ fn run_cnn_pipeline(
         }
         let dets = det.detect(&f32_img, w, h);
         let n = dets.len() as u64;
-        if n > 0 { frames_with_face += 1; }
+        if n > 0 {
+            frames_with_face += 1;
+        }
         total_detections += n;
 
         // Build RGB representation: prefer the source's RGB, fall back to
@@ -289,7 +405,9 @@ fn run_cnn_pipeline(
                 let row = rgb.row_mut(y);
                 let gray_row = frame.gray.row(y);
                 for (x, &v) in gray_row.iter().enumerate() {
-                    row[x*3] = v; row[x*3+1] = v; row[x*3+2] = v;
+                    row[x * 3] = v;
+                    row[x * 3 + 1] = v;
+                    row[x * 3 + 2] = v;
                 }
             }
             rgb
@@ -300,9 +418,16 @@ fn run_cnn_pipeline(
             image_file: String::new(),
             width: w,
             height: h,
-            detections: dets.iter().map(|d| rsface::Detection {
-                x: d.x, y: d.y, w: d.w, h: d.h, score: d.confidence,
-            }).collect(),
+            detections: dets
+                .iter()
+                .map(|d| rsface::Detection {
+                    x: d.x,
+                    y: d.y,
+                    w: d.w,
+                    h: d.h,
+                    score: d.confidence,
+                })
+                .collect(),
         };
         let fname = rsface::output::write_annotated_png(out_dir, &rec, &rgb)?;
         let mut rec = rec;
@@ -347,8 +472,8 @@ fn run_algo_pipeline<F>(
 where
     F: Fn(&GrayImage) -> Vec<rsface::Detection>,
 {
-    use rsface::pipeline::PipelineStats;
     use rsface::output::PipelineSummary;
+    use rsface::pipeline::PipelineStats;
 
     std::fs::create_dir_all(out_dir)?;
     let start = std::time::Instant::now();
@@ -358,12 +483,16 @@ where
 
     loop {
         let frame_opt = src.next_frame()?;
-        let Some(frame) = frame_opt else { break; };
+        let Some(frame) = frame_opt else {
+            break;
+        };
         let w = frame.gray.width();
         let h = frame.gray.height();
         let dets = detect_fn(&frame.gray);
         let n = dets.len() as u64;
-        if n > 0 { frames_with_face += 1; }
+        if n > 0 {
+            frames_with_face += 1;
+        }
         total_detections += n;
 
         let rgb = if let Some(arc) = &frame.rgb {
@@ -374,7 +503,9 @@ where
                 let row = rgb.row_mut(y);
                 let gray_row = frame.gray.row(y);
                 for (x, &v) in gray_row.iter().enumerate() {
-                    row[x*3] = v; row[x*3+1] = v; row[x*3+2] = v;
+                    row[x * 3] = v;
+                    row[x * 3 + 1] = v;
+                    row[x * 3 + 2] = v;
                 }
             }
             rgb

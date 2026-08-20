@@ -44,7 +44,9 @@ pub struct GpuIntegral {
 
 impl GpuIntegral {
     pub fn new() -> Option<Self> {
-        opencl::Context::new().ok().map(|c| Self { ctx: Arc::new(c) })
+        opencl::Context::new()
+            .ok()
+            .map(|c| Self { ctx: Arc::new(c) })
     }
 
     pub fn info(&self) -> GpuInfo {
@@ -64,16 +66,28 @@ impl GpuIntegral {
     /// Run the variance pre-filter on the GPU in parallel. One work-item per
     /// `(x, y)` window evaluates the variance test in O(1) using the integral
     /// images. Returns a `u8` mask (1 = passes, 0 = fails).
-    pub fn variance_prefilter(&self, img: &GrayImage,
-                              win_w: usize, win_h: usize, stride: usize,
-                              variance_threshold: u64) -> Vec<u8> {
-        unsafe { self.ctx.variance_prefilter(img, win_w, win_h, stride, variance_threshold) }
+    pub fn variance_prefilter(
+        &self,
+        img: &GrayImage,
+        win_w: usize,
+        win_h: usize,
+        stride: usize,
+        variance_threshold: u64,
+    ) -> Vec<u8> {
+        unsafe {
+            self.ctx
+                .variance_prefilter(img, win_w, win_h, stride, variance_threshold)
+        }
     }
 
     /// Run the FULL cascade on the GPU: each work-item is one window, with
     /// variance normalisation + per-stage eval + early reject.
-    pub fn detect_windows(&self, cascade: &Cascade, img: &GrayImage,
-                          max_detections: usize) -> Vec<GpuDetection> {
+    pub fn detect_windows(
+        &self,
+        cascade: &Cascade,
+        img: &GrayImage,
+        max_detections: usize,
+    ) -> Vec<GpuDetection> {
         unsafe { self.ctx.detect_windows(cascade, img, max_detections) }
     }
 }
@@ -112,19 +126,85 @@ mod opencl {
     const CL_TRUE: ClBool = 1;
 
     type FnGetPlatformIDs = unsafe extern "C" fn(ClUint, *mut ClPlatformId, *mut ClUint) -> ClInt;
-    type FnGetDeviceIDs = unsafe extern "C" fn(ClPlatformId, ClUint, ClUint, *mut ClDeviceId, *mut ClUint) -> ClInt;
-    type FnGetPlatformInfo = unsafe extern "C" fn(ClPlatformId, ClUint, ClSize, *mut std::ffi::c_void, *mut ClSize) -> ClInt;
-    type FnGetDeviceInfo = unsafe extern "C" fn(ClDeviceId, ClUint, ClSize, *mut std::ffi::c_void, *mut ClSize) -> ClInt;
-    type FnCreateContext = unsafe extern "C" fn(*const ClInt, ClUint, *const ClDeviceId, *mut std::ffi::c_void, *mut std::ffi::c_void, *mut ClInt) -> ClContext;
-    type FnCreateCommandQueue = unsafe extern "C" fn(ClContext, ClDeviceId, ClUint, *mut ClInt) -> ClCommandQueue;
-    type FnCreateBuffer = unsafe extern "C" fn(ClContext, ClUint, ClSize, *mut std::ffi::c_void, *mut ClInt) -> ClMem;
-    type FnCreateProgramWithSource = unsafe extern "C" fn(ClContext, ClUint, *const *const u8, *const ClSize, *mut ClInt) -> ClProgram;
-    type FnBuildProgram = unsafe extern "C" fn(ClProgram, ClUint, *const ClDeviceId, *const u8, *mut std::ffi::c_void, *mut std::ffi::c_void) -> ClInt;
+    type FnGetDeviceIDs =
+        unsafe extern "C" fn(ClPlatformId, ClUint, ClUint, *mut ClDeviceId, *mut ClUint) -> ClInt;
+    type FnGetPlatformInfo = unsafe extern "C" fn(
+        ClPlatformId,
+        ClUint,
+        ClSize,
+        *mut std::ffi::c_void,
+        *mut ClSize,
+    ) -> ClInt;
+    type FnGetDeviceInfo = unsafe extern "C" fn(
+        ClDeviceId,
+        ClUint,
+        ClSize,
+        *mut std::ffi::c_void,
+        *mut ClSize,
+    ) -> ClInt;
+    type FnCreateContext = unsafe extern "C" fn(
+        *const ClInt,
+        ClUint,
+        *const ClDeviceId,
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+        *mut ClInt,
+    ) -> ClContext;
+    type FnCreateCommandQueue =
+        unsafe extern "C" fn(ClContext, ClDeviceId, ClUint, *mut ClInt) -> ClCommandQueue;
+    type FnCreateBuffer =
+        unsafe extern "C" fn(ClContext, ClUint, ClSize, *mut std::ffi::c_void, *mut ClInt) -> ClMem;
+    type FnCreateProgramWithSource = unsafe extern "C" fn(
+        ClContext,
+        ClUint,
+        *const *const u8,
+        *const ClSize,
+        *mut ClInt,
+    ) -> ClProgram;
+    type FnBuildProgram = unsafe extern "C" fn(
+        ClProgram,
+        ClUint,
+        *const ClDeviceId,
+        *const u8,
+        *mut std::ffi::c_void,
+        *mut std::ffi::c_void,
+    ) -> ClInt;
     type FnCreateKernel = unsafe extern "C" fn(ClProgram, *const u8, *mut ClInt) -> ClKernel;
-    type FnSetKernelArg = unsafe extern "C" fn(ClKernel, ClUint, ClSize, *const std::ffi::c_void) -> ClInt;
-    type FnEnqueueNDRangeKernel = unsafe extern "C" fn(ClCommandQueue, ClKernel, ClUint, *const ClSize, *const ClSize, *const ClSize, ClUint, *const ClMem, *mut ClMem) -> ClInt;
-    type FnEnqueueReadBuffer = unsafe extern "C" fn(ClCommandQueue, ClMem, ClBool, ClSize, ClSize, *mut std::ffi::c_void, ClUint, *const ClMem, *mut ClMem) -> ClInt;
-    type FnEnqueueWriteBuffer = unsafe extern "C" fn(ClCommandQueue, ClMem, ClBool, ClSize, ClSize, *const std::ffi::c_void, ClUint, *const ClMem, *mut ClMem) -> ClInt;
+    type FnSetKernelArg =
+        unsafe extern "C" fn(ClKernel, ClUint, ClSize, *const std::ffi::c_void) -> ClInt;
+    type FnEnqueueNDRangeKernel = unsafe extern "C" fn(
+        ClCommandQueue,
+        ClKernel,
+        ClUint,
+        *const ClSize,
+        *const ClSize,
+        *const ClSize,
+        ClUint,
+        *const ClMem,
+        *mut ClMem,
+    ) -> ClInt;
+    type FnEnqueueReadBuffer = unsafe extern "C" fn(
+        ClCommandQueue,
+        ClMem,
+        ClBool,
+        ClSize,
+        ClSize,
+        *mut std::ffi::c_void,
+        ClUint,
+        *const ClMem,
+        *mut ClMem,
+    ) -> ClInt;
+    type FnEnqueueWriteBuffer = unsafe extern "C" fn(
+        ClCommandQueue,
+        ClMem,
+        ClBool,
+        ClSize,
+        ClSize,
+        *const std::ffi::c_void,
+        ClUint,
+        *const ClMem,
+        *mut ClMem,
+    ) -> ClInt;
     type FnReleaseMemObject = unsafe extern "C" fn(ClMem) -> ClInt;
     type FnReleaseKernel = unsafe extern "C" fn(ClKernel) -> ClInt;
     type FnReleaseProgram = unsafe extern "C" fn(ClProgram) -> ClInt;
@@ -160,24 +240,42 @@ mod opencl {
     static mut LIB_HANDLE: *mut std::ffi::c_void = ptr::null_mut();
 
     fn candidate_names() -> &'static [&'static str] {
-        &["libOpenCL.so.1", "libOpenCL.so", "/System/Library/Frameworks/OpenCL.framework/OpenCL"]
+        &[
+            "libOpenCL.so.1",
+            "libOpenCL.so",
+            "/System/Library/Frameworks/OpenCL.framework/OpenCL",
+        ]
     }
 
     unsafe fn c_dlsym(handle: *mut std::ffi::c_void, name: &str) -> Option<*mut std::ffi::c_void> {
         let c = CString::new(name).ok()?;
         let p = dlsym(handle, c.as_ptr());
-        if p.is_null() { None } else { Some(p) }
+        if p.is_null() {
+            None
+        } else {
+            Some(p)
+        }
     }
 
     fn load() -> Option<&'static Lib> {
         unsafe {
-            if LIB.is_some() { return LIB.as_ref(); }
-            for name in candidate_names() {
-                let c = match CString::new(*name) { Ok(s) => s, Err(_) => continue };
-                let h = dlopen(c.as_ptr(), RTLD_LAZY | RTLD_LOCAL);
-                if !h.is_null() { LIB_HANDLE = h; break; }
+            if LIB.is_some() {
+                return LIB.as_ref();
             }
-            if LIB_HANDLE.is_null() { return None; }
+            for name in candidate_names() {
+                let c = match CString::new(*name) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let h = dlopen(c.as_ptr(), RTLD_LAZY | RTLD_LOCAL);
+                if !h.is_null() {
+                    LIB_HANDLE = h;
+                    break;
+                }
+            }
+            if LIB_HANDLE.is_null() {
+                return None;
+            }
             macro_rules! sym {
                 ($name:literal, $ty:ty) => {{
                     let p = c_dlsym(LIB_HANDLE, $name)?;
@@ -192,7 +290,10 @@ mod opencl {
                 create_context: sym!("clCreateContext", FnCreateContext),
                 create_command_queue: sym!("clCreateCommandQueue", FnCreateCommandQueue),
                 create_buffer: sym!("clCreateBuffer", FnCreateBuffer),
-                create_program_with_source: sym!("clCreateProgramWithSource", FnCreateProgramWithSource),
+                create_program_with_source: sym!(
+                    "clCreateProgramWithSource",
+                    FnCreateProgramWithSource
+                ),
                 build_program: sym!("clBuildProgram", FnBuildProgram),
                 create_kernel: sym!("clCreateKernel", FnCreateKernel),
                 set_kernel_arg: sym!("clSetKernelArg", FnSetKernelArg),
@@ -427,7 +528,9 @@ mod opencl {
                 let mut platforms = [ptr::null_mut(); 4];
                 let mut n: ClUint = 0;
                 let err = (lib.get_platform_ids)(4, platforms.as_mut_ptr(), &mut n);
-                if err != CL_SUCCESS || n == 0 { return Err("no platforms"); }
+                if err != CL_SUCCESS || n == 0 {
+                    return Err("no platforms");
+                }
                 Self::from_platform(platforms[0], lib)
             }
         }
@@ -438,28 +541,80 @@ mod opencl {
             const CL_DEVICE_MAX_COMPUTE_UNITS: ClUint = 0x1002;
             let mut buf = [0u8; 256];
             let mut len: ClSize = buf.len();
-            let err = (lib.get_platform_info)(platform, CL_PLATFORM_NAME, buf.len(), buf.as_mut_ptr() as *mut _, &mut len);
-            let platform_name = if err == CL_SUCCESS { read_string(buf.as_mut_ptr() as *mut _, len) } else { String::from("unknown") };
+            let err = (lib.get_platform_info)(
+                platform,
+                CL_PLATFORM_NAME,
+                buf.len(),
+                buf.as_mut_ptr() as *mut _,
+                &mut len,
+            );
+            let platform_name = if err == CL_SUCCESS {
+                read_string(buf.as_mut_ptr() as *mut _, len)
+            } else {
+                String::from("unknown")
+            };
             let mut device: ClDeviceId = ptr::null_mut();
             let mut nd: ClUint = 0;
             let err = (lib.get_device_ids)(platform, CL_DEVICE_TYPE_GPU, 1, &mut device, &mut nd);
-            if err != CL_SUCCESS || nd == 0 { return Err("no GPU device"); }
+            if err != CL_SUCCESS || nd == 0 {
+                return Err("no GPU device");
+            }
             let mut buf2 = [0u8; 256];
             let mut len2: ClSize = buf2.len();
-            let err = (lib.get_device_info)(device, CL_DEVICE_NAME, buf2.len(), buf2.as_mut_ptr() as *mut _, &mut len2);
-            let device_name = if err == CL_SUCCESS { read_string(buf2.as_mut_ptr() as *mut _, len2) } else { String::from("unknown") };
+            let err = (lib.get_device_info)(
+                device,
+                CL_DEVICE_NAME,
+                buf2.len(),
+                buf2.as_mut_ptr() as *mut _,
+                &mut len2,
+            );
+            let device_name = if err == CL_SUCCESS {
+                read_string(buf2.as_mut_ptr() as *mut _, len2)
+            } else {
+                String::from("unknown")
+            };
             let mut units: ClUint = 0;
-            let _ = (lib.get_device_info)(device, CL_DEVICE_MAX_COMPUTE_UNITS, std::mem::size_of::<ClUint>(), &mut units as *mut _ as *mut _, ptr::null_mut());
+            let _ = (lib.get_device_info)(
+                device,
+                CL_DEVICE_MAX_COMPUTE_UNITS,
+                std::mem::size_of::<ClUint>(),
+                &mut units as *mut _ as *mut _,
+                ptr::null_mut(),
+            );
             let mut errc: ClInt = 0;
-            let ctx = (lib.create_context)(ptr::null(), 1, &device, ptr::null_mut(), ptr::null_mut(), &mut errc);
-            if errc != CL_SUCCESS { return Err("create_context failed"); }
+            let ctx = (lib.create_context)(
+                ptr::null(),
+                1,
+                &device,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut errc,
+            );
+            if errc != CL_SUCCESS {
+                return Err("create_context failed");
+            }
             let queue = (lib.create_command_queue)(ctx, device, 0, &mut errc);
-            if errc != CL_SUCCESS { (lib.release_context)(ctx); return Err("create_queue failed"); }
+            if errc != CL_SUCCESS {
+                (lib.release_context)(ctx);
+                return Err("create_queue failed");
+            }
             let src = CString::new(CL_KERNEL_SRC).unwrap();
             let src_len = CL_KERNEL_SRC.len() as ClSize;
-            let program = (lib.create_program_with_source)(ctx, 1, &src.as_ptr(), &src_len, &mut errc);
-            if errc != CL_SUCCESS { (lib.release_command_queue)(queue); (lib.release_context)(ctx); return Err("create_program failed"); }
-            let build_err = (lib.build_program)(program, 1, &device, ptr::null(), ptr::null_mut(), ptr::null_mut());
+            let program =
+                (lib.create_program_with_source)(ctx, 1, &src.as_ptr(), &src_len, &mut errc);
+            if errc != CL_SUCCESS {
+                (lib.release_command_queue)(queue);
+                (lib.release_context)(ctx);
+                return Err("create_program failed");
+            }
+            let build_err = (lib.build_program)(
+                program,
+                1,
+                &device,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
             if build_err != CL_SUCCESS {
                 (lib.release_program)(program);
                 (lib.release_command_queue)(queue);
@@ -470,17 +625,65 @@ mod opencl {
                 let cs = CString::new(name).unwrap();
                 let mut errk: ClInt = 0;
                 let k = (lib.create_kernel)(program, cs.as_ptr(), &mut errk);
-                if errk != CL_SUCCESS { Err("create_kernel failed") } else { Ok(k) }
+                if errk != CL_SUCCESS {
+                    Err("create_kernel failed")
+                } else {
+                    Ok(k)
+                }
             };
-            let kernel_integral = mk("integral_row").map_err(|_| { (lib.release_program)(program); (lib.release_command_queue)(queue); (lib.release_context)(ctx); "create_kernel integral_row" })?;
-            let kernel_dual_row = mk("integral_row_dual").map_err(|_| { (lib.release_kernel)(kernel_integral); (lib.release_program)(program); (lib.release_command_queue)(queue); (lib.release_context)(ctx); "create_kernel integral_row_dual" })?;
-            let kernel_dual_col = mk("integral_col_dual").map_err(|_| { (lib.release_kernel)(kernel_dual_row); (lib.release_kernel)(kernel_integral); (lib.release_program)(program); (lib.release_command_queue)(queue); (lib.release_context)(ctx); "create_kernel integral_col_dual" })?;
-            let kernel_variance = mk("variance_prefilter").map_err(|_| { (lib.release_kernel)(kernel_dual_col); (lib.release_kernel)(kernel_dual_row); (lib.release_kernel)(kernel_integral); (lib.release_program)(program); (lib.release_command_queue)(queue); (lib.release_context)(ctx); "create_kernel variance_prefilter" })?;
-            let kernel_detect_windows = mk("detect_windows").map_err(|_| { (lib.release_kernel)(kernel_variance); (lib.release_kernel)(kernel_dual_col); (lib.release_kernel)(kernel_dual_row); (lib.release_kernel)(kernel_integral); (lib.release_program)(program); (lib.release_command_queue)(queue); (lib.release_context)(ctx); "create_kernel detect_windows" })?;
+            let kernel_integral = mk("integral_row").map_err(|_| {
+                (lib.release_program)(program);
+                (lib.release_command_queue)(queue);
+                (lib.release_context)(ctx);
+                "create_kernel integral_row"
+            })?;
+            let kernel_dual_row = mk("integral_row_dual").map_err(|_| {
+                (lib.release_kernel)(kernel_integral);
+                (lib.release_program)(program);
+                (lib.release_command_queue)(queue);
+                (lib.release_context)(ctx);
+                "create_kernel integral_row_dual"
+            })?;
+            let kernel_dual_col = mk("integral_col_dual").map_err(|_| {
+                (lib.release_kernel)(kernel_dual_row);
+                (lib.release_kernel)(kernel_integral);
+                (lib.release_program)(program);
+                (lib.release_command_queue)(queue);
+                (lib.release_context)(ctx);
+                "create_kernel integral_col_dual"
+            })?;
+            let kernel_variance = mk("variance_prefilter").map_err(|_| {
+                (lib.release_kernel)(kernel_dual_col);
+                (lib.release_kernel)(kernel_dual_row);
+                (lib.release_kernel)(kernel_integral);
+                (lib.release_program)(program);
+                (lib.release_command_queue)(queue);
+                (lib.release_context)(ctx);
+                "create_kernel variance_prefilter"
+            })?;
+            let kernel_detect_windows = mk("detect_windows").map_err(|_| {
+                (lib.release_kernel)(kernel_variance);
+                (lib.release_kernel)(kernel_dual_col);
+                (lib.release_kernel)(kernel_dual_row);
+                (lib.release_kernel)(kernel_integral);
+                (lib.release_program)(program);
+                (lib.release_command_queue)(queue);
+                (lib.release_context)(ctx);
+                "create_kernel detect_windows"
+            })?;
             Ok(Context {
-                info: GpuInfo { platform_name, device_name, compute_units: units },
-                ctx, queue, program,
-                kernel_integral, kernel_dual_row, kernel_dual_col, kernel_variance,
+                info: GpuInfo {
+                    platform_name,
+                    device_name,
+                    compute_units: units,
+                },
+                ctx,
+                queue,
+                program,
+                kernel_integral,
+                kernel_dual_row,
+                kernel_dual_col,
+                kernel_variance,
                 kernel_detect_windows,
             })
         }
@@ -499,53 +702,153 @@ mod opencl {
             let out_sq_bytes = out_size * 8;
             unsafe {
                 let mut err: ClInt = 0;
-                let d_in = (lib.create_buffer)(self.ctx, 1 << 2, in_size, ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { return cpu_fallback_dual(img); }
-                let d_out = (lib.create_buffer)(self.ctx, 1 << 1, out_size, ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_in); return cpu_fallback_dual(img); }
-                let d_out_sq = (lib.create_buffer)(self.ctx, 1 << 1, out_sq_bytes, ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_in); (lib.release_mem_object)(d_out); return cpu_fallback_dual(img); }
-                let write_err = (lib.enqueue_write_buffer)(self.queue, d_in, CL_TRUE, 0, in_size, img.as_slice().as_ptr() as *const _, 0, ptr::null(), ptr::null_mut());
-                if write_err != CL_SUCCESS {
-                    (lib.release_mem_object)(d_in); (lib.release_mem_object)(d_out); (lib.release_mem_object)(d_out_sq);
+                let d_in =
+                    (lib.create_buffer)(self.ctx, 1 << 2, in_size, ptr::null_mut(), &mut err);
+                if err != CL_SUCCESS {
                     return cpu_fallback_dual(img);
                 }
-                (lib.set_kernel_arg)(self.kernel_dual_row, 0, std::mem::size_of::<ClMem>(), &d_in as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_dual_row, 1, std::mem::size_of::<ClMem>(), &d_out as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_dual_row, 2, std::mem::size_of::<ClMem>(), &d_out_sq as *const _ as *const _);
+                let d_out =
+                    (lib.create_buffer)(self.ctx, 1 << 1, out_size, ptr::null_mut(), &mut err);
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_in);
+                    return cpu_fallback_dual(img);
+                }
+                let d_out_sq =
+                    (lib.create_buffer)(self.ctx, 1 << 1, out_sq_bytes, ptr::null_mut(), &mut err);
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_in);
+                    (lib.release_mem_object)(d_out);
+                    return cpu_fallback_dual(img);
+                }
+                let write_err = (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_in,
+                    CL_TRUE,
+                    0,
+                    in_size,
+                    img.as_slice().as_ptr() as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                if write_err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_in);
+                    (lib.release_mem_object)(d_out);
+                    (lib.release_mem_object)(d_out_sq);
+                    return cpu_fallback_dual(img);
+                }
+                (lib.set_kernel_arg)(
+                    self.kernel_dual_row,
+                    0,
+                    std::mem::size_of::<ClMem>(),
+                    &d_in as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_dual_row,
+                    1,
+                    std::mem::size_of::<ClMem>(),
+                    &d_out as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_dual_row,
+                    2,
+                    std::mem::size_of::<ClMem>(),
+                    &d_out_sq as *const _ as *const _,
+                );
                 let ww = w as ClUint;
                 let hh = h as ClUint;
-                (lib.set_kernel_arg)(self.kernel_dual_row, 3, std::mem::size_of::<ClUint>(), &ww as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_dual_row, 4, std::mem::size_of::<ClUint>(), &hh as *const _ as *const _);
+                (lib.set_kernel_arg)(
+                    self.kernel_dual_row,
+                    3,
+                    std::mem::size_of::<ClUint>(),
+                    &ww as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_dual_row,
+                    4,
+                    std::mem::size_of::<ClUint>(),
+                    &hh as *const _ as *const _,
+                );
                 let global: ClSize = h as ClSize;
-                let err = (lib.enqueue_nd_range_kernel)(self.queue, self.kernel_dual_row, 1, ptr::null(), &global, ptr::null(), 0, ptr::null(), ptr::null_mut());
+                let err = (lib.enqueue_nd_range_kernel)(
+                    self.queue,
+                    self.kernel_dual_row,
+                    1,
+                    ptr::null(),
+                    &global,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
                 if err != CL_SUCCESS {
-                    (lib.release_mem_object)(d_in); (lib.release_mem_object)(d_out); (lib.release_mem_object)(d_out_sq);
+                    (lib.release_mem_object)(d_in);
+                    (lib.release_mem_object)(d_out);
+                    (lib.release_mem_object)(d_out_sq);
                     return cpu_fallback_dual(img);
                 }
                 let col_global: ClSize = (w + 1) as ClSize;
-                let err = (lib.enqueue_nd_range_kernel)(self.queue, self.kernel_dual_col, 1, ptr::null(), &col_global, ptr::null(), 0, ptr::null(), ptr::null_mut());
+                let err = (lib.enqueue_nd_range_kernel)(
+                    self.queue,
+                    self.kernel_dual_col,
+                    1,
+                    ptr::null(),
+                    &col_global,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
                 if err != CL_SUCCESS {
-                    (lib.release_mem_object)(d_in); (lib.release_mem_object)(d_out); (lib.release_mem_object)(d_out_sq);
+                    (lib.release_mem_object)(d_in);
+                    (lib.release_mem_object)(d_out);
+                    (lib.release_mem_object)(d_out_sq);
                     return cpu_fallback_dual(img);
                 }
                 let mut out = vec![0u32; (w + 1) * (h + 1)];
                 let mut out_sq = vec![0u64; (w + 1) * (h + 1)];
-                let r1 = (lib.enqueue_read_buffer)(self.queue, d_out, CL_TRUE, 0, out_size, out.as_mut_ptr() as *mut _, 0, ptr::null(), ptr::null_mut());
-                let r2 = (lib.enqueue_read_buffer)(self.queue, d_out_sq, CL_TRUE, 0, out_sq_bytes, out_sq.as_mut_ptr() as *mut _, 0, ptr::null(), ptr::null_mut());
+                let r1 = (lib.enqueue_read_buffer)(
+                    self.queue,
+                    d_out,
+                    CL_TRUE,
+                    0,
+                    out_size,
+                    out.as_mut_ptr() as *mut _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                let r2 = (lib.enqueue_read_buffer)(
+                    self.queue,
+                    d_out_sq,
+                    CL_TRUE,
+                    0,
+                    out_sq_bytes,
+                    out_sq.as_mut_ptr() as *mut _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
                 (lib.release_mem_object)(d_in);
                 (lib.release_mem_object)(d_out);
                 (lib.release_mem_object)(d_out_sq);
-                if r1 != CL_SUCCESS || r2 != CL_SUCCESS { return cpu_fallback_dual(img); }
+                if r1 != CL_SUCCESS || r2 != CL_SUCCESS {
+                    return cpu_fallback_dual(img);
+                }
                 (lib.finish)(self.queue);
                 (out, out_sq)
             }
         }
 
         /// Run the variance pre-filter on the GPU. Returns a u8 mask.
-        pub fn variance_prefilter(&self, img: &GrayImage,
-                                  win_w: usize, win_h: usize, stride: usize,
-                                  variance_threshold: u64) -> Vec<u8> {
+        pub fn variance_prefilter(
+            &self,
+            img: &GrayImage,
+            win_w: usize,
+            win_h: usize,
+            stride: usize,
+            variance_threshold: u64,
+        ) -> Vec<u8> {
             let lib = unsafe { load().unwrap() };
             let w = img.width();
             let h = img.height();
@@ -557,24 +860,70 @@ mod opencl {
             let out_sq_bytes = out_size * 8;
             unsafe {
                 let mut err: ClInt = 0;
-                let d_ii = (lib.create_buffer)(self.ctx, 1 << 2, out_size, ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { return vec![1u8; nx * ny]; }
-                let d_ii_sq = (lib.create_buffer)(self.ctx, 1 << 2, out_sq_bytes, ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_ii); return vec![1u8; nx * ny]; }
-                let d_mask = (lib.create_buffer)(self.ctx, 1 << 1, mask_bytes, ptr::null_mut(), &mut err);
+                let d_ii =
+                    (lib.create_buffer)(self.ctx, 1 << 2, out_size, ptr::null_mut(), &mut err);
                 if err != CL_SUCCESS {
-                    (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq);
                     return vec![1u8; nx * ny];
                 }
-                let w1 = (lib.enqueue_write_buffer)(self.queue, d_ii, CL_TRUE, 0, out_size, ii.as_ptr() as *const _, 0, ptr::null(), ptr::null_mut());
-                let w2 = (lib.enqueue_write_buffer)(self.queue, d_ii_sq, CL_TRUE, 0, out_sq_bytes, ii_sq.as_ptr() as *const _, 0, ptr::null(), ptr::null_mut());
+                let d_ii_sq =
+                    (lib.create_buffer)(self.ctx, 1 << 2, out_sq_bytes, ptr::null_mut(), &mut err);
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_ii);
+                    return vec![1u8; nx * ny];
+                }
+                let d_mask =
+                    (lib.create_buffer)(self.ctx, 1 << 1, mask_bytes, ptr::null_mut(), &mut err);
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    return vec![1u8; nx * ny];
+                }
+                let w1 = (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_ii,
+                    CL_TRUE,
+                    0,
+                    out_size,
+                    ii.as_ptr() as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                let w2 = (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_ii_sq,
+                    CL_TRUE,
+                    0,
+                    out_sq_bytes,
+                    ii_sq.as_ptr() as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
                 if w1 != CL_SUCCESS || w2 != CL_SUCCESS {
-                    (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_mask);
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    (lib.release_mem_object)(d_mask);
                     return vec![1u8; nx * ny];
                 }
-                (lib.set_kernel_arg)(self.kernel_variance, 0, std::mem::size_of::<ClMem>(), &d_ii as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_variance, 1, std::mem::size_of::<ClMem>(), &d_ii_sq as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_variance, 2, std::mem::size_of::<ClMem>(), &d_mask as *const _ as *const _);
+                (lib.set_kernel_arg)(
+                    self.kernel_variance,
+                    0,
+                    std::mem::size_of::<ClMem>(),
+                    &d_ii as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_variance,
+                    1,
+                    std::mem::size_of::<ClMem>(),
+                    &d_ii_sq as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_variance,
+                    2,
+                    std::mem::size_of::<ClMem>(),
+                    &d_mask as *const _ as *const _,
+                );
                 let ww = w as ClUint;
                 let hh = h as ClUint;
                 let wwin = win_w as ClUint;
@@ -582,31 +931,96 @@ mod opencl {
                 let st = stride as ClUint;
                 let vt = variance_threshold as ClUint;
                 let tp = (win_w * win_h) as ClUint;
-                (lib.set_kernel_arg)(self.kernel_variance, 3, std::mem::size_of::<ClUint>(), &ww as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_variance, 4, std::mem::size_of::<ClUint>(), &hh as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_variance, 5, std::mem::size_of::<ClUint>(), &wwin as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_variance, 6, std::mem::size_of::<ClUint>(), &hwin as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_variance, 7, std::mem::size_of::<ClUint>(), &st as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_variance, 8, std::mem::size_of::<ClUint>(), &vt as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_variance, 9, std::mem::size_of::<ClUint>(), &tp as *const _ as *const _);
+                (lib.set_kernel_arg)(
+                    self.kernel_variance,
+                    3,
+                    std::mem::size_of::<ClUint>(),
+                    &ww as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_variance,
+                    4,
+                    std::mem::size_of::<ClUint>(),
+                    &hh as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_variance,
+                    5,
+                    std::mem::size_of::<ClUint>(),
+                    &wwin as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_variance,
+                    6,
+                    std::mem::size_of::<ClUint>(),
+                    &hwin as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_variance,
+                    7,
+                    std::mem::size_of::<ClUint>(),
+                    &st as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_variance,
+                    8,
+                    std::mem::size_of::<ClUint>(),
+                    &vt as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_variance,
+                    9,
+                    std::mem::size_of::<ClUint>(),
+                    &tp as *const _ as *const _,
+                );
                 let global: [ClSize; 2] = [nx as ClSize, ny as ClSize];
-                let err = (lib.enqueue_nd_range_kernel)(self.queue, self.kernel_variance, 2, ptr::null(), global.as_ptr(), ptr::null(), 0, ptr::null(), ptr::null_mut());
+                let err = (lib.enqueue_nd_range_kernel)(
+                    self.queue,
+                    self.kernel_variance,
+                    2,
+                    ptr::null(),
+                    global.as_ptr(),
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
                 if err != CL_SUCCESS {
-                    (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_mask);
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    (lib.release_mem_object)(d_mask);
                     return vec![1u8; nx * ny];
                 }
                 let mut mask = vec![0u8; nx * ny];
-                let r = (lib.enqueue_read_buffer)(self.queue, d_mask, CL_TRUE, 0, mask_bytes, mask.as_mut_ptr() as *mut _, 0, ptr::null(), ptr::null_mut());
-                (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_mask);
-                if r != CL_SUCCESS { return vec![1u8; nx * ny]; }
+                let r = (lib.enqueue_read_buffer)(
+                    self.queue,
+                    d_mask,
+                    CL_TRUE,
+                    0,
+                    mask_bytes,
+                    mask.as_mut_ptr() as *mut _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                (lib.release_mem_object)(d_ii);
+                (lib.release_mem_object)(d_ii_sq);
+                (lib.release_mem_object)(d_mask);
+                if r != CL_SUCCESS {
+                    return vec![1u8; nx * ny];
+                }
                 (lib.finish)(self.queue);
                 mask
             }
         }
 
         /// Run the full cascade on GPU. Returns detected (x, y, score) triples.
-        pub fn detect_windows(&self, cascade: &super::Cascade, img: &GrayImage,
-                              max_detections: usize) -> Vec<super::GpuDetection> {
+        pub fn detect_windows(
+            &self,
+            cascade: &super::Cascade,
+            img: &GrayImage,
+            max_detections: usize,
+        ) -> Vec<super::GpuDetection> {
             // Serialize cascade into buffer formats.
             let mut feature_data: Vec<u8> = Vec::new();
             let mut feature_offsets: Vec<u32> = Vec::with_capacity(cascade.features.len() + 1);
@@ -636,7 +1050,8 @@ mod opencl {
                 }
                 stage_offsets.push(weak_data.len() as u32);
             }
-            let stage_thresholds: Vec<f32> = cascade.stages.iter().map(|s| s.stage_threshold).collect();
+            let stage_thresholds: Vec<f32> =
+                cascade.stages.iter().map(|s| s.stage_threshold).collect();
 
             let lib = unsafe { load().unwrap() };
             let w = img.width();
@@ -653,78 +1068,388 @@ mod opencl {
             let out_xy_bytes = (max_detections * 12) as ClSize;
             unsafe {
                 let mut err: ClInt = 0;
-                let d_ii = (lib.create_buffer)(self.ctx, 1 << 2, out_size, ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { return Vec::new(); }
-                let d_ii_sq = (lib.create_buffer)(self.ctx, 1 << 2, out_sq_bytes, ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_ii); return Vec::new(); }
-                let d_feat = (lib.create_buffer)(self.ctx, 1 << 2, feature_bytes.max(1), ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); return Vec::new(); }
-                let d_feat_off = (lib.create_buffer)(self.ctx, 1 << 2, feature_offset_bytes.max(1), ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_feat); return Vec::new(); }
-                let d_weak = (lib.create_buffer)(self.ctx, 1 << 2, weak_bytes.max(1), ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_feat); (lib.release_mem_object)(d_feat_off); return Vec::new(); }
-                let d_stage_off = (lib.create_buffer)(self.ctx, 1 << 2, stage_offset_bytes.max(1), ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_feat); (lib.release_mem_object)(d_feat_off); (lib.release_mem_object)(d_weak); return Vec::new(); }
-                let d_stage_thr = (lib.create_buffer)(self.ctx, 1 << 2, stage_threshold_bytes.max(1), ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_feat); (lib.release_mem_object)(d_feat_off); (lib.release_mem_object)(d_weak); (lib.release_mem_object)(d_stage_off); return Vec::new(); }
-                let d_count = (lib.create_buffer)(self.ctx, 1 << 2, out_count_bytes, ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_feat); (lib.release_mem_object)(d_feat_off); (lib.release_mem_object)(d_weak); (lib.release_mem_object)(d_stage_off); (lib.release_mem_object)(d_stage_thr); return Vec::new(); }
-                let d_out = (lib.create_buffer)(self.ctx, 1 << 2, out_xy_bytes, ptr::null_mut(), &mut err);
-                if err != CL_SUCCESS { (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_feat); (lib.release_mem_object)(d_feat_off); (lib.release_mem_object)(d_weak); (lib.release_mem_object)(d_stage_off); (lib.release_mem_object)(d_stage_thr); (lib.release_mem_object)(d_count); return Vec::new(); }
-                let zero: u32 = 0;
-                (lib.enqueue_write_buffer)(self.queue, d_count, CL_TRUE, 0, out_count_bytes, &zero as *const _ as *const _, 0, ptr::null(), ptr::null_mut());
-                let w1 = (lib.enqueue_write_buffer)(self.queue, d_ii, CL_TRUE, 0, out_size, ii.as_ptr() as *const _, 0, ptr::null(), ptr::null_mut());
-                let w2 = (lib.enqueue_write_buffer)(self.queue, d_ii_sq, CL_TRUE, 0, out_sq_bytes, ii_sq.as_ptr() as *const _, 0, ptr::null(), ptr::null_mut());
-                let wf = (lib.enqueue_write_buffer)(self.queue, d_feat, CL_TRUE, 0, feature_bytes, feature_data.as_ptr() as *const _, 0, ptr::null(), ptr::null_mut());
-                let wfo = (lib.enqueue_write_buffer)(self.queue, d_feat_off, CL_TRUE, 0, feature_offset_bytes, feature_offsets.as_ptr() as *const _, 0, ptr::null(), ptr::null_mut());
-                let ww = (lib.enqueue_write_buffer)(self.queue, d_weak, CL_TRUE, 0, weak_bytes, weak_data.as_ptr() as *const _, 0, ptr::null(), ptr::null_mut());
-                let wso = (lib.enqueue_write_buffer)(self.queue, d_stage_off, CL_TRUE, 0, stage_offset_bytes, stage_offsets.as_ptr() as *const _, 0, ptr::null(), ptr::null_mut());
-                let wst = (lib.enqueue_write_buffer)(self.queue, d_stage_thr, CL_TRUE, 0, stage_threshold_bytes, stage_thresholds.as_ptr() as *const _, 0, ptr::null(), ptr::null_mut());
-                if w1 != CL_SUCCESS || w2 != CL_SUCCESS || wf != CL_SUCCESS
-                    || wfo != CL_SUCCESS || ww != CL_SUCCESS || wso != CL_SUCCESS || wst != CL_SUCCESS {
-                    (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_feat); (lib.release_mem_object)(d_feat_off); (lib.release_mem_object)(d_weak); (lib.release_mem_object)(d_stage_off); (lib.release_mem_object)(d_stage_thr); (lib.release_mem_object)(d_count); (lib.release_mem_object)(d_out);
+                let d_ii =
+                    (lib.create_buffer)(self.ctx, 1 << 2, out_size, ptr::null_mut(), &mut err);
+                if err != CL_SUCCESS {
                     return Vec::new();
                 }
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 0, std::mem::size_of::<ClMem>(), &d_ii as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 1, std::mem::size_of::<ClMem>(), &d_ii_sq as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 2, std::mem::size_of::<ClMem>(), &d_feat as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 3, std::mem::size_of::<ClMem>(), &d_feat_off as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 4, std::mem::size_of::<ClMem>(), &d_weak as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 5, std::mem::size_of::<ClMem>(), &d_stage_off as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 6, std::mem::size_of::<ClMem>(), &d_stage_thr as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 7, std::mem::size_of::<ClMem>(), &d_count as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 8, std::mem::size_of::<ClMem>(), &d_out as *const _ as *const _);
+                let d_ii_sq =
+                    (lib.create_buffer)(self.ctx, 1 << 2, out_sq_bytes, ptr::null_mut(), &mut err);
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_ii);
+                    return Vec::new();
+                }
+                let d_feat = (lib.create_buffer)(
+                    self.ctx,
+                    1 << 2,
+                    feature_bytes.max(1),
+                    ptr::null_mut(),
+                    &mut err,
+                );
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    return Vec::new();
+                }
+                let d_feat_off = (lib.create_buffer)(
+                    self.ctx,
+                    1 << 2,
+                    feature_offset_bytes.max(1),
+                    ptr::null_mut(),
+                    &mut err,
+                );
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    (lib.release_mem_object)(d_feat);
+                    return Vec::new();
+                }
+                let d_weak = (lib.create_buffer)(
+                    self.ctx,
+                    1 << 2,
+                    weak_bytes.max(1),
+                    ptr::null_mut(),
+                    &mut err,
+                );
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    (lib.release_mem_object)(d_feat);
+                    (lib.release_mem_object)(d_feat_off);
+                    return Vec::new();
+                }
+                let d_stage_off = (lib.create_buffer)(
+                    self.ctx,
+                    1 << 2,
+                    stage_offset_bytes.max(1),
+                    ptr::null_mut(),
+                    &mut err,
+                );
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    (lib.release_mem_object)(d_feat);
+                    (lib.release_mem_object)(d_feat_off);
+                    (lib.release_mem_object)(d_weak);
+                    return Vec::new();
+                }
+                let d_stage_thr = (lib.create_buffer)(
+                    self.ctx,
+                    1 << 2,
+                    stage_threshold_bytes.max(1),
+                    ptr::null_mut(),
+                    &mut err,
+                );
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    (lib.release_mem_object)(d_feat);
+                    (lib.release_mem_object)(d_feat_off);
+                    (lib.release_mem_object)(d_weak);
+                    (lib.release_mem_object)(d_stage_off);
+                    return Vec::new();
+                }
+                let d_count = (lib.create_buffer)(
+                    self.ctx,
+                    1 << 2,
+                    out_count_bytes,
+                    ptr::null_mut(),
+                    &mut err,
+                );
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    (lib.release_mem_object)(d_feat);
+                    (lib.release_mem_object)(d_feat_off);
+                    (lib.release_mem_object)(d_weak);
+                    (lib.release_mem_object)(d_stage_off);
+                    (lib.release_mem_object)(d_stage_thr);
+                    return Vec::new();
+                }
+                let d_out =
+                    (lib.create_buffer)(self.ctx, 1 << 2, out_xy_bytes, ptr::null_mut(), &mut err);
+                if err != CL_SUCCESS {
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    (lib.release_mem_object)(d_feat);
+                    (lib.release_mem_object)(d_feat_off);
+                    (lib.release_mem_object)(d_weak);
+                    (lib.release_mem_object)(d_stage_off);
+                    (lib.release_mem_object)(d_stage_thr);
+                    (lib.release_mem_object)(d_count);
+                    return Vec::new();
+                }
+                let zero: u32 = 0;
+                (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_count,
+                    CL_TRUE,
+                    0,
+                    out_count_bytes,
+                    &zero as *const _ as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                let w1 = (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_ii,
+                    CL_TRUE,
+                    0,
+                    out_size,
+                    ii.as_ptr() as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                let w2 = (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_ii_sq,
+                    CL_TRUE,
+                    0,
+                    out_sq_bytes,
+                    ii_sq.as_ptr() as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                let wf = (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_feat,
+                    CL_TRUE,
+                    0,
+                    feature_bytes,
+                    feature_data.as_ptr() as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                let wfo = (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_feat_off,
+                    CL_TRUE,
+                    0,
+                    feature_offset_bytes,
+                    feature_offsets.as_ptr() as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                let ww = (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_weak,
+                    CL_TRUE,
+                    0,
+                    weak_bytes,
+                    weak_data.as_ptr() as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                let wso = (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_stage_off,
+                    CL_TRUE,
+                    0,
+                    stage_offset_bytes,
+                    stage_offsets.as_ptr() as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                let wst = (lib.enqueue_write_buffer)(
+                    self.queue,
+                    d_stage_thr,
+                    CL_TRUE,
+                    0,
+                    stage_threshold_bytes,
+                    stage_thresholds.as_ptr() as *const _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
+                if w1 != CL_SUCCESS
+                    || w2 != CL_SUCCESS
+                    || wf != CL_SUCCESS
+                    || wfo != CL_SUCCESS
+                    || ww != CL_SUCCESS
+                    || wso != CL_SUCCESS
+                    || wst != CL_SUCCESS
+                {
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    (lib.release_mem_object)(d_feat);
+                    (lib.release_mem_object)(d_feat_off);
+                    (lib.release_mem_object)(d_weak);
+                    (lib.release_mem_object)(d_stage_off);
+                    (lib.release_mem_object)(d_stage_thr);
+                    (lib.release_mem_object)(d_count);
+                    (lib.release_mem_object)(d_out);
+                    return Vec::new();
+                }
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    0,
+                    std::mem::size_of::<ClMem>(),
+                    &d_ii as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    1,
+                    std::mem::size_of::<ClMem>(),
+                    &d_ii_sq as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    2,
+                    std::mem::size_of::<ClMem>(),
+                    &d_feat as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    3,
+                    std::mem::size_of::<ClMem>(),
+                    &d_feat_off as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    4,
+                    std::mem::size_of::<ClMem>(),
+                    &d_weak as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    5,
+                    std::mem::size_of::<ClMem>(),
+                    &d_stage_off as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    6,
+                    std::mem::size_of::<ClMem>(),
+                    &d_stage_thr as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    7,
+                    std::mem::size_of::<ClMem>(),
+                    &d_count as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    8,
+                    std::mem::size_of::<ClMem>(),
+                    &d_out as *const _ as *const _,
+                );
                 let ww_arg = w as ClUint;
                 let hh_arg = h as ClUint;
                 let wwin_arg = cascade.window_w as ClUint;
                 let hwin_arg = cascade.window_h as ClUint;
                 let nstages = cascade.stages.len() as ClUint;
                 let maxdet = max_detections as ClUint;
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 9, std::mem::size_of::<ClUint>(), &ww_arg as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 10, std::mem::size_of::<ClUint>(), &hh_arg as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 11, std::mem::size_of::<ClUint>(), &wwin_arg as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 12, std::mem::size_of::<ClUint>(), &hwin_arg as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 13, std::mem::size_of::<ClUint>(), &nstages as *const _ as *const _);
-                (lib.set_kernel_arg)(self.kernel_detect_windows, 14, std::mem::size_of::<ClUint>(), &maxdet as *const _ as *const _);
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    9,
+                    std::mem::size_of::<ClUint>(),
+                    &ww_arg as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    10,
+                    std::mem::size_of::<ClUint>(),
+                    &hh_arg as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    11,
+                    std::mem::size_of::<ClUint>(),
+                    &wwin_arg as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    12,
+                    std::mem::size_of::<ClUint>(),
+                    &hwin_arg as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    13,
+                    std::mem::size_of::<ClUint>(),
+                    &nstages as *const _ as *const _,
+                );
+                (lib.set_kernel_arg)(
+                    self.kernel_detect_windows,
+                    14,
+                    std::mem::size_of::<ClUint>(),
+                    &maxdet as *const _ as *const _,
+                );
                 let global: [ClSize; 2] = [w as ClSize, h as ClSize];
-                let err = (lib.enqueue_nd_range_kernel)(self.queue, self.kernel_detect_windows, 2, ptr::null(), global.as_ptr(), ptr::null(), 0, ptr::null(), ptr::null_mut());
+                let err = (lib.enqueue_nd_range_kernel)(
+                    self.queue,
+                    self.kernel_detect_windows,
+                    2,
+                    ptr::null(),
+                    global.as_ptr(),
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
                 if err != CL_SUCCESS {
-                    (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_feat); (lib.release_mem_object)(d_feat_off); (lib.release_mem_object)(d_weak); (lib.release_mem_object)(d_stage_off); (lib.release_mem_object)(d_stage_thr); (lib.release_mem_object)(d_count); (lib.release_mem_object)(d_out);
+                    (lib.release_mem_object)(d_ii);
+                    (lib.release_mem_object)(d_ii_sq);
+                    (lib.release_mem_object)(d_feat);
+                    (lib.release_mem_object)(d_feat_off);
+                    (lib.release_mem_object)(d_weak);
+                    (lib.release_mem_object)(d_stage_off);
+                    (lib.release_mem_object)(d_stage_thr);
+                    (lib.release_mem_object)(d_count);
+                    (lib.release_mem_object)(d_out);
                     return Vec::new();
                 }
                 let mut count: u32 = 0;
-                (lib.enqueue_read_buffer)(self.queue, d_count, CL_TRUE, 0, out_count_bytes, &mut count as *mut _ as *mut _, 0, ptr::null(), ptr::null_mut());
+                (lib.enqueue_read_buffer)(
+                    self.queue,
+                    d_count,
+                    CL_TRUE,
+                    0,
+                    out_count_bytes,
+                    &mut count as *mut _ as *mut _,
+                    0,
+                    ptr::null(),
+                    ptr::null_mut(),
+                );
                 let actual = (count as usize).min(max_detections);
                 let mut xy = vec![0u32; actual * 3];
                 let read_bytes = (actual * 12) as ClSize;
                 if actual > 0 {
-                    (lib.enqueue_read_buffer)(self.queue, d_out, CL_TRUE, 0, read_bytes, xy.as_mut_ptr() as *mut _, 0, ptr::null(), ptr::null_mut());
+                    (lib.enqueue_read_buffer)(
+                        self.queue,
+                        d_out,
+                        CL_TRUE,
+                        0,
+                        read_bytes,
+                        xy.as_mut_ptr() as *mut _,
+                        0,
+                        ptr::null(),
+                        ptr::null_mut(),
+                    );
                 }
-                (lib.release_mem_object)(d_ii); (lib.release_mem_object)(d_ii_sq); (lib.release_mem_object)(d_feat); (lib.release_mem_object)(d_feat_off); (lib.release_mem_object)(d_weak); (lib.release_mem_object)(d_stage_off); (lib.release_mem_object)(d_stage_thr); (lib.release_mem_object)(d_count); (lib.release_mem_object)(d_out);
+                (lib.release_mem_object)(d_ii);
+                (lib.release_mem_object)(d_ii_sq);
+                (lib.release_mem_object)(d_feat);
+                (lib.release_mem_object)(d_feat_off);
+                (lib.release_mem_object)(d_weak);
+                (lib.release_mem_object)(d_stage_off);
+                (lib.release_mem_object)(d_stage_thr);
+                (lib.release_mem_object)(d_count);
+                (lib.release_mem_object)(d_out);
                 (lib.finish)(self.queue);
                 let mut out = Vec::with_capacity(actual);
                 for chunk in xy.chunks(3) {
-                    if chunk.len() < 3 { break; }
+                    if chunk.len() < 3 {
+                        break;
+                    }
                     let x = chunk[0];
                     let y = chunk[1];
                     let bits = chunk[2];

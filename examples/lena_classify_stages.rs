@@ -1,9 +1,9 @@
-use std::fs::File;
-use rsface::haar::Cascade;
-use rsface::image::GrayImage;
 use rsface::detector::DetectorConfig;
-use rsface::integral::IntegralImage;
+use rsface::haar::Cascade;
 use rsface::haar::EvalCache;
+use rsface::image::GrayImage;
+use rsface::integral::IntegralImage;
+use std::fs::File;
 
 fn main() {
     let mut f = File::open("/tmp/cascade_eval/lena.pgm").expect("open");
@@ -31,29 +31,66 @@ fn main() {
     let sum_in = ii.rect_sum(nx1, ny1, nx2, ny2);
     let sum_sq_in = cache.sum_sq_rect_sum(nx1, ny1, nx2, ny2);
     let variance_part = nw_area * (sum_sq_in as f64) - (sum_in as f64) * (sum_in as f64);
-    let variance_norm_factor: f32 = if variance_part > 0.0 { (1.0 / variance_part.sqrt()) as f32 } else { 0.0 };
-    println!("variance_norm_factor={:.8} (part={})", variance_norm_factor, variance_part);
+    let variance_norm_factor: f32 = if variance_part > 0.0 {
+        (1.0 / variance_part.sqrt()) as f32
+    } else {
+        0.0
+    };
+    println!(
+        "variance_norm_factor={:.8} (part={})",
+        variance_norm_factor, variance_part
+    );
 
     cache.clear();
     for (si, stage) in cascade.stages.iter().take(3).enumerate() {
         let mut stage_sum: f32 = 0.0;
-        println!("--- stage {} threshold={:.3} ({} features) ---", si, stage.stage_threshold, stage.weak_features.len());
+        println!(
+            "--- stage {} threshold={:.3} ({} features) ---",
+            si,
+            stage.stage_threshold,
+            stage.weak_features.len()
+        );
         for (wi, w) in stage.weak_features.iter().enumerate() {
             let raw = cache.get_or_eval(
                 w.feature_index as usize,
                 &cascade.features[w.feature_index as usize],
-                &ii, &ri, x, y, ww, wh, ii.width(), ii.height());
+                &ii,
+                &ri,
+                x,
+                y,
+                ww,
+                wh,
+                ii.width(),
+                ii.height(),
+            );
             let value = raw * variance_norm_factor;
-            let chosen = if value < w.threshold { w.left_val } else { w.right_val };
+            let chosen = if value < w.threshold {
+                w.left_val
+            } else {
+                w.right_val
+            };
             stage_sum += chosen;
             if si < 3 && wi < 5 {
-                println!("  s{} w{}: feat#{} raw={:.0} norm*={:.5} thr={:.4} -> val={:.3}",
-                    si, wi, w.feature_index, raw, value, w.threshold, chosen);
+                println!(
+                    "  s{} w{}: feat#{} raw={:.0} norm*={:.5} thr={:.4} -> val={:.3}",
+                    si, wi, w.feature_index, raw, value, w.threshold, chosen
+                );
             }
         }
-        println!("stage {} sum={:.3} thr={:.3} -> {}", si, stage_sum, stage.stage_threshold,
-            if stage_sum >= stage.stage_threshold { "PASS" } else { "FAIL" });
-        if stage_sum < stage.stage_threshold { return; }
+        println!(
+            "stage {} sum={:.3} thr={:.3} -> {}",
+            si,
+            stage_sum,
+            stage.stage_threshold,
+            if stage_sum >= stage.stage_threshold {
+                "PASS"
+            } else {
+                "FAIL"
+            }
+        );
+        if stage_sum < stage.stage_threshold {
+            return;
+        }
     }
     let _ = DetectorConfig::default();
 }

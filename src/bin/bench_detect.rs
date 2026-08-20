@@ -14,11 +14,15 @@ fn build_synthetic(w: usize, h: usize) -> GrayImage {
                 let dx = x as f32 - cx;
                 let dy = y as f32 - cy;
                 let d = (dx * dx + dy * dy).sqrt();
-                if d < r { v } else { 20 }
+                if d < r {
+                    v
+                } else {
+                    20
+                }
             };
             let v = spot(w as f32 * 0.25, h as f32 * 0.30, 60.0, 200)
-                  .max(spot(w as f32 * 0.70, h as f32 * 0.40, 90.0, 220))
-                  .max(spot(w as f32 * 0.50, h as f32 * 0.75, 45.0, 200));
+                .max(spot(w as f32 * 0.70, h as f32 * 0.40, 90.0, 220))
+                .max(spot(w as f32 * 0.50, h as f32 * 0.75, 45.0, 200));
             img[(x, y)] = v;
         }
     }

@@ -72,7 +72,7 @@ impl HaarFeature {
     /// scaling is applied.
     ///
     /// Evaluate the feature response as a raw weighted sum:
-///   `response = sum(weight_i * rect_sum_i)`
+    ///   `response = sum(weight_i * rect_sum_i)`
     ///
     /// Per OpenCV 4.x's `HaarEvaluator::OptFeature::calc` in
     /// `cascadedetect.hpp` the only normalization applied to the response is
@@ -82,17 +82,37 @@ impl HaarFeature {
     /// third-party ports keep it, but the current OpenCV reference omits it.
     /// See https://github.com/opencv/opencv/blob/4.x/modules/objdetect/src/cascadedetect.hpp
     /// for the canonical reference.
-    pub fn eval(&self, ii: &IntegralImage, ri: &RotatedIntegralImage,
-                x: usize, y: usize, win_w: usize, win_h: usize,
-                ii_w: usize, ii_h: usize) -> f32 {
+    pub fn eval(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        win_w: usize,
+        win_h: usize,
+        ii_w: usize,
+        ii_h: usize,
+    ) -> f32 {
         let mut total: f64 = 0.0;
         let is_custom = matches!(self.kind, FeatureKind::CustomRects);
-        let fw = if is_custom { 1usize } else { self.width.max(1) as usize };
-        let fh = if is_custom { 1usize } else { self.height.max(1) as usize };
+        let fw = if is_custom {
+            1usize
+        } else {
+            self.width.max(1) as usize
+        };
+        let fh = if is_custom {
+            1usize
+        } else {
+            self.height.max(1) as usize
+        };
         for r in &self.rects {
             let (rx, ry, rw, rh) = if is_custom {
-                (x + r.x as usize, y + r.y as usize,
-                 std::cmp::max(1, r.w as usize), std::cmp::max(1, r.h as usize))
+                (
+                    x + r.x as usize,
+                    y + r.y as usize,
+                    std::cmp::max(1, r.w as usize),
+                    std::cmp::max(1, r.h as usize),
+                )
             } else {
                 let rx = x + r.x as usize * win_w / fw;
                 let ry = y + r.y as usize * win_h / fh;
@@ -202,8 +222,10 @@ mod tests {
         // OpenCV did that, modern does not). See commit f6e4849 for the
         // matching history on this file.
         let mut img = GrayImage::new(2, 2);
-        img[(0, 0)] = 0; img[(1, 0)] = 0;
-        img[(0, 1)] = 255; img[(1, 1)] = 255;
+        img[(0, 0)] = 0;
+        img[(1, 0)] = 0;
+        img[(0, 1)] = 255;
+        img[(1, 1)] = 255;
         let ii = IntegralImage::from_gray(&img);
         let ri = RotatedIntegralImage::from_gray(&img);
         let feat = HaarFeature::vertical_edge(1, 2);
@@ -215,8 +237,10 @@ mod tests {
     fn horizontal_edge_response() {
         // Same setup: raw -510.
         let mut img = GrayImage::new(2, 2);
-        img[(0, 0)] = 0; img[(1, 0)] = 255;
-        img[(0, 1)] = 0; img[(1, 1)] = 255;
+        img[(0, 0)] = 0;
+        img[(1, 0)] = 255;
+        img[(0, 1)] = 0;
+        img[(1, 1)] = 255;
         let ii = IntegralImage::from_gray(&img);
         let ri = RotatedIntegralImage::from_gray(&img);
         let feat = HaarFeature::horizontal_edge(2, 1);

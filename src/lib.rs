@@ -12,20 +12,20 @@
 //! The library is `no_std`-friendly for the core types (integral, haar, detector)
 //! but uses `std` for I/O and threading.
 
+pub mod cnn;
+pub mod detector;
+pub mod face_detector;
+pub mod gpu;
+pub mod haar;
+pub mod hog_face;
 pub mod image;
 pub mod integral;
-pub mod haar;
-pub mod detector;
-pub mod pipeline;
-pub mod source;
-pub mod output;
-pub mod gpu;
-pub mod pool;
-pub mod cnn;
-pub mod face_detector;
-pub mod yunet;
 pub mod mtcnn;
-pub mod hog_face;
+pub mod output;
+pub mod pipeline;
+pub mod pool;
+pub mod source;
+pub mod yunet;
 
 pub use detector::{Detection, Detector};
 pub use face_detector::FaceDetector;

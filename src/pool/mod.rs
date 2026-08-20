@@ -131,7 +131,9 @@ pub fn release_detections(mut v: Vec<crate::detector::Detection>) {
     POOL.with(|p| {
         let mut p = p.borrow_mut();
         v.clear();
-        if v.capacity() > 4096 { return; } // don't grow unboundedly
+        if v.capacity() > 4096 {
+            return;
+        } // don't grow unboundedly
         p.detections.push(v);
     });
 }

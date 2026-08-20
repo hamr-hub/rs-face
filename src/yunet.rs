@@ -47,8 +47,8 @@ pub struct YunetDetector {
 struct YunetWeights {
     conv1_w: [Vec<f32>; 5],
     conv1_b: [Vec<f32>; 5],
-    cls_w:   [Vec<f32>; 5],
-    cls_b:   [Vec<f32>; 5],
+    cls_w: [Vec<f32>; 5],
+    cls_b: [Vec<f32>; 5],
 }
 
 impl YunetWeights {
@@ -57,26 +57,32 @@ impl YunetWeights {
         let mut read_into = |dst: &mut [f32]| {
             for slot in dst.iter_mut() {
                 if idx + 4 <= raw.len() {
-                    *slot = f32::from_le_bytes([raw[idx], raw[idx + 1], raw[idx + 2], raw[idx + 3]]);
+                    *slot =
+                        f32::from_le_bytes([raw[idx], raw[idx + 1], raw[idx + 2], raw[idx + 3]]);
                     idx += 4;
                 }
             }
         };
         let mut conv1_w: [Vec<f32>; 5] = Default::default();
         let mut conv1_b: [Vec<f32>; 5] = Default::default();
-        let mut cls_w:   [Vec<f32>; 5] = Default::default();
-        let mut cls_b:   [Vec<f32>; 5] = Default::default();
+        let mut cls_w: [Vec<f32>; 5] = Default::default();
+        let mut cls_b: [Vec<f32>; 5] = Default::default();
         for s in 0..5 {
             conv1_w[s] = vec![0.0; PER_SCALE_IN_CH * PER_SCALE_HID_CH];
             conv1_b[s] = vec![0.0; PER_SCALE_HID_CH];
-            cls_w[s]   = vec![0.0; PER_SCALE_HID_CH * ANCHOR_OUT_DIM];
-            cls_b[s]   = vec![0.0; ANCHOR_OUT_DIM];
+            cls_w[s] = vec![0.0; PER_SCALE_HID_CH * ANCHOR_OUT_DIM];
+            cls_b[s] = vec![0.0; ANCHOR_OUT_DIM];
             read_into(&mut conv1_w[s]);
             read_into(&mut conv1_b[s]);
             read_into(&mut cls_w[s]);
             read_into(&mut cls_b[s]);
         }
-        Self { conv1_w, conv1_b, cls_w, cls_b }
+        Self {
+            conv1_w,
+            conv1_b,
+            cls_w,
+            cls_b,
+        }
     }
 }
 
@@ -94,31 +100,41 @@ impl YunetDetector {
         let mut hidden = vec![0.0f32; n_pix * PER_SCALE_HID_CH];
         for p in 0..n_pix {
             for h_ch in 0..PER_SCALE_HID_CH {
-                hidden[p * PER_SCALE_HID_CH + h_ch] = tile[p] * self.weights.conv1_w[scale][h_ch]
-                    + self.weights.conv1_b[scale][h_ch];
+                hidden[p * PER_SCALE_HID_CH + h_ch] =
+                    tile[p] * self.weights.conv1_w[scale][h_ch] + self.weights.conv1_b[scale][h_ch];
             }
         }
-        for v in hidden.iter_mut() { if *v < 0.0 { *v = 0.0; } }
+        for v in hidden.iter_mut() {
+            if *v < 0.0 {
+                *v = 0.0;
+            }
+        }
         for p in 0..n_pix {
             for o in 0..ANCHOR_OUT_DIM {
                 let mut s = self.weights.cls_b[scale][o];
                 for h_ch in 0..PER_SCALE_HID_CH {
                     s += hidden[p * PER_SCALE_HID_CH + h_ch]
-                       * self.weights.cls_w[scale][h_ch * ANCHOR_OUT_DIM + o];
+                        * self.weights.cls_w[scale][h_ch * ANCHOR_OUT_DIM + o];
                 }
                 out[o] += s;
             }
         }
         let inv = 1.0 / n_pix as f32;
-        for v in out.iter_mut() { *v *= inv; }
+        for v in out.iter_mut() {
+            *v *= inv;
+        }
         out
     }
 
-    fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }
+    fn sigmoid(x: f32) -> f32 {
+        1.0 / (1.0 + (-x).exp())
+    }
 }
 
 impl FaceDetector for YunetDetector {
-    fn name(&self) -> &'static str { "yunet" }
+    fn name(&self) -> &'static str {
+        "yunet"
+    }
     fn description(&self) -> &'static str {
         "YuNet-style anchor-based: 5 scales (8/16/32/64/128), 15-dim per anchor, NMS."
     }
@@ -127,11 +143,15 @@ impl FaceDetector for YunetDetector {
         let w = img.width();
         let h = img.height();
         let mut raw: Vec<Detection> = Vec::new();
-        if w < 8 || h < 8 { return raw; }
+        if w < 8 || h < 8 {
+            return raw;
+        }
 
         for (s_idx, &stride) in self.config.strides.iter().enumerate() {
             let tile = self.config.tile_sizes[s_idx];
-            if tile == 0 || stride == 0 { continue; }
+            if tile == 0 || stride == 0 {
+                continue;
+            }
             let mut y = 0usize;
             while y + tile <= h {
                 let mut x = 0usize;

@@ -607,14 +607,16 @@ fn normalize_image_input(input: &str, work_dir: &Path) -> std::io::Result<String
         .unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         // PNG 假定 core 自己能读;只有当 core 失败时(例如 ffmpeg 出的 deflate PNG)
-        // 我们才在 run_job 里兜底转 PGM。这里只对明显不识别的格式调用 ffmpeg。
+        // 我们才在 run_job 里兜底转 PPM。这里只对明显不识别的格式调用 ffmpeg。
         "png" | "pgm" | "ppm" => Ok(input.to_string()),
         _ => {
-            let out = work_dir.join("input.pgm");
+            // 改用 PPM(P6)保留 RGB,而不是 PGM(灰度) — 旧实现 `-pix_fmt gray`
+            // 把彩色源转灰了,导致前端看到的标注/裁剪全是灰色。
+            let out = work_dir.join("input.ppm");
             let status = std::process::Command::new("ffmpeg")
                 .args([
                     "-y", "-i", input,
-                    "-pix_fmt", "gray",   // 直接出灰度
+                    "-pix_fmt", "rgb24",
                     "-f", "image2",       // 强制单图输出
                 ])
                 .arg(&out)

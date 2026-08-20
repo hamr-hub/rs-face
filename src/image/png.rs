@@ -14,7 +14,11 @@ fn crc32_update(mut crc: u32, buf: &[u8]) -> u32 {
     for &b in buf {
         crc ^= b as u32;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { 0xEDB88320 ^ (crc >> 1) } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                0xEDB88320 ^ (crc >> 1)
+            } else {
+                crc >> 1
+            };
         }
     }
     crc
@@ -108,12 +112,29 @@ pub fn write_png_rgb(w: &mut dyn Write, img: &RgbImage) -> std::io::Result<()> {
 }
 
 // ----- Decoder -----
-struct BitReader<'a> { data: &'a [u8], pos: usize }
+struct BitReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
 impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self { Self { data, pos: 0 } }
-    fn read_byte(&mut self) -> u8 { let b = self.data[self.pos]; self.pos += 1; b }
-    fn read_u16_le(&mut self) -> u16 { let l = self.read_byte() as u16; let h = self.read_byte() as u16; l | (h << 8) }
-    fn skip_to_byte_boundary(&mut self) { if self.pos % 8 != 0 { self.pos = (self.pos + 7) / 8 * 8; } }
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+    fn read_byte(&mut self) -> u8 {
+        let b = self.data[self.pos];
+        self.pos += 1;
+        b
+    }
+    fn read_u16_le(&mut self) -> u16 {
+        let l = self.read_byte() as u16;
+        let h = self.read_byte() as u16;
+        l | (h << 8)
+    }
+    fn skip_to_byte_boundary(&mut self) {
+        if self.pos % 8 != 0 {
+            self.pos = (self.pos + 7) / 8 * 8;
+        }
+    }
 }
 
 fn inflate_stored(r: &mut BitReader, out: &mut Vec<u8>) -> std::io::Result<()> {
@@ -122,15 +143,27 @@ fn inflate_stored(r: &mut BitReader, out: &mut Vec<u8>) -> std::io::Result<()> {
         let header = r.read_byte();
         let final_block = (header & 1) != 0;
         let btype = (header >> 1) & 3;
-        if btype != 0 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "only stored blocks supported")); }
+        if btype != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "only stored blocks supported",
+            ));
+        }
         let len = r.read_u16_le();
         let nlen = r.read_u16_le();
-        if len as u16 != !nlen { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad LEN/NLEN")); }
+        if len as u16 != !nlen {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bad LEN/NLEN",
+            ));
+        }
         let start = out.len();
         out.resize(start + len as usize, 0);
         out[start..start + len as usize].copy_from_slice(&r.data[r.pos..r.pos + len as usize]);
         r.pos += len as usize;
-        if final_block { return Ok(()); }
+        if final_block {
+            return Ok(());
+        }
     }
 }
 
@@ -139,16 +172,25 @@ fn unfilter_paeth(a: u8, b: u8, c: u8) -> u8 {
     let pa = (p - a as i32).abs();
     let pb = (p - b as i32).abs();
     let pc = (p - c as i32).abs();
-    if pa <= pb && pa <= pc { a }
-    else if pb <= pc { b }
-    else { c }
+    if pa <= pb && pa <= pc {
+        a
+    } else if pb <= pc {
+        b
+    } else {
+        c
+    }
 }
 
 pub fn read_png(r: &mut dyn Read) -> std::io::Result<(usize, usize, u8, Vec<u8>)> {
     // Returns (width, height, color_type, raw pixel bytes).
     let mut sig = [0u8; 8];
     r.read_exact(&mut sig)?;
-    if sig != PNG_SIG { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad PNG signature")); }
+    if sig != PNG_SIG {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bad PNG signature",
+        ));
+    }
     let mut ihdr: Option<(usize, usize, u8, u8)> = None;
     let mut compressed = Vec::new();
     loop {
@@ -167,7 +209,12 @@ pub fn read_png(r: &mut dyn Read) -> std::io::Result<(usize, usize, u8, Vec<u8>)
                 let h = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
                 let depth = data[8];
                 let ctype = data[9];
-                if depth != 8 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "only 8-bit supported")); }
+                if depth != 8 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "only 8-bit supported",
+                    ));
+                }
                 ihdr = Some((w, h, ctype, depth));
             }
             b"IDAT" => compressed.extend_from_slice(&data),
@@ -175,16 +222,31 @@ pub fn read_png(r: &mut dyn Read) -> std::io::Result<(usize, usize, u8, Vec<u8>)
             _ => {} // skip ancillary chunks
         }
     }
-    let (w, h, ctype, _depth) = ihdr.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing IHDR"))?;
+    let (w, h, ctype, _depth) =
+        ihdr.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing IHDR"))?;
 
     // Decompress zlib: skip 2-byte header, then DEFLATE.
-    if compressed.len() < 6 { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "compressed data too short")); }
+    if compressed.len() < 6 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "compressed data too short",
+        ));
+    }
     let zlib_body = &compressed[2..compressed.len() - 4];
     let mut raw = Vec::new();
     let mut br = BitReader::new(zlib_body);
     inflate_stored(&mut br, &mut raw)?;
 
-    let bpp = match ctype { 0 => 1, 2 => 3, _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported color type")) };
+    let bpp = match ctype {
+        0 => 1,
+        2 => 3,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported color type",
+            ))
+        }
+    };
     let stride = w * bpp;
     let mut pixels = vec![0u8; stride * h];
     // Scratch buffer for "previous row" when y == 0 (filled with zeros).
@@ -224,7 +286,12 @@ pub fn read_png(r: &mut dyn Read) -> std::io::Result<(usize, usize, u8, Vec<u8>)
                     line[x] = scan[x].wrapping_add(unfilter_paeth(left, up, ul));
                 }
             }
-            _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unknown filter")),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unknown filter",
+                ))
+            }
         }
         // After processing, copy `line` into `prev_buf` for the next iteration's Up/Average/Paeth.
         prev_buf.copy_from_slice(line);
@@ -247,23 +314,39 @@ pub fn decode_to_gray(r: &mut dyn Read) -> std::io::Result<GrayImage> {
             }
             Ok(GrayImage::from_vec(gray, w, h))
         }
-        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported color type for gray decode")),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported color type for gray decode",
+        )),
     }
 }
 
 pub fn decode_to_rgb(r: &mut dyn Read) -> std::io::Result<RgbImage> {
     let (w, h, ctype, pixels) = read_png(r)?;
     match ctype {
-        2 => Ok(RgbImage { data: pixels, width: w, height: h }),
+        2 => Ok(RgbImage {
+            data: pixels,
+            width: w,
+            height: h,
+        }),
         0 => {
             let mut rgb = vec![0u8; w * h * 3];
             for i in 0..(w * h) {
                 let v = pixels[i];
-                rgb[i * 3] = v; rgb[i * 3 + 1] = v; rgb[i * 3 + 2] = v;
+                rgb[i * 3] = v;
+                rgb[i * 3 + 1] = v;
+                rgb[i * 3 + 2] = v;
             }
-            Ok(RgbImage { data: rgb, width: w, height: h })
+            Ok(RgbImage {
+                data: rgb,
+                width: w,
+                height: h,
+            })
         }
-        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported color type for rgb decode")),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported color type for rgb decode",
+        )),
     }
 }
 
@@ -275,33 +358,45 @@ mod tests {
     #[test]
     fn png_gray_roundtrip() {
         let mut img = GrayImage::new(8, 6);
-        for y in 0..6 { for x in 0..8 { img[(x, y)] = ((x * 31 + y * 17) & 0xFF) as u8; } }
+        for y in 0..6 {
+            for x in 0..8 {
+                img[(x, y)] = ((x * 31 + y * 17) & 0xFF) as u8;
+            }
+        }
         let mut buf = Vec::new();
         write_png_gray(&mut buf, &img).unwrap();
         let back = decode_to_gray(&mut Cursor::new(&buf)).unwrap();
         assert_eq!(back.width(), 8);
         assert_eq!(back.height(), 6);
-        for y in 0..6 { for x in 0..8 { assert_eq!(img[(x, y)], back[(x, y)]); } }
+        for y in 0..6 {
+            for x in 0..8 {
+                assert_eq!(img[(x, y)], back[(x, y)]);
+            }
+        }
     }
 
     #[test]
     fn png_rgb_roundtrip() {
         let mut img = RgbImage::new(4, 4);
-        for y in 0..4 { for x in 0..4 {
-            let row = img.row_mut(y);
-            row[x*3] = (x*30) as u8;
-            row[x*3+1] = (y*60) as u8;
-            row[x*3+2] = 128;
-        }}
+        for y in 0..4 {
+            for x in 0..4 {
+                let row = img.row_mut(y);
+                row[x * 3] = (x * 30) as u8;
+                row[x * 3 + 1] = (y * 60) as u8;
+                row[x * 3 + 2] = 128;
+            }
+        }
         let mut buf = Vec::new();
         write_png_rgb(&mut buf, &img).unwrap();
         let back = decode_to_rgb(&mut Cursor::new(&buf)).unwrap();
         assert_eq!(back.width(), 4);
         assert_eq!(back.height(), 4);
-        for y in 0..4 { for x in 0..4 {
-            assert_eq!(img.row(y)[x*3], back.row(y)[x*3]);
-            assert_eq!(img.row(y)[x*3+1], back.row(y)[x*3+1]);
-            assert_eq!(img.row(y)[x*3+2], back.row(y)[x*3+2]);
-        }}
+        for y in 0..4 {
+            for x in 0..4 {
+                assert_eq!(img.row(y)[x * 3], back.row(y)[x * 3]);
+                assert_eq!(img.row(y)[x * 3 + 1], back.row(y)[x * 3 + 1]);
+                assert_eq!(img.row(y)[x * 3 + 2], back.row(y)[x * 3 + 2]);
+            }
+        }
     }
 }

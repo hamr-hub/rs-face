@@ -19,7 +19,11 @@ pub struct DetectionRecord {
 
 /// Write an RGB image with detection boxes drawn, as PNG, to the given path.
 /// Returns the file name (basename) on success.
-pub fn write_annotated_png(dir: &Path, rec: &DetectionRecord, rgb: &RgbImage) -> std::io::Result<String> {
+pub fn write_annotated_png(
+    dir: &Path,
+    rec: &DetectionRecord,
+    rgb: &RgbImage,
+) -> std::io::Result<String> {
     fs::create_dir_all(dir)?;
     let mut canvas = rgb.clone();
     for d in &rec.detections {
@@ -33,8 +37,14 @@ pub fn write_annotated_png(dir: &Path, rec: &DetectionRecord, rgb: &RgbImage) ->
 }
 
 /// Hand-rolled JSON writer — zero deps. Writes a manifest describing every detection.
-pub fn write_manifest(path: &Path, records: &[DetectionRecord], stats: &PipelineSummary) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+pub fn write_manifest(
+    path: &Path,
+    records: &[DetectionRecord],
+    stats: &PipelineSummary,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let mut f = BufWriter::new(File::create(path)?);
     writeln!(f, "{{")?;
     writeln!(f, "  \"version\": \"rs-face-0.1\",")?;
@@ -51,12 +61,21 @@ pub fn write_manifest(path: &Path, records: &[DetectionRecord], stats: &Pipeline
         write!(f, "\"frame_index\": {}, \"timestamp_ms\": {}, \"image\": \"{}\", \"width\": {}, \"height\": {}, \"detections\": [",
                r.frame_index, r.timestamp_ms, json_escape(&r.image_file), r.width, r.height)?;
         for (j, d) in r.detections.iter().enumerate() {
-            if j > 0 { write!(f, ", ")?; }
-            write!(f, "{{\"x\": {}, \"y\": {}, \"w\": {}, \"h\": {}, \"conf\": {:.4}}}",
-                   d.x, d.y, d.w, d.h, d.score)?;
+            if j > 0 {
+                write!(f, ", ")?;
+            }
+            write!(
+                f,
+                "{{\"x\": {}, \"y\": {}, \"w\": {}, \"h\": {}, \"conf\": {:.4}}}",
+                d.x, d.y, d.w, d.h, d.score
+            )?;
         }
         write!(f, "]")?;
-        if i + 1 < records.len() { writeln!(f, "}},")?; } else { writeln!(f, "}}")?; }
+        if i + 1 < records.len() {
+            writeln!(f, "}},")?;
+        } else {
+            writeln!(f, "}}")?;
+        }
     }
     writeln!(f, "  ]")?;
     writeln!(f, "}}")?;
@@ -79,13 +98,21 @@ fn json_escape(s: &str) -> String {
 }
 
 /// Lightweight buffered writer wrapper.
-struct BufWriter { inner: File }
+struct BufWriter {
+    inner: File,
+}
 impl BufWriter {
-    fn new(f: File) -> Self { Self { inner: f } }
+    fn new(f: File) -> Self {
+        Self { inner: f }
+    }
 }
 impl Write for BufWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.inner.write(buf) }
-    fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -98,7 +125,9 @@ pub struct PipelineSummary {
 
 impl PipelineSummary {
     pub fn fps(&self) -> f32 {
-        if self.elapsed_ms == 0 { return 0.0; }
+        if self.elapsed_ms == 0 {
+            return 0.0;
+        }
         self.frames_processed as f32 * 1000.0 / self.elapsed_ms as f32
     }
 }

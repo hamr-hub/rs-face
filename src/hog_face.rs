@@ -92,7 +92,11 @@ impl HogFaceDetector {
         } else {
             0.0
         };
-        Self { config, weights_f32, bias }
+        Self {
+            config,
+            weights_f32,
+            bias,
+        }
     }
 
     /// Compute the HOG feature vector for a window-sized patch.
@@ -128,9 +132,13 @@ impl HogFaceDetector {
                         let gxv = gx[y * w + x];
                         let gyv = gy[y * w + x];
                         let mag = (gxv * gxv + gyv * gyv).sqrt();
-                        if mag < 1e-3 { continue; }
+                        if mag < 1e-3 {
+                            continue;
+                        }
                         let mut ang = gyv.atan2(gxv) * 180.0 / std::f32::consts::PI;
-                        if ang < 0.0 { ang += 180.0; }
+                        if ang < 0.0 {
+                            ang += 180.0;
+                        }
                         let bin_f = ang * bin_scale;
                         let b0 = (bin_f as usize) % nbins;
                         let b1 = (b0 + 1) % nbins;
@@ -166,12 +174,16 @@ impl HogFaceDetector {
                 let mut total = 0.0f32;
                 for v in block_hist.iter_mut() {
                     *v *= scale;
-                    if *v > 0.2 { *v = 0.2; }
+                    if *v > 0.2 {
+                        *v = 0.2;
+                    }
                     total += *v * *v;
                 }
                 let norm2 = (total + 1e-3).sqrt();
                 let s2 = 1.0 / norm2;
-                for v in block_hist.iter() { feat.push(*v * s2); }
+                for v in block_hist.iter() {
+                    feat.push(*v * s2);
+                }
             }
         }
         feat
@@ -189,7 +201,9 @@ impl HogFaceDetector {
 }
 
 impl FaceDetector for HogFaceDetector {
-    fn name(&self) -> &'static str { "hog" }
+    fn name(&self) -> &'static str {
+        "hog"
+    }
     fn description(&self) -> &'static str {
         "HOG (8x8 cell, 2x2 block, 9 bins) + Linear SVM, 64x128 window, dense multi-scale."
     }
@@ -198,20 +212,32 @@ impl FaceDetector for HogFaceDetector {
         let w = img.width();
         let h = img.height();
         let mut raw: Vec<Detection> = Vec::new();
-        if w < self.config.window_w || h < self.config.window_h { return raw; }
+        if w < self.config.window_w || h < self.config.window_h {
+            return raw;
+        }
 
         let mut scale = 1.0f32;
         loop {
             let nw = ((w as f32) / scale).round() as usize;
             let nh = ((h as f32) / scale).round() as usize;
-            if nw < self.config.window_w || nh < self.config.window_h { break; }
+            if nw < self.config.window_w || nh < self.config.window_h {
+                break;
+            }
             let det_w = ((self.config.window_w as f32) * scale).round() as usize;
             let det_h = ((self.config.window_h as f32) * scale).round() as usize;
-            if det_w < self.config.min_size || det_h < self.config.min_size { break; }
-            if det_w > self.config.max_size || det_h > self.config.max_size { break; }
+            if det_w < self.config.min_size || det_h < self.config.min_size {
+                break;
+            }
+            if det_w > self.config.max_size || det_h > self.config.max_size {
+                break;
+            }
 
             // Resize image to (nw, nh) for this pyramid level.
-            let resized = if (nw, nh) == (w, h) { img.clone() } else { img.resize_bilinear(nw, nh) };
+            let resized = if (nw, nh) == (w, h) {
+                img.clone()
+            } else {
+                img.resize_bilinear(nw, nh)
+            };
             // Slide window.
             let mut y = 0;
             while y + self.config.window_h <= nh {
@@ -225,14 +251,21 @@ impl FaceDetector for HogFaceDetector {
                         patch[dst_off..dst_off + self.config.window_w]
                             .copy_from_slice(&src[x..x + self.config.window_w]);
                     }
-                    let feat = self.hog_features(&patch, self.config.window_w, self.config.window_h);
+                    let feat =
+                        self.hog_features(&patch, self.config.window_w, self.config.window_h);
                     let score = self.svm_score(&feat);
                     if score >= self.config.score_threshold {
                         let ox = (x as f32 * scale).round() as usize;
                         let oy = (y as f32 * scale).round() as usize;
                         let ox = ox.min(w.saturating_sub(det_w));
                         let oy = oy.min(h.saturating_sub(det_h));
-                        raw.push(Detection { x: ox, y: oy, w: det_w, h: det_h, score });
+                        raw.push(Detection {
+                            x: ox,
+                            y: oy,
+                            w: det_w,
+                            h: det_h,
+                            score,
+                        });
                     }
                     x += self.config.stride;
                 }
@@ -262,7 +295,10 @@ mod tests {
         let d = HogFaceDetector::new(HogConfig::default());
         let img = GrayImage::new(10, 10);
         let r = d.detect(&img);
-        assert!(r.is_empty(), "tiny image smaller than window should yield no detections");
+        assert!(
+            r.is_empty(),
+            "tiny image smaller than window should yield no detections"
+        );
     }
 
     #[test]

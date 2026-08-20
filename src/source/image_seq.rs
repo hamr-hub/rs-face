@@ -22,7 +22,11 @@ impl ImageSequenceSource {
         } else {
             // Treat as file pattern prefix (e.g. "./frames/frame_").
             let parent = p.parent().unwrap_or_else(|| Path::new("."));
-            let prefix = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let prefix = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
             (parent.to_path_buf(), Some(prefix))
         };
 
@@ -32,34 +36,58 @@ impl ImageSequenceSource {
             .filter(|p| p.is_file())
             .filter(|p| {
                 let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                let ext_ok = name.ends_with(".png") || name.ends_with(".jpg")
-                    || name.ends_with(".jpeg") || name.ends_with(".ppm") || name.ends_with(".pgm");
-                if !ext_ok { return false; }
+                let ext_ok = name.ends_with(".png")
+                    || name.ends_with(".jpg")
+                    || name.ends_with(".jpeg")
+                    || name.ends_with(".ppm")
+                    || name.ends_with(".pgm");
+                if !ext_ok {
+                    return false;
+                }
                 if let Some(pref) = &ext_filter {
-                    if !pref.is_empty() && !name.starts_with(pref.as_str()) { return false; }
+                    if !pref.is_empty() && !name.starts_with(pref.as_str()) {
+                        return false;
+                    }
                 }
                 true
             })
             .collect();
         files.sort();
 
-        Ok(Self { files, pos: 0, frame_index: 0, fps: 30 })
+        Ok(Self {
+            files,
+            pos: 0,
+            frame_index: 0,
+            fps: 30,
+        })
     }
 
-    pub fn with_fps(mut self, fps: u32) -> Self { self.fps = fps; self }
+    pub fn with_fps(mut self, fps: u32) -> Self {
+        self.fps = fps;
+        self
+    }
 }
 
 impl FrameSource for ImageSequenceSource {
     fn next_frame(&mut self) -> io::Result<Option<Frame>> {
-        if self.pos >= self.files.len() { return Ok(None); }
+        if self.pos >= self.files.len() {
+            return Ok(None);
+        }
         let path = self.files[self.pos].clone();
         self.pos += 1;
         let (gray, rgb) = read_image_file(&path)?;
         let ts = (self.frame_index * 1000 / self.fps as u64) as u64;
         let idx = self.frame_index;
         self.frame_index += 1;
-        Ok(Some(Frame { index: idx, timestamp_ms: ts, gray: Arc::new(gray), rgb: rgb.map(Arc::new) }))
+        Ok(Some(Frame {
+            index: idx,
+            timestamp_ms: ts,
+            gray: Arc::new(gray),
+            rgb: rgb.map(Arc::new),
+        }))
     }
 
-    fn total_hint(&self) -> Option<u64> { Some(self.files.len() as u64) }
+    fn total_hint(&self) -> Option<u64> {
+        Some(self.files.len() as u64)
+    }
 }

@@ -80,7 +80,9 @@ impl MtcnnDetector {
 }
 
 impl FaceDetector for MtcnnDetector {
-    fn name(&self) -> &'static str { "mtcnn" }
+    fn name(&self) -> &'static str {
+        "mtcnn"
+    }
     fn description(&self) -> &'static str {
         "MTCNN 3-stage cascade: P-Net(12x12) -> R-Net(24x24) -> O-Net(48x48) + NMS."
     }
@@ -89,7 +91,10 @@ impl FaceDetector for MtcnnDetector {
         // With dummy weights, the cascade never fires — return 0 detections
         // safely. The shape and forward pass are real (compile + smoke test),
         // so swapping in real weights later is purely a data change.
-        let _ = img; let _ = &self.pnet; let _ = &self.rnet; let _ = &self.onet;
+        let _ = img;
+        let _ = &self.pnet;
+        let _ = &self.rnet;
+        let _ = &self.onet;
         let _ = self.config.min_face_size;
         Vec::new()
     }
@@ -127,27 +132,39 @@ impl PnetWeights {
         let mut next = |dst: &mut [f32]| {
             for s in dst.iter_mut() {
                 if idx + 4 <= raw.len() {
-                    *s = f32::from_le_bytes([raw[idx], raw[idx+1], raw[idx+2], raw[idx+3]]);
+                    *s = f32::from_le_bytes([raw[idx], raw[idx + 1], raw[idx + 2], raw[idx + 3]]);
                     idx += 4;
                 }
             }
         };
         let mut w = PnetWeights {
-            conv1_w: vec![0.0; 36], conv1_b: vec![0.0; 4],
-            conv2_w: vec![0.0; 576], conv2_b: vec![0.0; 16],
-            cls_w: vec![0.0; 32], cls_b: vec![0.0; 2],
-            box_w: vec![0.0; 64], box_b: vec![0.0; 4],
+            conv1_w: vec![0.0; 36],
+            conv1_b: vec![0.0; 4],
+            conv2_w: vec![0.0; 576],
+            conv2_b: vec![0.0; 16],
+            cls_w: vec![0.0; 32],
+            cls_b: vec![0.0; 2],
+            box_w: vec![0.0; 64],
+            box_b: vec![0.0; 4],
         };
-        next(&mut w.conv1_w); next(&mut w.conv1_b);
-        next(&mut w.conv2_w); next(&mut w.conv2_b);
-        next(&mut w.cls_w);   next(&mut w.cls_b);
-        next(&mut w.box_w);   next(&mut w.box_b);
+        next(&mut w.conv1_w);
+        next(&mut w.conv1_b);
+        next(&mut w.conv2_w);
+        next(&mut w.conv2_b);
+        next(&mut w.cls_w);
+        next(&mut w.cls_b);
+        next(&mut w.box_w);
+        next(&mut w.box_b);
         w
     }
 }
 
 impl Pnet {
-    fn new() -> Self { Self { _weights: PnetWeights::from_bytes(include_bytes!("weights/mtcnn_pnet.bin")) } }
+    fn new() -> Self {
+        Self {
+            _weights: PnetWeights::from_bytes(include_bytes!("weights/mtcnn_pnet.bin")),
+        }
+    }
     /// Forward pass on a 12x12 patch. Returns (cls_conf, bbox_dx, bbox_dy, bbox_dw, bbox_dh).
     #[allow(dead_code)]
     fn forward(&self, _patch: &[f32]) -> (f32, f32, f32, f32, f32) {
@@ -168,12 +185,18 @@ struct Rnet {
 }
 struct RnetWeights {
     // 1 -> 8 (3x3), pool, 8 -> 16 (3x3), pool, 16 -> 32 (3x3), flatten, FC.
-    conv1_w: Vec<f32>, conv1_b: Vec<f32>,
-    conv2_w: Vec<f32>, conv2_b: Vec<f32>,
-    conv3_w: Vec<f32>, conv3_b: Vec<f32>,
-    fc_w:   Vec<f32>,   fc_b:   Vec<f32>,
-    cls_w:  Vec<f32>,   cls_b:  Vec<f32>,
-    box_w:  Vec<f32>,   box_b:  Vec<f32>,
+    conv1_w: Vec<f32>,
+    conv1_b: Vec<f32>,
+    conv2_w: Vec<f32>,
+    conv2_b: Vec<f32>,
+    conv3_w: Vec<f32>,
+    conv3_b: Vec<f32>,
+    fc_w: Vec<f32>,
+    fc_b: Vec<f32>,
+    cls_w: Vec<f32>,
+    cls_b: Vec<f32>,
+    box_w: Vec<f32>,
+    box_b: Vec<f32>,
 }
 
 impl RnetWeights {
@@ -182,31 +205,47 @@ impl RnetWeights {
         let mut next = |dst: &mut [f32]| {
             for s in dst.iter_mut() {
                 if idx + 4 <= raw.len() {
-                    *s = f32::from_le_bytes([raw[idx], raw[idx+1], raw[idx+2], raw[idx+3]]);
+                    *s = f32::from_le_bytes([raw[idx], raw[idx + 1], raw[idx + 2], raw[idx + 3]]);
                     idx += 4;
                 }
             }
         };
         let mut w = RnetWeights {
-            conv1_w: vec![0.0; 72],  conv1_b: vec![0.0; 8],
-            conv2_w: vec![0.0; 1152], conv2_b: vec![0.0; 16],
-            conv3_w: vec![0.0; 4608], conv3_b: vec![0.0; 32],
-            fc_w:    vec![0.0; 128],  fc_b:    vec![0.0; 16],
-            cls_w:   vec![0.0; 32],   cls_b:   vec![0.0; 2],
-            box_w:   vec![0.0; 64],   box_b:   vec![0.0; 4],
+            conv1_w: vec![0.0; 72],
+            conv1_b: vec![0.0; 8],
+            conv2_w: vec![0.0; 1152],
+            conv2_b: vec![0.0; 16],
+            conv3_w: vec![0.0; 4608],
+            conv3_b: vec![0.0; 32],
+            fc_w: vec![0.0; 128],
+            fc_b: vec![0.0; 16],
+            cls_w: vec![0.0; 32],
+            cls_b: vec![0.0; 2],
+            box_w: vec![0.0; 64],
+            box_b: vec![0.0; 4],
         };
-        next(&mut w.conv1_w); next(&mut w.conv1_b);
-        next(&mut w.conv2_w); next(&mut w.conv2_b);
-        next(&mut w.conv3_w); next(&mut w.conv3_b);
-        next(&mut w.fc_w);    next(&mut w.fc_b);
-        next(&mut w.cls_w);   next(&mut w.cls_b);
-        next(&mut w.box_w);   next(&mut w.box_b);
+        next(&mut w.conv1_w);
+        next(&mut w.conv1_b);
+        next(&mut w.conv2_w);
+        next(&mut w.conv2_b);
+        next(&mut w.conv3_w);
+        next(&mut w.conv3_b);
+        next(&mut w.fc_w);
+        next(&mut w.fc_b);
+        next(&mut w.cls_w);
+        next(&mut w.cls_b);
+        next(&mut w.box_w);
+        next(&mut w.box_b);
         w
     }
 }
 
 impl Rnet {
-    fn new() -> Self { Self { _weights: RnetWeights::from_bytes(include_bytes!("weights/mtcnn_rnet.bin")) } }
+    fn new() -> Self {
+        Self {
+            _weights: RnetWeights::from_bytes(include_bytes!("weights/mtcnn_rnet.bin")),
+        }
+    }
     #[allow(dead_code)]
     fn forward(&self, _patch24: &[f32]) -> (f32, f32, f32, f32, f32) {
         (0.0, 0.0, 0.0, 0.0, 0.0)
@@ -221,13 +260,20 @@ struct Onet {
     _weights: OnetWeights,
 }
 struct OnetWeights {
-    conv1_w: Vec<f32>, conv1_b: Vec<f32>,
-    conv2_w: Vec<f32>, conv2_b: Vec<f32>,
-    conv3_w: Vec<f32>, conv3_b: Vec<f32>,
-    conv4_w: Vec<f32>, conv4_b: Vec<f32>,
-    fc_w:   Vec<f32>,   fc_b:   Vec<f32>,
-    cls_w:  Vec<f32>,   cls_b:  Vec<f32>,
-    box_w:  Vec<f32>,   box_b:  Vec<f32>,
+    conv1_w: Vec<f32>,
+    conv1_b: Vec<f32>,
+    conv2_w: Vec<f32>,
+    conv2_b: Vec<f32>,
+    conv3_w: Vec<f32>,
+    conv3_b: Vec<f32>,
+    conv4_w: Vec<f32>,
+    conv4_b: Vec<f32>,
+    fc_w: Vec<f32>,
+    fc_b: Vec<f32>,
+    cls_w: Vec<f32>,
+    cls_b: Vec<f32>,
+    box_w: Vec<f32>,
+    box_b: Vec<f32>,
 }
 
 impl OnetWeights {
@@ -236,33 +282,51 @@ impl OnetWeights {
         let mut next = |dst: &mut [f32]| {
             for s in dst.iter_mut() {
                 if idx + 4 <= raw.len() {
-                    *s = f32::from_le_bytes([raw[idx], raw[idx+1], raw[idx+2], raw[idx+3]]);
+                    *s = f32::from_le_bytes([raw[idx], raw[idx + 1], raw[idx + 2], raw[idx + 3]]);
                     idx += 4;
                 }
             }
         };
         let mut w = OnetWeights {
-            conv1_w: vec![0.0; 72],   conv1_b: vec![0.0; 8],
-            conv2_w: vec![0.0; 1152], conv2_b: vec![0.0; 16],
-            conv3_w: vec![0.0; 4608], conv3_b: vec![0.0; 32],
-            conv4_w: vec![0.0; 9216], conv4_b: vec![0.0; 64],
-            fc_w:    vec![0.0; 256],  fc_b:    vec![0.0; 64],
-            cls_w:   vec![0.0; 128],  cls_b:   vec![0.0; 2],
-            box_w:   vec![0.0; 256],  box_b:   vec![0.0; 4],
+            conv1_w: vec![0.0; 72],
+            conv1_b: vec![0.0; 8],
+            conv2_w: vec![0.0; 1152],
+            conv2_b: vec![0.0; 16],
+            conv3_w: vec![0.0; 4608],
+            conv3_b: vec![0.0; 32],
+            conv4_w: vec![0.0; 9216],
+            conv4_b: vec![0.0; 64],
+            fc_w: vec![0.0; 256],
+            fc_b: vec![0.0; 64],
+            cls_w: vec![0.0; 128],
+            cls_b: vec![0.0; 2],
+            box_w: vec![0.0; 256],
+            box_b: vec![0.0; 4],
         };
-        next(&mut w.conv1_w); next(&mut w.conv1_b);
-        next(&mut w.conv2_w); next(&mut w.conv2_b);
-        next(&mut w.conv3_w); next(&mut w.conv3_b);
-        next(&mut w.conv4_w); next(&mut w.conv4_b);
-        next(&mut w.fc_w);    next(&mut w.fc_b);
-        next(&mut w.cls_w);   next(&mut w.cls_b);
-        next(&mut w.box_w);   next(&mut w.box_b);
+        next(&mut w.conv1_w);
+        next(&mut w.conv1_b);
+        next(&mut w.conv2_w);
+        next(&mut w.conv2_b);
+        next(&mut w.conv3_w);
+        next(&mut w.conv3_b);
+        next(&mut w.conv4_w);
+        next(&mut w.conv4_b);
+        next(&mut w.fc_w);
+        next(&mut w.fc_b);
+        next(&mut w.cls_w);
+        next(&mut w.cls_b);
+        next(&mut w.box_w);
+        next(&mut w.box_b);
         w
     }
 }
 
 impl Onet {
-    fn new() -> Self { Self { _weights: OnetWeights::from_bytes(include_bytes!("weights/mtcnn_onet.bin")) } }
+    fn new() -> Self {
+        Self {
+            _weights: OnetWeights::from_bytes(include_bytes!("weights/mtcnn_onet.bin")),
+        }
+    }
     #[allow(dead_code)]
     fn forward(&self, _patch48: &[f32]) -> (f32, f32, f32, f32, f32) {
         (0.0, 0.0, 0.0, 0.0, 0.0)

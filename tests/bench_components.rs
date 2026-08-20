@@ -17,11 +17,15 @@ fn build_synthetic(w: usize, h: usize) -> GrayImage {
                 let dx = x as f32 - cx;
                 let dy = y as f32 - cy;
                 let d = (dx * dx + dy * dy).sqrt();
-                if d < r { v } else { 20 }
+                if d < r {
+                    v
+                } else {
+                    20
+                }
             };
             let v = spot(w as f32 * 0.25, h as f32 * 0.30, 60.0, 200)
-                  .max(spot(w as f32 * 0.70, h as f32 * 0.40, 90.0, 220))
-                  .max(spot(w as f32 * 0.50, h as f32 * 0.75, 45.0, 200));
+                .max(spot(w as f32 * 0.70, h as f32 * 0.40, 90.0, 220))
+                .max(spot(w as f32 * 0.50, h as f32 * 0.75, 45.0, 200));
             img[(x, y)] = v;
         }
     }
@@ -30,9 +34,13 @@ fn build_synthetic(w: usize, h: usize) -> GrayImage {
 
 fn time_it<F: FnMut()>(label: &str, iters: usize, mut f: F) -> f64 {
     // Warm up.
-    for _ in 0..3 { f(); }
+    for _ in 0..3 {
+        f();
+    }
     let t0 = Instant::now();
-    for _ in 0..iters { f(); }
+    for _ in 0..iters {
+        f();
+    }
     let dt = t0.elapsed();
     let per = dt.as_secs_f64() / iters as f64;
     println!("{label:35} iters={iters:4} per={:8.3} ms", per * 1e3);
@@ -78,8 +86,8 @@ fn bench_nms() {
 }
 
 fn bench_nms_inner() {
-    use rsface::detector::DetectorConfig;
     use rsface::detector::Detector;
+    use rsface::detector::DetectorConfig;
     let img = build_synthetic(1920, 1080);
     let det = Detector::new(demo_face_cascade(), DetectorConfig::default());
     let dets = det.detect(&img);
@@ -115,9 +123,9 @@ fn bench_pyramid_full() {
 }
 
 fn bench_pyramid_full_inner() {
-    use rsface::image::GrayImage;
     use rsface::detector::{Detector, DetectorConfig};
     use rsface::haar::params::demo_face_cascade;
+    use rsface::image::GrayImage;
     // Per-level resize cost for a 1920x1080 input — shows where time
     // actually goes inside the pyramid construction.
     let img = build_synthetic(1920, 1080);
@@ -128,10 +136,16 @@ fn bench_pyramid_full_inner() {
         let ch = cur.height();
         let nw = ((cw as f32) / 1.2).round().max(24.0) as usize;
         let nh = ((ch as f32) / 1.2).round().max(24.0) as usize;
-        if nw >= cw || nh >= ch { break; }
-        time_it(&format!("level {level:2}: {cw}x{ch} -> {nw}x{nh}"), 5, || {
-            let _ = cur.resize_area(nw, nh);
-        });
+        if nw >= cw || nh >= ch {
+            break;
+        }
+        time_it(
+            &format!("level {level:2}: {cw}x{ch} -> {nw}x{nh}"),
+            5,
+            || {
+                let _ = cur.resize_area(nw, nh);
+            },
+        );
         cur = cur.resize_area(nw, nh);
     }
     let img640 = build_synthetic(640, 480);

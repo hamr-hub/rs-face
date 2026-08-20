@@ -97,10 +97,19 @@ impl EvalCache {
         }
     }
     #[inline(always)]
-    pub fn get_or_eval(&mut self, idx: usize, f: &HaarFeature,
-                       ii: &IntegralImage, ri: &RotatedIntegralImage,
-                       x: usize, y: usize, ww: usize, wh: usize,
-                       ii_w: usize, ii_h: usize) -> f32 {
+    pub fn get_or_eval(
+        &mut self,
+        idx: usize,
+        f: &HaarFeature,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        ww: usize,
+        wh: usize,
+        ii_w: usize,
+        ii_h: usize,
+    ) -> f32 {
         let slot = &mut self.responses[idx];
         if slot.0 == self.gen {
             slot.1
@@ -116,7 +125,9 @@ impl EvalCache {
     pub fn clear(&mut self) {
         self.gen = self.gen.wrapping_add(1);
         // Skip gen == 0 to maintain the "stale" invariant above.
-        if self.gen == 0 { self.gen = 1; }
+        if self.gen == 0 {
+            self.gen = 1;
+        }
     }
 
     /// Query the squared-integral-image sum over `[x1, x2) × [y1, y2)`.
@@ -152,9 +163,15 @@ impl EvalCache {
     /// image. Returns `false` if no squared II is attached (i.e. raw-mode
     /// cascade), in which case the caller should bypass the filter.
     #[inline]
-    pub fn passes_variance(&self, ii: &crate::integral::IntegralImage,
-                           x: usize, y: usize, w: usize, h: usize,
-                           variance_threshold: u64) -> bool {
+    pub fn passes_variance(
+        &self,
+        ii: &crate::integral::IntegralImage,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        variance_threshold: u64,
+    ) -> bool {
         match self.sum_sq_iis.as_ref() {
             Some(sq) => sq.passes_variance(ii, x, y, w, h, variance_threshold),
             None => true,
@@ -163,28 +180,59 @@ impl EvalCache {
 }
 
 impl Cascade {
-    pub fn num_features(&self) -> usize { self.features.len() }
-    pub fn num_stages(&self) -> usize { self.stages.len() }
+    pub fn num_features(&self) -> usize {
+        self.features.len()
+    }
+    pub fn num_stages(&self) -> usize {
+        self.stages.len()
+    }
     #[allow(dead_code)]
-    pub fn stages_debug(&self) -> &[Stage] { &self.stages }
+    pub fn stages_debug(&self) -> &[Stage] {
+        &self.stages
+    }
     #[allow(dead_code)]
-    pub fn features_debug(&self) -> &[HaarFeature] { &self.features }
+    pub fn features_debug(&self) -> &[HaarFeature] {
+        &self.features
+    }
 
     /// Evaluate one stage, returning the per-weak response and the sum.
     /// Used for diagnostics.
     #[allow(dead_code)]
-    pub fn eval_stage(&self, ii: &IntegralImage, ri: &RotatedIntegralImage,
-                      x: usize, y: usize, stage_idx: usize) -> Option<(f32, Vec<(usize, f32, f32)>)> {
+    pub fn eval_stage(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        stage_idx: usize,
+    ) -> Option<(f32, Vec<(usize, f32, f32)>)> {
         let stage = &self.stages[stage_idx];
         let mut sum = 0.0f32;
         let mut details = Vec::new();
         for w in &stage.weak_features {
             let f = &self.features[w.feature_index as usize];
-            let r = f.eval(ii, ri, x, y, self.window_w, self.window_h, ii.width(), ii.height());
+            let r = f.eval(
+                ii,
+                ri,
+                x,
+                y,
+                self.window_w,
+                self.window_h,
+                ii.width(),
+                ii.height(),
+            );
             let v = if w.sign > 0 {
-                if r > w.threshold { w.right_val } else { w.left_val }
+                if r > w.threshold {
+                    w.right_val
+                } else {
+                    w.left_val
+                }
             } else {
-                if r > w.threshold { w.left_val } else { w.right_val }
+                if r > w.threshold {
+                    w.left_val
+                } else {
+                    w.right_val
+                }
             };
             sum += v;
             details.push((w.feature_index as usize, r, v));
@@ -203,8 +251,14 @@ impl Cascade {
     /// (negative non-face class). The `sign` field is a redundant
     /// historical artefact from earlier OpenCV versions and is no longer
     /// consulted by this implementation.
-    pub fn classify(&self, ii: &IntegralImage, ri: &RotatedIntegralImage,
-                    x: usize, y: usize, cache: &mut EvalCache) -> Option<f32> {
+    pub fn classify(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        cache: &mut EvalCache,
+    ) -> Option<f32> {
         let ww = self.window_w;
         let wh = self.window_h;
         // OpenCV's variance normalization: compute over the inner rect
@@ -235,7 +289,9 @@ impl Cascade {
             // variance normalisation — use raw feature response.
             1.0
         };
-        if variance_norm_factor == 0.0 { return None; }
+        if variance_norm_factor == 0.0 {
+            return None;
+        }
 
         let mut total: f32 = 0.0;
         cache.clear();
@@ -249,7 +305,15 @@ impl Cascade {
                 let raw = cache.get_or_eval(
                     w.feature_index as usize,
                     &self.features[w.feature_index as usize],
-                    ii, ri, x, y, ww, wh, ii_w, ii_h);
+                    ii,
+                    ri,
+                    x,
+                    y,
+                    ww,
+                    wh,
+                    ii_w,
+                    ii_h,
+                );
                 let value = raw * variance_norm_factor;
                 let v = if value < w.threshold {
                     w.left_val
@@ -258,7 +322,9 @@ impl Cascade {
                 };
                 stage_sum += v;
             }
-            if stage_sum < stage.stage_threshold + self.stage_bias { return None; }
+            if stage_sum < stage.stage_threshold + self.stage_bias {
+                return None;
+            }
             total += stage_sum;
         }
         Some(total)
@@ -303,12 +369,21 @@ impl Cascade {
         let mut f = std::fs::File::open(path)?;
         let mut magic = [0u8; 4];
         f.read_exact(&mut magic)?;
-        if &magic != b"RFCF" { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not a cascade file")); }
+        if &magic != b"RFCF" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a cascade file",
+            ));
+        }
         let mut vbuf = [0u8; 4];
-        f.read_exact(&mut vbuf)?; let version = u32::from_le_bytes(vbuf);
-        f.read_exact(&mut vbuf)?; let ww = u32::from_le_bytes(vbuf) as usize;
-        f.read_exact(&mut vbuf)?; let wh = u32::from_le_bytes(vbuf) as usize;
-        f.read_exact(&mut vbuf)?; let nfeat = u32::from_le_bytes(vbuf) as usize;
+        f.read_exact(&mut vbuf)?;
+        let version = u32::from_le_bytes(vbuf);
+        f.read_exact(&mut vbuf)?;
+        let ww = u32::from_le_bytes(vbuf) as usize;
+        f.read_exact(&mut vbuf)?;
+        let wh = u32::from_le_bytes(vbuf) as usize;
+        f.read_exact(&mut vbuf)?;
+        let nfeat = u32::from_le_bytes(vbuf) as usize;
         let mut features = Vec::with_capacity(nfeat);
         for _ in 0..nfeat {
             let mut head = [0u8; 3];
@@ -320,9 +395,15 @@ impl Cascade {
                 3 => super::feature::FeatureKind::VerticalCenter,
                 4 => super::feature::FeatureKind::HorizontalCenter,
                 5 => super::feature::FeatureKind::CustomRects,
-                _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad feature kind")),
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "bad feature kind",
+                    ))
+                }
             };
-            f.read_exact(&mut vbuf)?; let nrect = u32::from_le_bytes(vbuf) as usize;
+            f.read_exact(&mut vbuf)?;
+            let nrect = u32::from_le_bytes(vbuf) as usize;
             let mut rects = Vec::with_capacity(nrect);
             for _ in 0..nrect {
                 let mut rb = [0u8; 4];
@@ -330,27 +411,51 @@ impl Cascade {
                 let mut fb = [0u8; 4];
                 f.read_exact(&mut fb)?;
                 let weight = f32::from_le_bytes(fb);
-                rects.push(super::feature::Rect::new(rb[0], rb[1], rb[2], rb[3], weight));
+                rects.push(super::feature::Rect::new(
+                    rb[0], rb[1], rb[2], rb[3], weight,
+                ));
             }
-            features.push(HaarFeature { kind, width: head[1], height: head[2], rects });
+            features.push(HaarFeature {
+                kind,
+                width: head[1],
+                height: head[2],
+                rects,
+            });
         }
-        f.read_exact(&mut vbuf)?; let nstage = u32::from_le_bytes(vbuf) as usize;
+        f.read_exact(&mut vbuf)?;
+        let nstage = u32::from_le_bytes(vbuf) as usize;
         let mut stages = Vec::with_capacity(nstage);
         for _ in 0..nstage {
             let mut fb = [0u8; 4];
-            f.read_exact(&mut fb)?; let stage_threshold = f32::from_le_bytes(fb);
-            f.read_exact(&mut vbuf)?; let nw = u32::from_le_bytes(vbuf) as usize;
+            f.read_exact(&mut fb)?;
+            let stage_threshold = f32::from_le_bytes(fb);
+            f.read_exact(&mut vbuf)?;
+            let nw = u32::from_le_bytes(vbuf) as usize;
             let mut weak_features = Vec::with_capacity(nw);
             for _ in 0..nw {
-                f.read_exact(&mut vbuf)?; let feature_index = u32::from_le_bytes(vbuf);
-                f.read_exact(&mut fb)?; let threshold = f32::from_le_bytes(fb);
+                f.read_exact(&mut vbuf)?;
+                let feature_index = u32::from_le_bytes(vbuf);
+                f.read_exact(&mut fb)?;
+                let threshold = f32::from_le_bytes(fb);
                 let mut sb = [0u8; 1];
-                f.read_exact(&mut sb)?; let sign = sb[0] as i8;
-                f.read_exact(&mut fb)?; let left_val = f32::from_le_bytes(fb);
-                f.read_exact(&mut fb)?; let right_val = f32::from_le_bytes(fb);
-                weak_features.push(WeakFeature { feature_index, threshold, sign, left_val, right_val });
+                f.read_exact(&mut sb)?;
+                let sign = sb[0] as i8;
+                f.read_exact(&mut fb)?;
+                let left_val = f32::from_le_bytes(fb);
+                f.read_exact(&mut fb)?;
+                let right_val = f32::from_le_bytes(fb);
+                weak_features.push(WeakFeature {
+                    feature_index,
+                    threshold,
+                    sign,
+                    left_val,
+                    right_val,
+                });
             }
-            stages.push(Stage { stage_threshold, weak_features });
+            stages.push(Stage {
+                stage_threshold,
+                weak_features,
+            });
         }
         let _ = version;
         Ok(Self {

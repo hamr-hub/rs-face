@@ -2,10 +2,10 @@
 //! per-stage decisions for a few candidate windows. Use to verify the
 //! cascade and feature evaluation are correct.
 
-use std::path::Path;
 use rsface::haar::{Cascade, EvalCache};
 use rsface::image::{codec, GrayImage, RgbImage};
 use rsface::integral::{IntegralImage, RotatedIntegralImage};
+use std::path::Path;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -53,7 +53,9 @@ fn main() {
             for x in 0..nw {
                 let v = scaled[(x, y)];
                 let row = rgb.row_mut(y);
-                row[x*3] = v; row[x*3+1] = v; row[x*3+2] = v;
+                row[x * 3] = v;
+                row[x * 3 + 1] = v;
+                row[x * 3 + 2] = v;
             }
         }
         let _ = std::fs::File::create("/tmp/rsface_test/scaled_rust.ppm").map(|mut f| {
@@ -65,11 +67,20 @@ fn main() {
         let sri = RotatedIntegralImage::from_gray(&scaled);
         let fx = ((338.0 / scale).round() as usize).min(nw - ww);
         let fy = ((89.0 / scale).round() as usize).min(nh - wh);
-        eprintln!("\n=== scale {:.2} → image {}x{}, face at ({},{}) ===", scale, nw, nh, fx, fy);
+        eprintln!(
+            "\n=== scale {:.2} → image {}x{}, face at ({},{}) ===",
+            scale, nw, nh, fx, fy
+        );
         eprintln!("scaled image saved to /tmp/rsface_test/scaled_rust.ppm");
         // Direct rect sums for feature 1
-        eprintln!("rect 0 sum (image 86,25-98,32) = {}", sii.rect_sum(86, 25, 98, 32));
-        eprintln!("rect 1 sum (image 90,25-94,32) = {}", sii.rect_sum(90, 25, 94, 32));
+        eprintln!(
+            "rect 0 sum (image 86,25-98,32) = {}",
+            sii.rect_sum(86, 25, 98, 32)
+        );
+        eprintln!(
+            "rect 1 sum (image 90,25-94,32) = {}",
+            sii.rect_sum(90, 25, 94, 32)
+        );
         // Per-feature detail
         let f0 = &cascade.features_debug()[0];
         let r0 = f0.eval(&sii, &sri, fx, fy, ww, wh, nw, nh);
@@ -78,20 +89,44 @@ fn main() {
         for (i, w) in cascade.stages_debug()[0].weak_features.iter().enumerate() {
             let f = &cascade.features_debug()[w.feature_index as usize];
             let r = f.eval(&sii, &sri, fx, fy, ww, wh, nw, nh);
-            eprintln!("stage 0 weak {}: feat {} r={} thr={} → {}", i, w.feature_index, r, w.threshold,
-                if r > w.threshold { format!("right={}", w.right_val) } else { format!("left={}", w.left_val) });
+            eprintln!(
+                "stage 0 weak {}: feat {} r={} thr={} → {}",
+                i,
+                w.feature_index,
+                r,
+                w.threshold,
+                if r > w.threshold {
+                    format!("right={}", w.right_val)
+                } else {
+                    format!("left={}", w.left_val)
+                }
+            );
         }
         let r = cascade.classify(&sii, &sri, fx, fy, &mut cache);
-        eprintln!("classify: {}", match r { Some(s) => format!("PASS score={:.4}", s), None => "REJECT".to_string() });
+        eprintln!(
+            "classify: {}",
+            match r {
+                Some(s) => format!("PASS score={:.4}", s),
+                None => "REJECT".to_string(),
+            }
+        );
         // Sum of stage 0 weak values
         let mut stage0_sum = 0.0f32;
         for w in &cascade.stages_debug()[0].weak_features {
             let f = &cascade.features_debug()[w.feature_index as usize];
             let r = f.eval(&sii, &sri, fx, fy, ww, wh, nw, nh);
-            let v = if r > w.threshold { w.right_val } else { w.left_val };
+            let v = if r > w.threshold {
+                w.right_val
+            } else {
+                w.left_val
+            };
             stage0_sum += v;
         }
-        eprintln!("stage 0 manual sum = {} (threshold {})", stage0_sum, cascade.stages_debug()[0].stage_threshold);
+        eprintln!(
+            "stage 0 manual sum = {} (threshold {})",
+            stage0_sum,
+            cascade.stages_debug()[0].stage_threshold
+        );
 
         // Run all stages manually
         for stage_idx in 0..cascade.num_stages() {
@@ -99,14 +134,24 @@ fn main() {
             for w in &cascade.stages_debug()[stage_idx].weak_features {
                 let f = &cascade.features_debug()[w.feature_index as usize];
                 let r = f.eval(&sii, &sri, fx, fy, ww, wh, nw, nh);
-                let v = if r > w.threshold { w.right_val } else { w.left_val };
+                let v = if r > w.threshold {
+                    w.right_val
+                } else {
+                    w.left_val
+                };
                 stage_sum += v;
             }
             let pass = stage_sum >= cascade.stages_debug()[stage_idx].stage_threshold;
-            eprintln!("manual stage {:2} sum={:8.4} threshold={:8.4} {}",
-                stage_idx, stage_sum, cascade.stages_debug()[stage_idx].stage_threshold,
-                if pass { "PASS" } else { "REJECT" });
-            if !pass { break; }
+            eprintln!(
+                "manual stage {:2} sum={:8.4} threshold={:8.4} {}",
+                stage_idx,
+                stage_sum,
+                cascade.stages_debug()[stage_idx].stage_threshold,
+                if pass { "PASS" } else { "REJECT" }
+            );
+            if !pass {
+                break;
+            }
         }
     }
 
@@ -129,10 +174,16 @@ fn main() {
     for stage_idx in 0..cascade.num_stages() {
         if let Some((sum, _details)) = cascade.eval_stage(&ii, &ri, x, y, stage_idx) {
             let pass = sum >= cascade.stages_debug()[stage_idx].stage_threshold;
-            eprintln!("  stage {:2} sum={:8.4} threshold={:8.4} → {}",
-                stage_idx, sum, cascade.stages_debug()[stage_idx].stage_threshold,
-                if pass { "PASS" } else { "REJECT" });
-            if !pass { break; }
+            eprintln!(
+                "  stage {:2} sum={:8.4} threshold={:8.4} → {}",
+                stage_idx,
+                sum,
+                cascade.stages_debug()[stage_idx].stage_threshold,
+                if pass { "PASS" } else { "REJECT" }
+            );
+            if !pass {
+                break;
+            }
         }
     }
 
@@ -142,13 +193,18 @@ fn main() {
         // Use the top-left of the detection as our window.
         let cx = fx + fw / 2;
         let cy = fy + fh / 2;
-        eprintln!("\n  face {}x{} at ({},{}) center=({},{})", fw, fh, fx, fy, cx, cy);
+        eprintln!(
+            "\n  face {}x{} at ({},{}) center=({},{})",
+            fw, fh, fx, fy, cx, cy
+        );
         // Scan a 7x7 grid around the face center.
         for dy in [-20i32, -10, 0, 10, 20] {
             for dx in [-20i32, -10, 0, 10, 20] {
                 let x = ((cx as i32) + dx - ww as i32 / 2).max(0) as usize;
                 let y = ((cy as i32) + dy - wh as i32 / 2).max(0) as usize;
-                if x + ww > gray.width() || y + wh > gray.height() { continue; }
+                if x + ww > gray.width() || y + wh > gray.height() {
+                    continue;
+                }
                 match cascade.classify(&ii, &ri, x, y, &mut cache) {
                     Some(score) => eprintln!("    ({},{}) PASS score={:.4}", x, y, score),
                     None => {}
@@ -163,10 +219,16 @@ fn main() {
         for stage_idx in 0..cascade.num_stages() {
             if let Some((sum, _details)) = cascade.eval_stage(&ii, &ri, x, y, stage_idx) {
                 let pass = sum >= cascade.stages_debug()[stage_idx].stage_threshold;
-                eprintln!("  stage {:2} sum={:8.4} threshold={:8.4} → {}",
-                    stage_idx, sum, cascade.stages_debug()[stage_idx].stage_threshold,
-                    if pass { "PASS" } else { "REJECT" });
-                if !pass { break; }
+                eprintln!(
+                    "  stage {:2} sum={:8.4} threshold={:8.4} → {}",
+                    stage_idx,
+                    sum,
+                    cascade.stages_debug()[stage_idx].stage_threshold,
+                    if pass { "PASS" } else { "REJECT" }
+                );
+                if !pass {
+                    break;
+                }
             }
         }
         // Final classify
