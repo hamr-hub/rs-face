@@ -469,13 +469,16 @@ const preview = (() => {
     // Bug 1/4:URL 编码
     const newOrigSrc = utils.mediaUrl(job.original_key);
     if (!orig.src || !orig.src.includes(encodeURIComponent(job.original_key))) orig.src = newOrigSrc;
-    // 标注视频:job.annotated_key 是后端合成的 mp4;没有就 fall back 到首帧 poster
+    // 标注视频:job.annotated_key 是后端合成的 mp4;没有就 fall back 到首帧 poster(立即设置,避免等待 metadata)
     if (job.annotated_key && anno) anno.src = utils.mediaUrl(job.annotated_key);
+    else {
+      const first = (job.frames || []).find(f => f.annotated_key);
+      if (first && anno) anno.poster = utils.mediaUrl(first.annotated_key);
+    }
     if (anno) bindSync(orig, anno);
     orig.onloadedmetadata = () => {
       hideHint();
       const first = (job.frames || []).find(f => f.annotated_key);
-      if (first && anno && !anno.src) anno.poster = utils.mediaUrl(first.annotated_key);
       if (first && anno) drawOverlayOnAnno(job, first);
       refreshSharedProgress();
     };

@@ -29,7 +29,7 @@ pub struct GpuInfo {
 /// Try to initialize an OpenCL context. Returns `None` if no OpenCL
 /// implementation is available on the system.
 pub fn probe() -> Option<GpuInfo> {
-    unsafe { opencl::Context::new().ok().map(|c| c.info.clone()) }
+    unsafe { Context::new().ok().map(|c| c.info.clone()) }
 }
 
 /// Output of the GPU sliding window detector.
@@ -43,14 +43,12 @@ pub struct GpuDetection {
 /// GPU-side integral image + variance pre-filter. Falls back to CPU when no
 /// GPU is available.
 pub struct GpuIntegral {
-    ctx: Arc<opencl::Context>,
+    ctx: Arc<Context>,
 }
 
 impl GpuIntegral {
     pub fn new() -> Option<Self> {
-        opencl::Context::new()
-            .ok()
-            .map(|c| Self { ctx: Arc::new(c) })
+        Context::new().ok().map(|c| Self { ctx: Arc::new(c) })
     }
 
     pub fn info(&self) -> GpuInfo {
@@ -147,6 +145,9 @@ mod stub {
 
 #[cfg(not(unix))]
 pub use stub::Context;
+
+#[cfg(unix)]
+pub use opencl::Context;
 
 // ===== OpenCL FFI + dynamic loader =====
 

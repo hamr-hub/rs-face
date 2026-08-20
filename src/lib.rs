@@ -31,7 +31,8 @@
 #![allow(clippy::unnecessary_map_or)] // `map_or(false, |x| ...)` reads more directly than `is_some_and` in variance checks.
 #![allow(clippy::while_let_loop)] // `loop { match it.next() { ... } }` is clearer when the body has multiple branches.
 #![allow(clippy::new_without_default)] // Dummy detector constructors (CNN/HoG/YuNet/MTCNN) don't need Default — `new()` is fine.
-#![allow(clippy::needless_collect)] // Sometimes collecting into a Vec is intentional for the next step.
+#![allow(clippy::needless_collect)]
+// Intentional Vec build for the next step.
 // OpenCL loader caches dlopen handles in `static mut LIB`/`LIB_HANDLE`; access is gated by unsafe.
 #![allow(static_mut_refs)]
 #![allow(unused_parens)] // `cargo fmt` produces parens around some assignments; harmless.
