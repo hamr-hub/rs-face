@@ -466,14 +466,155 @@ const preview = (() => {
     dbl.classList.remove('hidden');
     if (sc) sc.classList.remove('hidden');
     if (!job.original_key) { showHint('无视频源'); return; }
-    if (!orig.src || !orig.src.includes(encodeURIComponent(job.original_key))) orig.src = '/media/' + job.original_key;
+    // Bug 1/4:URL 编码
+    const newOrigSrc = utils.mediaUrl(job.original_key);
+    if (!orig.src || !orig.src.includes(encodeURIComponent(job.original_key))) orig.src = newOrigSrc;
+    // 标注视频:job.annotated_key 是后端合成的 mp4;没有就 fall back 到首帧 poster
+    if (job.annotated_key && anno) anno.src = utils.mediaUrl(job.annotated_key);
+    if (anno) bindSync(orig, anno);
     orig.onloadedmetadata = () => {
       hideHint();
       const first = (job.frames || []).find(f => f.annotated_key);
-      if (first && anno) anno.poster = '/media/' + first.annotated_key;
-      if (first) drawOverlay(job, first, anno || orig);
+      if (first && anno && !anno.src) anno.poster = utils.mediaUrl(first.annotated_key);
+      if (first && anno) drawOverlayOnAnno(job, first);
+      refreshSharedProgress();
     };
-    orig.ontimeupdate = () => syncVideoOverlay(job, anno || orig);
+    anno.onloadedmetadata = () => { hideHint(); refreshSharedProgress(); };
+    orig.ontimeupdate = () => { syncVideoOverlayDual(job); refreshSharedProgress(); };
+    anno.ontimeupdate = () => { syncOrigByAnnoTime(job); refreshSharedProgress(); };
+  }
+
+  function syncVideoOverlayDual(job) {
+    const orig = utils.$('#pv-orig'); if (!orig) return;
+    const frames = job.frames || []; if (!frames.length) return;
+    const cur = orig.currentTime * 1000; let best = null;
+    for (const f of frames) {
+      if (f.annotated_key && f.timestamp_ms <= cur + 80) best = f;
+      else if (f.timestamp_ms > cur + 80) break;
+    }
+    if (best && best.index !== _lastAnnoFrameIdx) {
+      _lastAnnoFrameIdx = best.index;
+      drawOverlayOnAnno(job, best);
+    }
+  }
+  function syncOrigByAnnoTime(job) {
+    const anno = utils.$('#pv-anno'), orig = utils.$('#pv-orig');
+    if (!anno || !orig) return;
+    if (Math.abs(orig.currentTime - anno.currentTime) > 0.4) orig.currentTime = anno.currentTime;
+  }
+  function drawOverlayOnAnno(job, frame) {
+    if (!state.annoVisible) return clearOverlay();
+    const anno = utils.$('#pv-anno'), c = utils.$('#pv-overlay'), stage = utils.$('#pv-stage');
+    if (!anno || !c || !stage) return;
+    const rect = stage.getBoundingClientRect(), m = anno.getBoundingClientRect();
+    c.style.left = (m.left - rect.left) + 'px';
+    c.style.top = (m.top - rect.top) + 'px';
+    c.width = m.width; c.height = m.height;
+    const natW = anno.videoWidth || (frame.faces[0] ? frame.faces[0].w * 4 : 640);
+    const natH = anno.videoHeight || 360;
+    drawBoxes(c, frame, natW, natH);
+  }
+
+  function refreshSharedProgress() {
+    const o = utils.$('#pv-orig'), a = utils.$('#pv-anno');
+    const fill = utils.$('#pv-shared-fill'); if (!fill) return;
+    const dur = (o && o.duration) || (a && a.duration) || 0;
+    const t = (o && o.currentTime) || (a && a.currentTime) || 0;
+    const pct = dur > 0 ? (t / dur) * 100 : 0;
+    fill.style.width = pct + '%';
+    const handle = utils.$('#pv-shared-handle'); if (handle) handle.style.left = pct + '%';
+    const time = utils.$('#pv-shared-time'); if (time) time.textContent = `${utils.fmtTime(t * 1000)} / ${utils.fmtTime(dur * 1000)}`;
+    const marks = utils.$('#pv-shared-marks'); if (marks && state.currentJob) {
+      marks.innerHTML = '';
+      const frames = (state.currentJob.frames || []).filter(f => f.faces && f.faces.length);
+      const max = 60; const step = Math.max(1, Math.floor(frames.length / max));
+      for (let i = 0; i < frames.length; i += step) {
+        const f = frames[i];
+        const pctTs = dur > 0 ? (f.timestamp_ms / 1000 / dur) * 100 : 0;
+        if (pctTs > 100) continue;
+        const m = document.createElement('div');
+        m.className = 'pv-shared-mark';
+        m.style.left = pctTs + '%';
+        m.title = utils.fmtTime(f.timestamp_ms);
+        m.addEventListener('click', () => {
+          if (o) { o.currentTime = f.timestamp_ms / 1000; o.play().catch(() => {}); }
+        });
+        marks.appendChild(m);
+      }
+    }
+  }
+
+  // 双 video 互锁同步 play/pause/seeked/ratechange/ended
+  function bindSync(a, b) {
+    if (a._syncBoundTo === b) return;
+    a._syncBoundTo = b; b._syncBoundTo = a;
+    let locked = false;
+    const mirror = (src, dst) => () => {
+      if (locked) return;
+      locked = true;
+      try {
+        if (src.playbackRate && dst.playbackRate !== src.playbackRate) dst.playbackRate = src.playbackRate;
+        if (Math.abs((dst.currentTime || 0) - (src.currentTime || 0)) > 0.12) dst.currentTime = src.currentTime;
+        if (!src.paused && dst.paused) dst.play().catch(() => {});
+        if (src.paused && !dst.paused) dst.pause();
+      } finally {
+        requestAnimationFrame(() => { locked = false; });
+      }
+    };
+    a.addEventListener('play', mirror(a, b));
+    a.addEventListener('pause', mirror(a, b));
+    a.addEventListener('seeked', mirror(a, b));
+    a.addEventListener('ratechange', mirror(a, b));
+    a.addEventListener('ended', mirror(a, b));
+    b.addEventListener('play', mirror(b, a));
+    b.addEventListener('pause', mirror(b, a));
+    b.addEventListener('seeked', mirror(b, a));
+    b.addEventListener('ratechange', mirror(b, a));
+    b.addEventListener('ended', mirror(b, a));
+  }
+
+  function initSharedControls() {
+    const play = utils.$('#pv-shared-play');
+    const track = utils.$('#pv-shared-track');
+    const rate = utils.$('#pv-shared-rate');
+    if (play) play.addEventListener('click', () => {
+      const o = utils.$('#pv-orig'); if (!o) return;
+      if (o.paused) o.play().catch(() => {}); else o.pause();
+    });
+    if (track) track.addEventListener('click', (e) => {
+      const o = utils.$('#pv-orig'); if (!o || !o.duration) return;
+      const rect = track.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / rect.width;
+      o.currentTime = Math.max(0, Math.min(1, x)) * o.duration;
+    });
+    if (rate) rate.addEventListener('change', () => {
+      const v = parseFloat(rate.value) || 1;
+      const o = utils.$('#pv-orig'), a = utils.$('#pv-anno');
+      if (o) o.playbackRate = v;
+      if (a) a.playbackRate = v;
+    });
+    const o = utils.$('#pv-orig');
+    if (o) {
+      o.addEventListener('play', () => { const b = utils.$('#pv-shared-play'); if (b) b.textContent = '⏸'; });
+      o.addEventListener('pause', () => { const b = utils.$('#pv-shared-play'); if (b) b.textContent = '▶'; });
+    }
+  }
+
+  function initDivider() {
+    const div = utils.$('#pv-divider'); const dbl = utils.$('#pv-double');
+    const left = utils.$('#pv-half-orig'); const right = utils.$('#pv-half-anno');
+    if (!div || !dbl || !left || !right) return;
+    let dragging = false;
+    div.addEventListener('pointerdown', (e) => { dragging = true; div.setPointerCapture(e.pointerId); });
+    div.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const rect = dbl.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const lpct = Math.max(0.15, Math.min(0.85, x / rect.width));
+      left.style.flex = `0 0 calc(${lpct * 100}% - 2px)`;
+      right.style.flex = '1 1 0';
+    });
+    div.addEventListener('pointerup', (e) => { dragging = false; div.releasePointerCapture(e.pointerId); });
   }
 
   function syncVideoOverlay(job, vid) {
@@ -1021,6 +1162,9 @@ function initKeys() {
 async function init() {
   theme.init();
   sidebar.init(); upload.init(); batch.init(); confirmModal.init(); initKeys();
+  // 视频双画面播放器:共享控制 + 拖动分隔条
+  if (typeof preview.initSharedControls === 'function') preview.initSharedControls();
+  if (typeof preview.initDivider === 'function') preview.initDivider();
   utils.$('#pv-close').addEventListener('click', preview.close);
   utils.$('#pv-cancel').addEventListener('click', cancelCurrent);
   utils.$('#pv-toggle-anno').addEventListener('click', preview.toggleAnno);

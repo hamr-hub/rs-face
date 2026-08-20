@@ -28,8 +28,10 @@
 #![allow(clippy::needless_range_loop)] // `for i in 0..n` indexing is intentional in numerical kernels.
 #![allow(clippy::collapsible_if)] // Nested `if`s are clearer when each branch has a descriptive comment.
 #![allow(clippy::map_unwrap_or)] // The `match` form is more explicit about edge cases.
-#![allow(clippy::while_let_on_iterator)] // `while let Some(_) = it.next()` reads clearer in parser-like loops.
-#![allow(static_mut_refs)] // The OpenCL loader keeps `static mut LIB` / `LIB_HANDLE` to cache dlopen handles; access is gated by an unsafe { } block.
+#![allow(clippy::while_let_on_iterator)]
+// `while let Some(_) = it.next()` reads clearer in parser-like loops.
+// OpenCL loader caches dlopen handles in `static mut LIB`/`LIB_HANDLE`; access is gated by unsafe.
+#![allow(static_mut_refs)]
 #![allow(unused_parens)] // `cargo fmt` produces parens around some assignments; harmless.
 #![allow(unused_unsafe)] // The OpenCL wrapper uses `unsafe {}` blocks defensively even where the call is itself unsafe.
 #![allow(dead_code)] // Dummy CNN/HoG/YuNet/MTCNN scaffolds ship with all primitives even if a few are unreferenced.
