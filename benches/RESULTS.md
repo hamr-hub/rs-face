@@ -12,8 +12,8 @@ On a real GPU or with SIMD it would match Haar; here it's a known limitation of 
 
 | algo | lena.jpg ms | two-people.jpg ms | video 1f ms/frame | video fps |
 |------|------------:|------------------:|-------------------:|----------:|
-| haar | 57.39 | 154.83 | 28.57 | 35.00 |
-| cnn | 37.72* | slow | slow | N/A |
+| haar | 59.23 | 136.88 | 27.33 | 36.59 |
+| cnn | 37.49* | slow | slow | N/A |
 | yunet | N/A | N/A | N/A | N/A |
 | mtcnn | N/A | N/A | N/A | N/A |
 | hog | N/A | N/A | N/A | N/A |

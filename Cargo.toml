@@ -33,3 +33,35 @@ strip = true
 
 [profile.dev]
 opt-level = 1
+
+# Workspace-wide lint configuration. Each entry has a one-line rationale
+# in the comments at the top of src/lib.rs / src/bin/*.rs. Putting them
+# here means bins + tests + benches all inherit the same set without
+# having to paste the block in every file.
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+result_large_err = "allow"
+identity_op = "allow"
+erasing_op = "allow"
+manual_div_ceil = "allow"
+manual_is_multiple_of = "allow"
+manual_range_contains = "allow"
+manual_saturating_arithmetic = "allow"
+manual_checked_ops = "allow"
+unnecessary_cast = "allow"
+io_other_error = "allow"
+mut_from_ref = "allow"
+redundant_closure = "allow"
+needless_range_loop = "allow"
+collapsible_if = "allow"
+collapsible_match = "allow"
+unnecessary_map_or = "allow"
+while_let_loop = "allow"
+new_without_default = "allow"
+needless_collect = "allow"
+unused_self = "allow"
+needless_borrow = "allow"
+single_match = "allow"
+no_effect = "allow"
+ptr_arg = "allow"
