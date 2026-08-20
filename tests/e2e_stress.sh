@@ -21,7 +21,7 @@
 
 set -u
 
-PORT="${PORT:-18080}"
+PORT="${PORT:-18099}"
 LOG="${LOG:-/tmp/e2e_server.log}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TESTDATA="$ROOT/platform/testdata"

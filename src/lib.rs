@@ -18,7 +18,6 @@
 #![allow(clippy::identity_op)] // 0-index placeholder math in CNN kernel index calcs; harmless.
 #![allow(clippy::erasing_op)] // Same reason: the CNN scaffold uses 0 * N terms that are clearly placeholders.
 #![allow(clippy::manual_div_ceil)] // Readability: written as `(a + b - 1) / b` for parity with OpenCV refs.
-#![allow(clippy::manual_checked_div)] // Same reason; many image-size math sites do the explicit form.
 #![allow(clippy::manual_is_multiple_of)] // Avoid pulling the unstable div_rem helper.
 #![allow(clippy::manual_range_contains)] // Readability: `x >= 1 && x <= 10` reads clearer in numerical kernels.
 #![allow(clippy::manual_saturating_arithmetic)] // Pipeline hot path; explicit branches are measurably faster.
@@ -26,8 +25,11 @@
 #![allow(clippy::io_other_error)] // PipelineError -> io::Error::new uses Display string for surfacing.
 #![allow(clippy::mut_from_ref)] // OpenCL FFI returns *mut opaque; the wrapper holds the same ptr through an aliasing layer.
 #![allow(clippy::redundant_closure)] // `|x| f(x)` is sometimes clearer than bare `f` for type inference.
-#![allow(clippy::while_immutable_condition)] // Hand-written `while` loops over `Vec::iter()` are clearer than `.for_each`.
 #![allow(clippy::needless_range_loop)] // `for i in 0..n` indexing is intentional in numerical kernels.
+#![allow(clippy::collapsible_if)] // Nested `if`s are clearer when each branch has a descriptive comment.
+#![allow(clippy::map_unwrap_or)] // The `match` form is more explicit about edge cases.
+#![allow(clippy::while_let_on_iterator)] // `while let Some(_) = it.next()` reads clearer in parser-like loops.
+#![allow(static_mut_refs)] // The OpenCL loader keeps `static mut LIB` / `LIB_HANDLE` to cache dlopen handles; access is gated by an unsafe { } block.
 #![allow(unused_parens)] // `cargo fmt` produces parens around some assignments; harmless.
 #![allow(unused_unsafe)] // The OpenCL wrapper uses `unsafe {}` blocks defensively even where the call is itself unsafe.
 #![allow(dead_code)] // Dummy CNN/HoG/YuNet/MTCNN scaffolds ship with all primitives even if a few are unreferenced.

@@ -432,18 +432,20 @@ async fn handle_upload(
         match tokio::task::spawn_blocking(move || -> std::io::Result<(String, Option<String>)> {
             // 1) 用户的原始文件写到 tmp_dir(给 ffmpeg / core 读)
             let raw_path = crate::jobs::save_upload(&cfg, &idc, &ext_l, &bytes_l)?;
-            // 2) Image:把 PNG/JPG 转成 PGM(灰度,无压缩),core 直接吃
+            // 2) Image:把 PNG/JPG 转成 PPM(RGB 三通道),core 直接吃
+            //    旧实现是 PGM(灰度),导致标注/裁剪全是灰色。
+            //    注意:这里用 ppm 还是走 core 的 read_ppm 路径,会同时拿到 gray + rgb。
             if kind_l == JobKind::Image && matches!(ext_l.as_str(), "png" | "jpg" | "jpeg" | "bmp" | "webp") {
                 let work = raw_path.parent().unwrap().to_path_buf();
-                let pgm = work.join("input.pgm");
+                let ppm = work.join("input.ppm");
                 let status = std::process::Command::new("ffmpeg")
                     .args(["-y", "-loglevel", "error", "-i"]).arg(&raw_path)
-                    .args(["-pix_fmt", "gray", "-f", "image2"]).arg(&pgm)
+                    .args(["-pix_fmt", "rgb24", "-f", "image2"]).arg(&ppm)
                     .output()
                     .map_err(|e| std::io::Error::other(format!("ffmpeg spawn: {e}")))?;
-                if !status.status.success() || !pgm.is_file() {
+                if !status.status.success() || !ppm.is_file() {
                     return Err(std::io::Error::other(format!(
-                        "ffmpeg image→pgm failed: {}",
+                        "ffmpeg image→ppm failed: {}",
                         String::from_utf8_lossy(&status.stderr))));
                 }
                 // 3) 用户的原始字节落到 local_media_dir,作 preview 用
@@ -456,7 +458,7 @@ async fn handle_upload(
                     _ => "application/octet-stream",
                 };
                 let stored = crate::jobs::put_bytes_with_fallback_blocking(&cfg, &display_key, ct, &bytes_l);
-                Ok((pgm.to_string_lossy().to_string(), Some(stored)))
+                Ok((ppm.to_string_lossy().to_string(), Some(stored)))
             } else {
                 Ok((raw_path.to_string_lossy().to_string(), None))
             }

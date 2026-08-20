@@ -35,7 +35,13 @@ const utils = (() => {
   const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
   function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
   function throttleRaf(fn) { let s = false, la = null; return (...a) => { la = a; if (s) return; s = true; requestAnimationFrame(() => { s = false; fn(...la); }); }; }
-  return { $, $$, toast: legacyToast, fmtTime, fmtAbsTime, escapeHtml, debounce, throttleRaf };
+  /** Bug 1/4: URL-encode media keys so 'local://jobs/...' works in <video>/<img>. */
+  function mediaUrl(key) {
+    if (!key) return '';
+    if (/^(https?:|data:|blob:)/.test(key)) return key;
+    return '/media/' + encodeURIComponent(key);
+  }
+  return { $, $$, toast: legacyToast, fmtTime, fmtAbsTime, escapeHtml, debounce, throttleRaf, mediaUrl };
 })();
 
 const state = {
@@ -325,7 +331,7 @@ const sidebar = (() => {
 
   function updateItem(el, j) {
     const st = j.stats || {}, fp = st.frames_processed || 0, fc = j.face_count || 0;
-    const thumbSrc = j.original_key ? '/media/' + j.original_key : null;
+    const thumbSrc = j.original_key ? utils.mediaUrl(j.original_key) : null;
     let thumbHtml;
     if (j.status === 'running' || j.status === 'queued') thumbHtml = `<div class="sb-thumb"><div style="opacity:.6">⏳</div></div>`;
     else if (thumbSrc) thumbHtml = `<div class="sb-thumb"><img data-src="${utils.escapeHtml(thumbSrc)}" alt=""></div>`;
@@ -408,18 +414,22 @@ const preview = (() => {
     const statusEl = utils.$('#pv-status'); statusEl.textContent = status; statusEl.className = 'pv-status ' + status;
     utils.$('#pv-dot').className = 'pv-dot ' + status;
     utils.$('#pv-cancel').classList.toggle('hidden', !(status === 'running' || status === 'queued'));
+    // Bug 2:error/cancelled 都显示原图 + 顶部红色 banner
+    const banner = utils.$('#pv-error-banner');
+    if (status === 'error' || status === 'cancelled') {
+      const label = status === 'cancelled' ? '任务已取消' : '识别失败';
+      const msg = job.error ? `${label} · ${job.error}` : label;
+      if (banner) { banner.textContent = msg; banner.classList.remove('hidden'); }
+    } else if (banner) {
+      banner.classList.add('hidden');
+    }
     const retryBtn = utils.$('#pv-retry');
-    const canRetry = job.original_input && job.kind !== 'image';
+    const canRetry = job.original_input || (job.kind === 'image' && job.original_key);
     if (retryBtn) retryBtn.classList.toggle('hidden', !canRetry);
-    if (job.error) {
-      const banner = utils.$('#pv-error-banner');
-      if (banner) { banner.textContent = '任务错误: ' + job.error; banner.classList.remove('hidden'); }
-      if (state.currentJob && state.currentJob.id === job.id && state.currentJob.status !== 'error' && status === 'error') {
+    if (job.error && status === 'error') {
+      if (state.currentJob && state.currentJob.id === job.id && state.currentJob.status !== 'error') {
         toast.error('任务错误: ' + job.error);
       }
-    } else {
-      const banner = utils.$('#pv-error-banner');
-      if (banner) banner.classList.add('hidden');
     }
     if (job.kind === 'image') renderImage(job);
     else if (job.kind === 'video') renderVideo(job);
@@ -428,29 +438,42 @@ const preview = (() => {
   }
 
   function renderImage(job) {
-    const img = utils.$('#pv-img'), vid = utils.$('#pv-vid');
-    if (!img || !vid) return;
-    vid.classList.add('hidden'); img.classList.remove('hidden');
-    const frames = job.frames || [], first = frames.find(f => f.original_key) || frames[0];
-    if (first && first.original_key) {
-      img.onload = () => { hideHint(); drawOverlay(job, first, img); };
+    const img = utils.$('#pv-img');
+    const dbl = utils.$('#pv-double');
+    const sc = utils.$('#pv-shared-controls');
+    if (!img) return;
+    if (dbl) dbl.classList.add('hidden');
+    if (sc) sc.classList.add('hidden');
+    img.classList.remove('hidden');
+    const frames = job.frames || [];
+    const first = frames.find(f => f.original_key) || frames[0];
+    // 优先用 frame.original_key;没有时降级到 job.original_key(error 时只有这个)
+    const src = (first && first.original_key) || job.original_key;
+    if (src) {
+      img.onload = () => { hideHint(); if (first && first.annotated_key) drawOverlay(job, first, img); };
       img.onerror = () => { showHint('原图加载失败'); clearOverlay(); };
-      img.src = '/media/' + first.original_key;
+      img.src = '/media/' + src;
     } else { img.classList.add('hidden'); showHint('无原图'); clearOverlay(); }
   }
 
   function renderVideo(job) {
-    const img = utils.$('#pv-img'), vid = utils.$('#pv-vid');
-    if (!img || !vid) return;
-    img.classList.add('hidden'); vid.classList.remove('hidden');
+    const img = utils.$('#pv-img');
+    const dbl = utils.$('#pv-double');
+    const sc = utils.$('#pv-shared-controls');
+    const orig = utils.$('#pv-orig'), anno = utils.$('#pv-anno');
+    if (!dbl || !orig) return;
+    img.classList.add('hidden');
+    dbl.classList.remove('hidden');
+    if (sc) sc.classList.remove('hidden');
     if (!job.original_key) { showHint('无视频源'); return; }
-    if (!vid.src || !vid.src.includes(encodeURIComponent(job.original_key))) vid.src = '/media/' + job.original_key;
-    vid.onloadedmetadata = () => {
+    if (!orig.src || !orig.src.includes(encodeURIComponent(job.original_key))) orig.src = '/media/' + job.original_key;
+    orig.onloadedmetadata = () => {
       hideHint();
       const first = (job.frames || []).find(f => f.annotated_key);
-      if (first) drawOverlay(job, first, vid);
+      if (first && anno) anno.poster = '/media/' + first.annotated_key;
+      if (first) drawOverlay(job, first, anno || orig);
     };
-    vid.ontimeupdate = () => syncVideoOverlay(job, vid);
+    orig.ontimeupdate = () => syncVideoOverlay(job, anno || orig);
   }
 
   function syncVideoOverlay(job, vid) {
@@ -466,17 +489,29 @@ const preview = (() => {
   }
 
   function renderStream(job) {
-    const img = utils.$('#pv-img'), vid = utils.$('#pv-vid');
-    if (!img || !vid) return;
-    vid.classList.add('hidden'); img.classList.remove('hidden');
+    const img = utils.$('#pv-img');
+    const dbl = utils.$('#pv-double');
+    const sc = utils.$('#pv-shared-controls');
+    if (!img) return;
+    if (dbl) dbl.classList.add('hidden');
+    if (sc) sc.classList.add('hidden');
+    img.classList.remove('hidden');
     const frames = job.frames || [];
     const last = [...frames].reverse().find(f => f.original_key) || frames[frames.length - 1];
-    if (!last) { img.classList.add('hidden'); showHint('等待原始帧…'); clearOverlay(); return; }
+    if (!last) {
+      // 没有 frame 时降级到 job.original_key
+      if (job.original_key) {
+        img.onload = () => hideHint();
+        img.onerror = () => showHint('原图加载失败');
+        img.src = '/media/' + job.original_key;
+      } else { img.classList.add('hidden'); showHint('等待原始帧…'); clearOverlay(); }
+      return;
+    }
     if (last.index === lastFrameIdx) return;
     lastFrameIdx = last.index;
     img.onload = () => { hideHint(); drawOverlay(job, last, img); };
     img.onerror = () => { showHint('原图加载失败'); };
-    img.src = '/media/' + last.original_key + '?v=' + last.index;
+    img.src = utils.mediaUrl(last.original_key) + (last.original_key && last.original_key.includes('?') ? '&' : '?') + 'v=' + last.index;
   }
 
   function clearOverlay() {
@@ -578,7 +613,7 @@ const preview = (() => {
       const card = document.createElement('div');
       card.className = 'face-card';
       card.innerHTML = `
-        <img loading="lazy" decoding="async" data-src="/media/${utils.escapeHtml(rep.key)}" alt="face">
+        <img loading="lazy" decoding="async" data-src="${utils.escapeHtml(utils.mediaUrl(rep.key))}" alt="face">
         <div class="fc-time">⏱ ${utils.fmtTime(rep.ts)}</div>
         <div class="fc-score">score ${rep.score.toFixed(2)}</div>
         ${cl.members.length > 1 ? `<div class="fc-badge">×${cl.members.length}</div>` : ''}`;
@@ -586,6 +621,7 @@ const preview = (() => {
         if (state.currentJob && state.currentJob.kind === 'video') {
           const vid = utils.$('#pv-vid');
           if (vid && rep.frame) { vid.currentTime = rep.frame.timestamp_ms / 1000; vid.play().catch(() => {}); }
+        } else if (state.currentJob && state.currentJob.kind === 'video') { const o = utils.$('#pv-orig'); if (o && rep.frame) { o.currentTime = rep.frame.timestamp_ms / 1000; o.play().catch(() => {}); }
         }
       });
       grid.appendChild(card);
@@ -911,7 +947,7 @@ function exportCSV() {
   let n = 0;
   for (const f of job.frames || []) {
     for (const face of f.faces || []) {
-      rows.push([f.index, f.timestamp_ms, face.x, face.y, face.w, face.h, face.score, '/media/' + face.key]); n++;
+      rows.push([f.index, f.timestamp_ms, face.x, face.y, face.w, face.h, face.score, utils.mediaUrl(face.key)]); n++;
     }
   }
   const csv = rows.map(r => r.map(v => {
