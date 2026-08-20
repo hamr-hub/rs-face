@@ -1,7 +1,9 @@
 # Project rustfmt configuration.
 # Defaults plus a slightly higher line width for descriptive comments.
+# Note: `imports_granularity = "Crate"` is omitted — it requires nightly
+# rustfmt and CI's stable rustfmt silently ignores the option, causing
+# drift between local and CI `cargo fmt --check`.
 edition = "2021"
 max_width = 100
 tab_spaces = 4
-imports_granularity = "Crate"
 reorder_imports = true
