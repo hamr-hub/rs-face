@@ -103,18 +103,13 @@ impl GpuIntegral {
 mod stub {
     use super::{Cascade, GpuDetection, GpuInfo, GrayImage};
 
-    pub struct Context;
+    pub struct Context {
+        pub info: GpuInfo,
+    }
 
     impl Context {
         pub fn new() -> Result<Self, ()> {
             Err(())
-        }
-        pub fn info(&self) -> GpuInfo {
-            GpuInfo {
-                platform_name: String::new(),
-                device_name: String::new(),
-                compute_units: 0,
-            }
         }
         pub fn compute_integral(&self, _img: &GrayImage) -> Vec<u32> {
             Vec::new()

@@ -322,7 +322,23 @@ impl JobRegistry {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     reg.run_job(&job, &input)
                 }));
-                if let Some(h) = cancel_handle { let _ = h.join(); }
+                // run_job 已结束(成功 / 错误 / 主动 cancel)。立刻把 cancel 置位,
+                // 让 watchdog 看到 true 后立即 break,不再等 timeout 走完。
+                // 副作用:job 状态机进入终态后 cancel 标志也是 true,但 cancel API
+                // 的语义本来就是"取消信号已记录",不影响行为。
+                job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                // 限时 join watchdog:1s 内没醒就 detach,绝不让它阻塞 permit 释放。
+                // 修复 semaphore 卡死:之前 `h.join()` 会等 watchdog 走完整个
+                // timeout(120s / 300s),permit 一直持有,后续 job 全卡 queued。
+                if let Some(h) = cancel_handle {
+                    let join_deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(1);
+                    loop {
+                        if h.is_finished() { let _ = h.join(); break; }
+                        if std::time::Instant::now() >= join_deadline { break; }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
                 match result {
                     Ok(Ok(())) => { /* run_job 自己处理 success */ }
                     Ok(Err(e)) => {

@@ -1,6 +1,40 @@
 //! Debug helper: load a cascade, run it on a single image, and print
 //! per-stage decisions for a few candidate windows. Use to verify the
 //! cascade and feature evaluation are correct.
+//!
+//! Same clippy allow set as src/lib.rs (binary targets don't inherit the
+//! lib's crate-level allows).
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::erasing_op)]
+#![allow(clippy::manual_div_ceil)]
+#![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::manual_range_contains)]
+#![allow(clippy::manual_saturating_arithmetic)]
+#![allow(clippy::manual_checked_ops)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::io_other_error)]
+#![allow(clippy::mut_from_ref)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_match)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::while_let_loop)]
+#![allow(clippy::new_without_default)]
+#![allow(clippy::needless_collect)]
+#![allow(clippy::unused_self)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::single_match)]
+#![allow(clippy::no_effect)]
+#![allow(clippy::ptr_arg)]
+#![allow(unused_parens)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
+//! per-stage decisions for a few candidate windows. Use to verify the
+//! cascade and feature evaluation are correct.
 
 use rsface::haar::{Cascade, EvalCache};
 use rsface::image::{codec, GrayImage, RgbImage};
