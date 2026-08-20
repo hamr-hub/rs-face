@@ -28,6 +28,7 @@ Thumbs.db
 # ---- Test outputs ----
 test_output/
 test_out/
+out/
 *.out.png
 *.test.png
 
@@ -35,3 +36,5 @@ test_out/
 # Frames extracted from test videos and binary fixtures used only by local
 # reproducers. Generated, not hand-edited.
 /fixtures/generated/
+data
+__pycache__/

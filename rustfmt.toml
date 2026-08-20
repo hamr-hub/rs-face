@@ -1,0 +1,7 @@
+# Project rustfmt configuration.
+# Defaults plus a slightly higher line width for descriptive comments.
+edition = "2021"
+max_width = 100
+tab_spaces = 4
+imports_granularity = "Crate"
+reorder_imports = true

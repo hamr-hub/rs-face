@@ -1,0 +1,5 @@
+# Project-specific Clippy configuration.
+# Defaults are fine; we don't tighten the lints because the codebase
+# intentionally uses raw FFI (OpenCL) and operates on raw byte buffers in
+# the image codec, where `cast_*` and `ptr_arg` lints are mostly noise.
+avoid-breaking-exported-api = false
