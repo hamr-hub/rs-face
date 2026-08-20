@@ -98,13 +98,13 @@ impl GpuIntegral {
 mod opencl {
     use super::GpuInfo;
     use crate::image::GrayImage;
-    use std::ffi::CString;
+    use std::ffi::{c_char, CString};
     use std::ptr;
 
     extern "C" {
-        fn dlopen(filename: *const u8, flag: i32) -> *mut std::ffi::c_void;
-        fn dlsym(handle: *mut std::ffi::c_void, symbol: *const u8) -> *mut std::ffi::c_void;
-        fn dlerror() -> *mut u8;
+        fn dlopen(filename: *const c_char, flag: i32) -> *mut std::ffi::c_void;
+        fn dlsym(handle: *mut std::ffi::c_void, symbol: *const c_char) -> *mut std::ffi::c_void;
+        fn dlerror() -> *mut c_char;
     }
     const RTLD_LAZY: i32 = 0x00001;
     const RTLD_LOCAL: i32 = 0x00200;
@@ -157,7 +157,7 @@ mod opencl {
     type FnCreateProgramWithSource = unsafe extern "C" fn(
         ClContext,
         ClUint,
-        *const *const u8,
+        *const *const c_char,
         *const ClSize,
         *mut ClInt,
     ) -> ClProgram;
@@ -165,11 +165,11 @@ mod opencl {
         ClProgram,
         ClUint,
         *const ClDeviceId,
-        *const u8,
+        *const c_char,
         *mut std::ffi::c_void,
         *mut std::ffi::c_void,
     ) -> ClInt;
-    type FnCreateKernel = unsafe extern "C" fn(ClProgram, *const u8, *mut ClInt) -> ClKernel;
+    type FnCreateKernel = unsafe extern "C" fn(ClProgram, *const c_char, *mut ClInt) -> ClKernel;
     type FnSetKernelArg =
         unsafe extern "C" fn(ClKernel, ClUint, ClSize, *const std::ffi::c_void) -> ClInt;
     type FnEnqueueNDRangeKernel = unsafe extern "C" fn(
