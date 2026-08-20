@@ -38,6 +38,14 @@ opt-level = 1
 # in the comments at the top of src/lib.rs / src/bin/*.rs. Putting them
 # here means bins + tests + benches all inherit the same set without
 # having to paste the block in every file.
+[lints.rust]
+unused_imports = "allow"
+unused_mut = "allow"
+unused_variables = "allow"
+dead_code = "allow"
+unused_parens = "allow"
+static_mut_refs = "allow"
+
 [lints.clippy]
 too_many_arguments = "allow"
 type_complexity = "allow"
@@ -53,6 +61,9 @@ unnecessary_cast = "allow"
 io_other_error = "allow"
 mut_from_ref = "allow"
 redundant_closure = "allow"
+redundant_clone = "allow"
+clone_on_copy = "allow"
+needless_pass_by_ref_mut = "allow"
 needless_range_loop = "allow"
 collapsible_if = "allow"
 collapsible_match = "allow"
