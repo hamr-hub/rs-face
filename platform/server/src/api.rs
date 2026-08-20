@@ -19,7 +19,7 @@ use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -35,13 +35,15 @@ pub fn router(state: Arc<JobRegistry>) -> Router {
         .route("/api/health", get(health))
         .route("/api/config", get(config_info))
         .route("/api/jobs", get(list_jobs))
+        .route("/api/jobs/batch", post(batch_ops))
         .route("/api/jobs/image", post(upload_image))
         .route("/api/jobs/video", post(upload_video))
         .route("/api/jobs/stream", post(start_stream))
-        .route("/api/jobs/{id}", get(job_detail))
+        .route("/api/jobs/{id}", get(job_detail).delete(delete_job))
         .route("/api/jobs/{id}/cancel", post(cancel_job))
         .route("/api/jobs/{id}/events", get(job_events))
         .route("/api/jobs/{id}/compare", post(compare_algos))
+        .route("/api/jobs/{id}/retry", post(retry_job))
         .route("/media/{*key}", get(media))
         .route("/{file}", get(static_file))
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024)) // 1 GB 上传上限
@@ -428,6 +430,7 @@ async fn start_stream(State(state): State<Arc<JobRegistry>>, Json(req): Json<Str
     let display = url.clone();
     let job = state.create(JobKind::Stream, display);
     let id = job.id.clone();
+    state.set_original_input(&id, url.clone());
     state.spawn_run(job, url);
     Json(serde_json::json!({"job_id": id})).into_response()
 }

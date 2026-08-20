@@ -193,8 +193,17 @@ const preview = (() => {
   const hideHint = () => utils.$('#pv-stage-hint').classList.add('hidden');
 
   function resetMedia() {
-    const img = utils.$('#pv-img'); img.removeAttribute('src'); img.classList.add('hidden');
-    const vid = utils.$('#pv-vid'); vid.removeAttribute('src'); vid.classList.add('hidden');
+    const img = utils.$('#pv-img');
+    if (img) { img.removeAttribute('src'); img.classList.add('hidden'); }
+    const dbl = utils.$('#pv-double');
+    if (dbl) dbl.classList.add('hidden');
+    const sc = utils.$('#pv-shared-controls');
+    if (sc) sc.classList.add('hidden');
+    const o = utils.$('#pv-orig'), a = utils.$('#pv-anno');
+    if (o) { o.removeAttribute('src'); o.pause(); }
+    if (a) { a.removeAttribute('src'); a.pause(); }
+    const err = utils.$('#pv-error-banner');
+    if (err) { err.classList.add('hidden'); err.textContent = ''; }
     clearOverlay();
   }
 
@@ -239,16 +248,18 @@ const preview = (() => {
   }
 
   function renderImage(job) {
-    const img = utils.$('#pv-img'), vid = utils.$('#pv-vid');
-    vid.classList.add('hidden'); img.classList.remove('hidden');
+    const img = utils.$('#pv-img');
+    const dbl = utils.$('#pv-double'); if (dbl) dbl.classList.add('hidden');
+    const sc = utils.$('#pv-shared-controls'); if (sc) sc.classList.add('hidden');
+    img.classList.remove('hidden');
     const frames = job.frames || [];
     const first = frames.find(f => f.original_key) || frames[0];
     // 优先用 frame.original_key,没有时降级到 job.original_key(error 时只有这个)
     const src = (first && first.original_key) || job.original_key;
     if (src) {
       img.onload = () => { hideHint(); if (first) drawOverlay(job, first, img); };
-      img.onerror = () => { showHint('原图加载失败: ' + src); clearOverlay(); };
-      img.src = '/media/' + src;
+      img.onerror = () => { showHint('原图加载失败'); clearOverlay(); };
+      img.src = utils.mediaUrl(src);
     } else { img.classList.add('hidden'); showHint('无原图'); clearOverlay(); }
   }
 
@@ -388,24 +399,28 @@ const preview = (() => {
   }
 
   function renderStream(job) {
-    const img = utils.$('#pv-img'), vid = utils.$('#pv-vid');
-    vid.classList.add('hidden'); img.classList.remove('hidden');
+    const img = utils.$('#pv-img');
+    const dbl = utils.$('#pv-double');
+    const sc = utils.$('#pv-shared-controls');
+    if (dbl) dbl.classList.remove('hidden');
+    if (sc) sc.classList.remove('hidden');
+    img.classList.add('hidden');
+    const o = utils.$('#pv-orig'), a = utils.$('#pv-anno');
     const frames = job.frames || [];
     const last = [...frames].reverse().find(f => f.original_key) || frames[frames.length - 1];
     if (!last) {
       // 没有 frame 时降级到 job.original_key
       if (job.original_key) {
-        img.onload = () => hideHint();
-        img.onerror = () => showHint('原图加载失败');
-        img.src = '/media/' + job.original_key;
-      } else { img.classList.add('hidden'); showHint('等待原始帧…'); clearOverlay(); }
+        if (o) o.src = utils.mediaUrl(job.original_key);
+        if (o) o.onload = () => hideHint();
+        if (o) o.onerror = () => showHint('原图加载失败');
+      } else { showHint('等待原始帧…'); clearOverlay(); }
       return;
     }
     if (last.index === lastFrameIdx) return;
     lastFrameIdx = last.index;
-    img.onload = () => { hideHint(); drawOverlay(job, last, img); };
-    img.onerror = () => { showHint('原图加载失败'); };
-    img.src = '/media/' + last.original_key + '?v=' + last.index;
+    if (o) { o.src = utils.mediaUrl(last.original_key) + (last.original_key.includes('?') ? '&' : '?') + 'v=' + last.index; o.onload = () => { hideHint(); drawOverlay(job, last, o); }; }
+    if (a && last.annotated_key) { a.src = utils.mediaUrl(last.annotated_key) + (last.annotated_key.includes('?') ? '&' : '?') + 'v=' + last.index; }
   }
 
   function clearOverlay() {
@@ -505,7 +520,7 @@ const preview = (() => {
       const card = document.createElement('div');
       card.className = 'face-card';
       card.innerHTML = `
-        <img loading="lazy" decoding="async" data-src="/media/${utils.escapeHtml(rep.key)}" alt="face">
+        <img loading="lazy" decoding="async" data-src="${utils.escapeHtml(utils.mediaUrl(rep.key))}" alt="face">
         <div class="fc-time">⏱ ${utils.fmtTime(rep.ts)}</div>
         <div class="fc-score">score ${rep.score.toFixed(2)}</div>
         ${cl.members.length > 1 ? `<div class="fc-badge">×${cl.members.length}</div>` : ''}`;
@@ -756,8 +771,8 @@ function exportJSON() {
     frames: (job.frames || []).map(f => ({
       index: f.index, timestamp_ms: f.timestamp_ms,
       annotated_key: f.annotated_key, original_key: f.original_key,
-      annotated_url: f.annotated_key ? '/media/' + f.annotated_key : null,
-      original_url: f.original_key ? '/media/' + f.original_key : null,
+      annotated_url: f.annotated_key ? utils.mediaUrl(f.annotated_key) : null,
+      original_url: f.original_key ? utils.mediaUrl(f.original_key) : null,
       faces: (f.faces || []).map(face => ({
         key: face.key, url: '/media/' + face.key,
         x: face.x, y: face.y, w: face.w, h: face.h, score: face.score,
@@ -775,7 +790,7 @@ function exportCSV() {
   let n = 0;
   for (const f of job.frames || []) {
     for (const face of f.faces || []) {
-      rows.push([f.index, f.timestamp_ms, face.x, face.y, face.w, face.h, face.score, '/media/' + face.key]); n++;
+      rows.push([f.index, f.timestamp_ms, face.x, face.y, face.w, face.h, face.score, utils.mediaUrl(face.key)]); n++;
     }
   }
   const csv = rows.map(r => r.map(v => {
@@ -816,6 +831,16 @@ async function init() {
   utils.$('#pv-toggle-anno').addEventListener('click', preview.toggleAnno);
   utils.$('#pv-export-json').addEventListener('click', exportJSON);
   utils.$('#pv-export-csv').addEventListener('click', exportCSV);
+  // Bug 2 修复:error/cancelled 状态显示重跑按钮 → 重新上传同名文件
+  const retryBtn = utils.$('#pv-retry');
+  if (retryBtn) retryBtn.addEventListener('click', () => {
+    const job = state.currentJob; if (!job) return;
+    utils.toast('重跑:请重新上传 ' + job.display_name);
+    upload.openModal();
+  });
+  // 双画面视频播放器初始化
+  if (typeof preview.initSharedControls === 'function') preview.initSharedControls();
+  if (typeof preview.initDivider === 'function') preview.initDivider();
   try {
     const jobs = await api.listJobs();
     sidebar.setJobs(jobs);
