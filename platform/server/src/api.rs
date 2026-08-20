@@ -168,6 +168,72 @@ async fn cancel_job(State(state): State<Arc<JobRegistry>>, Path(id): Path<String
     }
 }
 
+async fn delete_job(State(state): State<Arc<JobRegistry>>, Path(id): Path<String>) -> Response {
+    state.request_cancel(&id);
+    let existed = state.remove(&id);
+    let db = state.db.clone();
+    let id_db = id.clone();
+    tokio::spawn(async move { db.delete_job(&id_db).await; });
+    if existed {
+        Json(serde_json::json!({"ok": true, "deleted": id})).into_response()
+    } else {
+        Json(serde_json::json!({"ok": true, "deleted": id, "from_db_only": true})).into_response()
+    }
+}
+
+#[derive(Deserialize)]
+struct BatchReq { ids: Vec<String>, op: String }
+
+async fn batch_ops(State(state): State<Arc<JobRegistry>>, Json(req): Json<BatchReq>) -> Response {
+    if req.ids.is_empty() { return error_response(StatusCode::BAD_REQUEST, "ids must not be empty"); }
+    match req.op.as_str() {
+        "delete" => {
+            for id in &req.ids { state.request_cancel(id); }
+            let removed = state.remove_many(&req.ids);
+            let db = state.db.clone();
+            let ids = req.ids.clone();
+            tokio::spawn(async move { db.delete_jobs(&ids).await; });
+            Json(serde_json::json!({"ok": true, "op": "delete", "requested": req.ids.len(), "removed_in_mem": removed.iter().filter(|x| **x).count()})).into_response()
+        }
+        "archive" => {
+            let mut n = 0;
+            for id in &req.ids { if state.set_archived(id, true) { n += 1; } }
+            Json(serde_json::json!({"ok": true, "op": "archive", "archived": n})).into_response()
+        }
+        "export" => {
+            let mut jobs = Vec::new();
+            for id in &req.ids {
+                if let Some(j) = state.get(id) {
+                    let mut s = j.summary();
+                    let frames = j.frames.lock().unwrap();
+                    s["frames"] = serde_json::to_value(&*frames).unwrap_or_default();
+                    jobs.push(s);
+                }
+            }
+            Json(serde_json::json!({"ok": true, "op": "export", "jobs": jobs})).into_response()
+        }
+        _ => error_response(StatusCode::BAD_REQUEST, "op must be one of: delete|archive|export"),
+    }
+}
+
+async fn retry_job(State(state): State<Arc<JobRegistry>>, Path(id): Path<String>) -> Response {
+    let original = {
+        let Some(j) = state.get(&id) else { return error_response(StatusCode::NOT_FOUND, "no such job"); };
+        let inp = j.original_input.lock().unwrap().clone();
+        let k = j.kind;
+        (inp, k)
+    };
+    let (inp, kind) = original;
+    let Some(input) = inp else { return error_response(StatusCode::BAD_REQUEST, "job has no original_input"); };
+    if kind == JobKind::Image { return error_response(StatusCode::BAD_REQUEST, "image retry requires re-upload; use /api/jobs/image"); }
+    let display = input.clone();
+    let job = state.create(kind, display);
+    let new_id = job.id.clone();
+    state.set_original_input(&new_id, input.clone());
+    state.spawn_run(job, input);
+    Json(serde_json::json!({"ok": true, "job_id": new_id})).into_response()
+}
+
 #[derive(serde::Deserialize, Default)]
 struct CompareQuery {
     /// Comma-separated algo list, e.g. `haar,cnn,yunet`. Optional —
