@@ -452,7 +452,7 @@ const preview = (() => {
     if (src) {
       img.onload = () => { hideHint(); if (first && first.annotated_key) drawOverlay(job, first, img); };
       img.onerror = () => { showHint('原图加载失败'); clearOverlay(); };
-      img.src = '/media/' + src;
+      img.src = utils.mediaUrl(src);
     } else { img.classList.add('hidden'); showHint('无原图'); clearOverlay(); }
   }
 
@@ -644,7 +644,7 @@ const preview = (() => {
       if (job.original_key) {
         img.onload = () => hideHint();
         img.onerror = () => showHint('原图加载失败');
-        img.src = '/media/' + job.original_key;
+        img.src = utils.mediaUrl(job.original_key);
       } else { img.classList.add('hidden'); showHint('等待原始帧…'); clearOverlay(); }
       return;
     }
@@ -793,7 +793,7 @@ const preview = (() => {
     if (state.currentJob) render(state.currentJob);
   }
 
-  return { open, close, render, toggleAnno, showEmpty, showDetail };
+  return { open, close, render, toggleAnno, showEmpty, showDetail, initSharedControls, initDivider };
 })();
 
 const upload = (() => {
@@ -1069,10 +1069,10 @@ function exportJSON() {
     frames: (job.frames || []).map(f => ({
       index: f.index, timestamp_ms: f.timestamp_ms,
       annotated_key: f.annotated_key, original_key: f.original_key,
-      annotated_url: f.annotated_key ? '/media/' + f.annotated_key : null,
-      original_url: f.original_key ? '/media/' + f.original_key : null,
+      annotated_url: f.annotated_key ? utils.mediaUrl(f.annotated_key) : null,
+      original_url: f.original_key ? utils.mediaUrl(f.original_key) : null,
       faces: (f.faces || []).map(face => ({
-        key: face.key, url: '/media/' + face.key,
+        key: face.key, url: utils.mediaUrl(face.key),
         x: face.x, y: face.y, w: face.w, h: face.h, score: face.score,
       })),
     })),

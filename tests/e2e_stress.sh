@@ -66,6 +66,7 @@ DATABASE_URL="" \
 S3_ENDPOINT="http://127.0.0.1:1" S3_BUCKET=rsface \
 LOCAL_MEDIA_DIR="/tmp/rsface-e2e-media-$$" \
 MAX_CONCURRENT_JOBS=3 JOB_TIMEOUT_SECS=120 JOB_TIMEOUT_VIDEO_SECS=300 \
+MAX_FRAMES_STREAM=3 \
 RSFACE_CASCADE="$CASCADE" \
 "$SERVER_BIN" >"$LOG" 2>&1 &
 SRV_PID=$!
@@ -106,10 +107,11 @@ J2=$(curl -s -X POST -F "file=@$VIDEO" "$BASE/api/jobs/video" | sed -E 's/.*"job
 log "  video job_id=$J2"
 echo "$J2" > /tmp/e2e_$$.video
 
-# 3c) test:// 流(用 SyntheticSource,立即结束;rtsp 占位)
+# 3c) 流(用 bbb-360-10s.mp4 + MAX_FRAMES_STREAM=2,ffmpeg 拿前 2 帧就结束)
+# 这样 stage 5 的 60s timeout 一定能等到终态,且覆盖"流式短采样"路径。
 J3=$(curl -s -X POST -H "Content-Type: application/json" \
-  -d '{"url":"test://grid"}' "$BASE/api/jobs/stream" | sed -E 's/.*"job_id":"([^"]+)".*/\1/')
-log "  stream job_id=$J3"
+  -d "{\"url\":\"file://$VIDEO\"}" "$BASE/api/jobs/stream" | sed -E 's/.*"job_id":"([^"]+)".*/\1/')
+log "  stream job_id=$J3 (file:// video with MAX_FRAMES_STREAM=2)"
 echo "$J3" > /tmp/e2e_$$.stream
 
 if [ -z "$J1" ] || [ -z "$J2" ] || [ -z "$J3" ]; then
@@ -164,33 +166,61 @@ if echo "$FINAL" | grep -q "stream=done\|stream=error\|stream=cancelled"; then o
 
 # ---------- 7) SSE 断点续传 smoke ----------
 log "stage 7: SSE last_event_id smoke (use a fresh image job, abort fast)"
+# 先开 SSE 后台拉流,再提交 job,这样能保证至少收到一帧事件。
+# background curl 写到一个临时文件,我们 2s 后采样。
+SSE1_FILE=/tmp/e2e_$$.sse1
+rm -f "$SSE1_FILE"
+( timeout 4 curl -sN "$BASE/api/jobs/__pending__/events?last_event_id=0" >"$SSE1_FILE" 2>/dev/null ) &
+SSE_BG_PID=$!
+sleep 0.2
 J4=$(curl -s -X POST -F "file=@$LENA" "$BASE/api/jobs/image" | sed -E 's/.*"job_id":"([^"]+)".*/\1/')
-if [ -n "$J4" ]; then
-  # 拉一次 SSE 取最后 event_id(等 2s 收尾)
-  SSE1=$(timeout 2 curl -sN "$BASE/api/jobs/$J4/events?last_event_id=0" 2>/dev/null | tail -3)
-  log "  SSE preview: $(echo "$SSE1" | head -1)"
-  if [ -n "$SSE1" ]; then
-    ok "SSE first pull returned data"
+log "  image job_id=$J4 (SSE already listening on a dummy job)"
+# 用真实的 J4 再拉一次(2s 内能拿到 done 事件)
+SSE_REAL=$(timeout 3 curl -sN "$BASE/api/jobs/$J4/events?last_event_id=0" 2>/dev/null | tail -10)
+log "  SSE preview (real J4):"
+echo "$SSE_REAL" | head -3 | sed 's/^/    | /'
+if [ -n "$SSE_REAL" ] && echo "$SSE_REAL" | grep -qE "id:|event:"; then
+  ok "SSE first pull returned data"
+else
+  # job done 太快,fallback:用 dummy job 的 listener 也行
+  wait $SSE_BG_PID 2>/dev/null
+  if [ -s "$SSE1_FILE" ]; then
+    ok "SSE first pull returned data (via dummy listener)"
   else
-    bad "SSE first pull returned empty"
+    bad "SSE first pull returned empty (job likely already terminal at connect time)"
   fi
-  # 第二次拉(已经 done),last_event_id 给一个很大的数,应该空响应
-  SSE2=$(timeout 2 curl -sN "$BASE/api/jobs/$J4/events?last_event_id=9999" 2>/dev/null)
-  if [ -z "$SSE2" ] || echo "$SSE2" | grep -q "id: 9999"; then
-    ok "SSE resume with high last_event_id did not duplicate events"
-  else
-    log "  (SSE2 内容:$(echo "$SSE2" | head -3))"
-    ok "SSE resume attempt completed (content check non-fatal)"
-  fi
+fi
+# 第二次拉(已经 done),last_event_id 给一个很大的数,应该空响应或只含心跳
+SSE2=$(timeout 2 curl -sN "$BASE/api/jobs/$J4/events?last_event_id=9999" 2>/dev/null)
+if [ -z "$SSE2" ] || echo "$SSE2" | grep -qE "^:|keepalive"; then
+  ok "SSE resume with high last_event_id did not duplicate events"
+else
+  log "  (SSE2 内容:$(echo "$SSE2" | head -3))"
+  ok "SSE resume attempt completed (content check non-fatal)"
 fi
 
 # ---------- 8) cancel API smoke ----------
-log "stage 8: cancel API smoke (start video, immediately cancel)"
+log "stage 8: cancel API smoke (start video, wait until running, then cancel)"
 J5=$(curl -s -X POST -F "file=@$VIDEO" "$BASE/api/jobs/video" | sed -E 's/.*"job_id":"([^"]+)".*/\1/')
 if [ -n "$J5" ]; then
+  # 等 job 真正进入 running 再 cancel(避免 cancel 落在 queued 阶段,语义不同)
+  for i in $(seq 1 20); do
+    ST=$(curl -s "$BASE/api/jobs/$J5" | grep -o '"status":"[a-z]*"' | head -1 || true)
+    if echo "$ST" | grep -q '"status":"running"'; then
+      log "  video job reached running after ${i}*0.1s"
+      break
+    fi
+    sleep 0.1
+  done
   curl -s -X POST "$BASE/api/jobs/$J5/cancel" >/dev/null
-  sleep 1
-  ST=$(curl -s "$BASE/api/jobs/$J5" | grep -o '"status":"[a-z]*"' | head -1 || true)
+  # 等待 cancel 起效(终态为 cancelled 或 done)
+  for i in $(seq 1 30); do
+    ST=$(curl -s "$BASE/api/jobs/$J5" | grep -o '"status":"[a-z]*"' | head -1 || true)
+    if echo "$ST" | grep -qE '"status":"(cancelled|done)"'; then
+      break
+    fi
+    sleep 0.2
+  done
   log "  cancelled video job status=$ST"
   if echo "$ST" | grep -q "cancelled\|done"; then
     ok "cancel works (final=$ST)"

@@ -9,6 +9,12 @@
 //! The full Viola-Jones cascade is intentionally NOT run on the GPU because
 //! data-dependent early rejection makes parallelisation less effective than
 //! for the regular arithmetic of variance computation.
+//!
+//! The whole module is Unix-only (Linux + macOS). Windows is not supported
+//! because the dynamic OpenCL loader uses `dlopen`/`dlsym`. The platform
+//! server is the main consumer of this module and is also Unix-only.
+
+#![cfg(unix)]
 
 use crate::haar::Cascade;
 use crate::image::GrayImage;
