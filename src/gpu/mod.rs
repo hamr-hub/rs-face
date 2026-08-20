@@ -10,11 +10,9 @@
 //! data-dependent early rejection makes parallelisation less effective than
 //! for the regular arithmetic of variance computation.
 //!
-//! The whole module is Unix-only (Linux + macOS). Windows is not supported
-//! because the dynamic OpenCL loader uses `dlopen`/`dlsym`. The platform
-//! server is the main consumer of this module and is also Unix-only.
-
-#![cfg(unix)]
+//! On non-Unix platforms (Windows) the module exports no-op stub types so
+//! the rest of the crate still compiles; the real OpenCL loader lives in a
+//! `#[cfg(unix)]` sub-module and is not compiled there.
 
 use crate::haar::Cascade;
 use crate::image::GrayImage;
@@ -97,6 +95,58 @@ impl GpuIntegral {
         unsafe { self.ctx.detect_windows(cascade, img, max_detections) }
     }
 }
+
+// ===== Non-Unix stub =====
+// On Windows (or any non-unix target) we keep the public types in scope so
+// `crate::gpu::GpuIntegral` etc. still resolve, but every method is a
+// no-op that always returns `None` / empty. The `use_gpu` flag on
+// `DetectorConfig` then trivially disables GPU for that build.
+#[cfg(not(unix))]
+mod stub {
+    use super::{Cascade, GpuDetection, GpuInfo, GrayImage};
+
+    pub struct Context;
+
+    impl Context {
+        pub fn new() -> Result<Self, ()> {
+            Err(())
+        }
+        pub fn info(&self) -> GpuInfo {
+            GpuInfo {
+                platform_name: String::new(),
+                device_name: String::new(),
+                compute_units: 0,
+            }
+        }
+        pub fn compute_integral(&self, _img: &GrayImage) -> Vec<u32> {
+            Vec::new()
+        }
+        pub fn compute_integral_dual(&self, _img: &GrayImage) -> (Vec<u32>, Vec<u64>) {
+            (Vec::new(), Vec::new())
+        }
+        pub fn variance_prefilter(
+            &self,
+            _img: &GrayImage,
+            _win_w: usize,
+            _win_h: usize,
+            _stride: usize,
+            _variance_threshold: u64,
+        ) -> Vec<u8> {
+            Vec::new()
+        }
+        pub fn detect_windows(
+            &self,
+            _cascade: &Cascade,
+            _img: &GrayImage,
+            _max_detections: usize,
+        ) -> Vec<GpuDetection> {
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub use stub::Context;
 
 // ===== OpenCL FFI + dynamic loader =====
 
