@@ -220,12 +220,14 @@ mod tests {
         let p1 = {
             let v = acquire_integral_u64(10, 10);
             assert_eq!(v.len(), 11 * 11);
-            v.as_ptr()
+            let p = v.as_ptr();
+            release_integral_u64(10, 10, v);
+            p
         };
-        // Release, dirty it, release again — the pool hands back the same
-        // allocation with the right length. It is NOT pre-zeroed (the
-        // integral builders zero exactly the padding cells they read);
-        // length is what the pool must guarantee.
+        // Acquire again — the pool must hand back the same allocation with
+        // the right length. It is NOT pre-zeroed (the integral builders
+        // zero exactly the padding cells they read); length is what the
+        // pool must guarantee.
         let mut v = acquire_integral_u64(10, 10);
         assert_eq!(p1, v.as_ptr(), "pool should reuse the backing allocation");
         v.fill(0xDEAD_BEEF);
