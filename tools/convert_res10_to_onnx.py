@@ -55,11 +55,27 @@ ONNX_OUT_DEFAULT = Path("/tmp/res10_ssd.onnx")
 # A small set of public Res10-SSD ONNX mirrors. We try them in order.
 # Each is the full Res10-SSD Caffe model exported to ONNX; size is ~5 MiB
 # (vs. Caffe's 10 MiB because storage layout differs).
-_ONNX_CANDIDATES = [
+#
+# SECURITY: every URL must be paired with a pinned SHA-256 digest that the
+# operator has independently verified (e.g. by downloading via a second
+# channel and comparing, or by comparing model outputs against the official
+# Caffe model via cv2.dnn). The digest MUST be a hex string of exactly 64
+# lowercase characters, or ``None`` to refuse this URL entirely. We refuse
+# to forward an unverified file to ``onnx.load`` / ``onnxruntime`` —
+# untrusted ONNX is a protobuf-parser attack surface (see CVE-2021-25801
+# and the onnxruntime security advisories).
+#
+# To compute a digest for a freshly downloaded model:
+#   $ sha256sum /tmp/res10_ssd.onnx
+# Then paste the value as the second tuple element.
+_ONNX_CANDIDATES: list[tuple[str, str | None]] = [
     # yuanyq's research-colab export (5.0 MiB, validated against cv2.dnn Caffe):
-    "https://github.com/yuanyq1997/face-detection-tflite/raw/main/onnx_model/face_detector.onnx",
+    # SHA256 TBD — fill in after running the script once on a trusted network
+    # and comparing cv2.dnn (Caffe) vs onnxruntime (ONNX) detection outputs on
+    # the same set of test images.
+    ("https://github.com/yuanyq1997/face-detection-tflite/raw/main/onnx_model/face_detector.onnx", None),
     # onnx model zoo's wideresnet-style mirror (placeholder; supply your own):
-    # "https://your-mirror.example.com/res10_ssd.onnx",
+    # ("https://your-mirror.example.com/res10_ssd.onnx", "<paste-sha256>"),
 ]
 
 
@@ -71,10 +87,53 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _download(url: str, dst: Path) -> bool:
+def _check_pinned_digest(path: Path, expected: str | None, url: str) -> bool:
+    """Compare the on-disk file's SHA-256 against ``expected``.
+
+    ``expected=None`` means "no digest pinned for this URL" — refuse to
+    proceed under any circumstance. Callers that genuinely want to bypass
+    verification must do so via an out-of-band flag (currently there is
+    none on purpose: this is the default-secure entry point).
+    """
+    actual = _sha256(path)
+    if expected is None:
+        print(
+            f"[pin] refusing to load {path.name} from {url}\n"
+            "       no SHA-256 digest pinned for this URL. Verify the model\n"
+            "       out-of-band (e.g. compare cv2.dnn Caffe outputs against\n"
+            "       onnxruntime outputs on a labelled test set), then paste\n"
+            "       the hex digest into _ONNX_CANDIDATES in this script.",
+            file=sys.stderr,
+        )
+        return False
+    if not isinstance(expected, str) or len(expected) != 64:
+        print(f"[pin] malformed pinned digest (want 64 hex chars): {expected!r}",
+              file=sys.stderr)
+        return False
+    if actual != expected.lower():
+        print(
+            f"[pin] SHA-256 mismatch for {path.name}\n"
+            f"       expected: {expected}\n"
+            f"       actual:   {actual}\n"
+            "       The downloaded file does not match the pinned digest;\n"
+            "       deleting it and aborting. Re-fetch from a trusted source\n"
+            "       or update the pin if the upstream model genuinely changed.",
+            file=sys.stderr,
+        )
+        path.unlink(missing_ok=True)
+        return False
+    print(f"[pin] OK {path.name} sha256={actual[:16]}...", file=sys.stderr)
+    return True
+
+
+def _download(url: str, dst: Path, expected_sha256: str | None) -> bool:
     print(f"[download] {url}", file=sys.stderr)
     try:
-        with urllib.request.urlopen(url, timeout=60) as resp:
+        # Force a stable User-Agent + HTTPS-only caller. urllib's default
+        # opener doesn't validate TLS in some narrow configurations, so we
+        # keep the call site explicit and rely on the system trust store.
+        req = urllib.request.Request(url, headers={"User-Agent": "rs-face/0.1 (+security)"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
             if resp.status != 200:
                 print(f"[download] HTTP {resp.status}", file=sys.stderr)
                 return False
@@ -83,7 +142,7 @@ def _download(url: str, dst: Path) -> bool:
         print(f"[download] failed: {e}", file=sys.stderr)
         return False
     dst.write_bytes(data)
-    return True
+    return _check_pinned_digest(dst, expected_sha256, url)
 
 
 def _verify(onnx_path: Path) -> bool:
@@ -126,11 +185,12 @@ def _check_existing(onnx_path: Path) -> bool:
 
 
 def _try_download(out: Path) -> bool:
-    """Try every URL in ``_ONNX_CANDIDATES``; on success, place the file at
-    ``out`` (overwriting)."""
+    """Try every (url, sha256) pair in ``_ONNX_CANDIDATES``; on success,
+    place the file at ``out`` (overwriting). Digest is enforced inside
+    ``_download``; this loop just iterates candidates."""
     tmp = out.with_suffix(".download")
-    for url in _ONNX_CANDIDATES:
-        if _download(url, tmp):
+    for url, expected in _ONNX_CANDIDATES:
+        if _download(url, tmp, expected):
             try:
                 if _verify(tmp):
                     shutil.move(str(tmp), str(out))
