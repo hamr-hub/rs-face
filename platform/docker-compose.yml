@@ -50,14 +50,17 @@ services:
       dockerfile: platform/Dockerfile
     image: rsface-server:latest
     container_name: rsface-server
+    # host 网络模式:server 直接绑 host 的 0.0.0.0:20080,绕开 docker iptables NAT。
+    # 跟 rustfs / postgres 走 127.0.0.1:<host-mapped-port> 通信。
+    network_mode: host
     depends_on:
       rustfs:
         condition: service_healthy
       postgres:
         condition: service_healthy
     environment:
-      BIND_ADDR: 0.0.0.0:8080
-      S3_ENDPOINT: http://rustfs:9000
+      BIND_ADDR: 0.0.0.0:20080
+      S3_ENDPOINT: http://127.0.0.1:19000
       S3_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rsface}
       S3_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rsface-secret}
       S3_BUCKET: rsface
@@ -67,10 +70,8 @@ services:
       MAX_FRAMES_VIDEO: ${MAX_FRAMES_VIDEO:-3600}
       MAX_FACE_CROPS: ${MAX_FACE_CROPS:-2000}
       MIN_FACE_SIZE: ${MIN_FACE_SIZE:-24}
-      DATABASE_URL: postgres://rsface:rsface-pass@postgres:5432/rsface
+      DATABASE_URL: postgres://rsface:rsface-pass@127.0.0.1:15432/rsface
       LOCAL_MEDIA_DIR: /var/rsface-media
-    ports:
-      - "20080:8080"
     volumes:
       - rsface-media:/var/rsface-media
     restart: unless-stopped
