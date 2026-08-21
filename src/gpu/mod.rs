@@ -11,12 +11,12 @@
 //!     ``mlu.rs``); vendors with no SDK on the host probe as
 //!     unavailable and the dispatcher falls back to OpenCL.
 
-pub mod backend;
-pub mod metal;
-pub mod cuda;
-pub mod rocm;
 pub mod ascend;
+pub mod backend;
+pub mod cuda;
+pub mod metal;
 pub mod mlu;
+pub mod rocm;
 
 use crate::haar::Cascade;
 use crate::image::GrayImage;
@@ -322,16 +322,28 @@ mod opencl {
     unsafe fn c_dlsym(handle: *mut std::ffi::c_void, name: &str) -> Option<*mut std::ffi::c_void> {
         let c = CString::new(name).ok()?;
         let p = dlsym(handle, c.as_ptr() as *const u8);
-        if p.is_null() { None } else { Some(p) }
+        if p.is_null() {
+            None
+        } else {
+            Some(p)
+        }
     }
 
     fn load() -> Option<&'static Lib> {
         unsafe {
-            if LIB.is_some() { return LIB.as_ref(); }
+            if LIB.is_some() {
+                return LIB.as_ref();
+            }
             for name in candidate_names() {
-                let c = match CString::new(*name) { Ok(s) => s, Err(_) => continue };
+                let c = match CString::new(*name) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
                 let h = dlopen(c.as_ptr() as *const u8, RTLD_LAZY | RTLD_LOCAL);
-                if !h.is_null() { LIB_HANDLE = h; break; }
+                if !h.is_null() {
+                    LIB_HANDLE = h;
+                    break;
+                }
             }
             macro_rules! sym {
                 ($name:literal, $ty:ty) => {{
@@ -657,9 +669,21 @@ mod opencl {
             }
             let src = CString::new(CL_KERNEL_SRC).unwrap();
             let src_len = CL_KERNEL_SRC.len() as ClSize;
-            let program = (lib.create_program_with_source)(ctx, 1, &(src.as_ptr() as *const u8), &src_len, &mut errc);
-            if errc != CL_SUCCESS { (lib.release_command_queue)(queue); (lib.release_context)(ctx); return Err("create_program failed"); }
-            let build_err = (lib.build_program)(program, 1, &device, ptr::null(), ptr::null_mut(), ptr::null_mut());
+            let src_ptr = src.as_ptr() as *const i8;
+            let program = (lib.create_program_with_source)(ctx, 1, &src_ptr, &src_len, &mut errc);
+            if errc != CL_SUCCESS {
+                (lib.release_command_queue)(queue);
+                (lib.release_context)(ctx);
+                return Err("create_program failed");
+            }
+            let build_err = (lib.build_program)(
+                program,
+                1,
+                &device,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
             if build_err != CL_SUCCESS {
                 (lib.release_program)(program);
                 (lib.release_command_queue)(queue);
@@ -669,8 +693,13 @@ mod opencl {
             let mk = |name: &str| -> Result<ClKernel, &'static str> {
                 let cs = CString::new(name).unwrap();
                 let mut errk: ClInt = 0;
-                let k = (lib.create_kernel)(program, cs.as_ptr() as *const u8, &mut errk);
-                if errk != CL_SUCCESS { Err("create_kernel failed") } else { Ok(k) }
+                let name_ptr = cs.as_ptr() as *const i8;
+                let k = (lib.create_kernel)(program, name_ptr, &mut errk);
+                if errk != CL_SUCCESS {
+                    Err("create_kernel failed")
+                } else {
+                    Ok(k)
+                }
             };
             let kernel_integral = mk("integral_row").map_err(|_| {
                 (lib.release_program)(program);
@@ -1495,7 +1524,13 @@ mod opencl {
                     let y = chunk[1];
                     let bits = chunk[2];
                     let score = f32::from_bits(bits);
-                    out.push(super::GpuDetection { x, y, w: 0, h: 0, score });
+                    out.push(super::GpuDetection {
+                        x,
+                        y,
+                        w: 0,
+                        h: 0,
+                        score,
+                    });
                 }
                 out
             }

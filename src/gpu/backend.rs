@@ -112,11 +112,11 @@ pub trait GpuBackend: Send + Sync {
 // Vendors live alongside this file at `src/gpu/<vendor>.rs`. Reference
 // them via their crate path so the linker picks them up regardless of
 // where this module is included.
-use crate::gpu::metal;
-use crate::gpu::cuda;
-use crate::gpu::rocm;
 use crate::gpu::ascend;
+use crate::gpu::cuda;
+use crate::gpu::metal;
 use crate::gpu::mlu;
+use crate::gpu::rocm;
 
 /// Static descriptor for each backend. Lets the dispatcher probe without
 /// importing the implementation types directly.
@@ -172,6 +172,82 @@ pub fn get(id: &str) -> Option<Box<dyn GpuBackend>> {
     None
 }
 
+// ---------------------------------------------------------------------
+//   OpenCL passthrough — wraps the existing zero-dep driver in mod.rs
+// ---------------------------------------------------------------------
+//
+// We don't touch the original OpenCL FFI implementation; it already
+// works on every supported host (Apple Silicon via Metal-OpenCL,
+// Intel/AMD/NVIDIA via the system ICD). Wrapping it in the trait lets
+// every other backend slot into the same dispatcher surface.
+
+pub struct OpenClDescriptor;
+
+pub static OPENCL_DESCRIPTOR: OpenClDescriptor = OpenClDescriptor;
+
+impl BackendDescriptor for OpenClDescriptor {
+    fn id(&self) -> &'static str {
+        "opencl"
+    }
+    fn vendor(&self) -> &'static str {
+        "OpenCL (Metal/Intel/AMD/NVIDIA ICD)"
+    }
+    fn probe(&self) -> Option<Box<dyn GpuBackend>> {
+        crate::gpu::GpuIntegral::new().map(|g| {
+            let info = GpuInfo {
+                backend: "opencl",
+                vendor: g.info().platform_name.clone(),
+                device: g.info().device_name.clone(),
+                driver_version: "?".to_string(),
+                compute_units: g.info().compute_units,
+            };
+            let passthrough: Box<dyn GpuBackend> = Box::new(OpenClPassthrough { inner: g, info });
+            passthrough
+        })
+    }
+}
+
+struct OpenClPassthrough {
+    inner: crate::gpu::GpuIntegral,
+    info: GpuInfo,
+}
+
+impl GpuBackend for OpenClPassthrough {
+    fn info(&self) -> &GpuInfo {
+        &self.info
+    }
+
+    fn variance_prefilter(
+        &self,
+        img: &GrayImage,
+        win_w: usize,
+        win_h: usize,
+        stride: usize,
+        variance_threshold: u64,
+    ) -> Vec<u8> {
+        self.inner
+            .variance_prefilter(img, win_w, win_h, stride, variance_threshold)
+    }
+
+    fn detect_windows(
+        &self,
+        cascade: &Cascade,
+        img: &GrayImage,
+        max_detections: usize,
+    ) -> Vec<GpuDetection> {
+        let raw = self.inner.detect_windows(cascade, img, max_detections);
+        raw.into_iter()
+            .map(|g| GpuDetection {
+                x: g.x,
+                y: g.y,
+                w: 0, // OpenCL passthrough: cascade.window_w filled in by caller
+                h: 0,
+                score: g.score,
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,7 +273,11 @@ mod tests {
     fn backends_list_contains_expected_ids() {
         let ids: Vec<&'static str> = BACKENDS.iter().map(|d| d.id()).collect();
         // The cross-platform fallback must always be present.
-        assert!(ids.contains(&"opencl"), "BACKENDS missing opencl: {:?}", ids);
+        assert!(
+            ids.contains(&"opencl"),
+            "BACKENDS missing opencl: {:?}",
+            ids
+        );
         // Every vendor stub exposes an id; we don't require them to probe
         // successfully on this host, just to be registered.
         for expected in ["metal", "cuda", "rocm", "ascend", "mlu"].iter() {
@@ -286,9 +366,18 @@ mod tests {
     /// though none has an SDK checked in.
     #[test]
     fn stub_vendors_probe_returns_none() {
-        assert!(cuda::CUDA.probe().is_none(), "CUDA stub should probe as None");
-        assert!(rocm::ROCM.probe().is_none(), "ROCm stub should probe as None");
-        assert!(ascend::ASCEND.probe().is_none(), "Ascend stub should probe as None");
+        assert!(
+            cuda::CUDA.probe().is_none(),
+            "CUDA stub should probe as None"
+        );
+        assert!(
+            rocm::ROCM.probe().is_none(),
+            "ROCm stub should probe as None"
+        );
+        assert!(
+            ascend::ASCEND.probe().is_none(),
+            "Ascend stub should probe as None"
+        );
         assert!(mlu::MLU.probe().is_none(), "MLU stub should probe as None");
     }
 
@@ -336,7 +425,11 @@ mod tests {
         let mask = backend.variance_prefilter(&img, 24, 24, 4, 200);
         let nx = (120 + 4 - 1) / 4;
         let ny = (120 + 4 - 1) / 4;
-        assert_eq!(mask.len(), nx * ny, "variance_prefilter returned wrong mask size");
+        assert_eq!(
+            mask.len(),
+            nx * ny,
+            "variance_prefilter returned wrong mask size"
+        );
 
         // detect_windows with the demo cascade must produce a Vec
         // (possibly empty — no detections in a uniform image).
@@ -374,6 +467,7 @@ mod tests {
             min_score: 0.0,
             variance_threshold: u64::MAX, // disable pre-filter for uniform image
             use_gpu: false,
+            equalize_hist: false,
         };
         let det = Detector::new(cascade, cfg);
         let img = GrayImage::new(64, 64); // uniform 0-luminance image
@@ -401,74 +495,5 @@ mod tests {
             assert_eq!(a.h, b.h, "detector h drift");
             assert_eq!(a.score.to_bits(), b.score.to_bits(), "detector score drift");
         }
-    }
-}
-
-// ---------------------------------------------------------------------
-//   OpenCL passthrough — wraps the existing zero-dep driver in mod.rs
-// ---------------------------------------------------------------------
-//
-// We don't touch the original OpenCL FFI implementation; it already
-// works on every supported host (Apple Silicon via Metal-OpenCL,
-// Intel/AMD/NVIDIA via the system ICD). Wrapping it in the trait lets
-// every other backend slot into the same dispatcher surface.
-
-pub struct OpenClDescriptor;
-
-pub static OPENCL_DESCRIPTOR: OpenClDescriptor = OpenClDescriptor;
-
-impl BackendDescriptor for OpenClDescriptor {
-    fn id(&self) -> &'static str { "opencl" }
-    fn vendor(&self) -> &'static str { "OpenCL (Metal/Intel/AMD/NVIDIA ICD)" }
-    fn probe(&self) -> Option<Box<dyn GpuBackend>> {
-        crate::gpu::GpuIntegral::new().map(|g| {
-            let info = GpuInfo {
-                backend: "opencl",
-                vendor: g.info().platform_name.clone(),
-                device: g.info().device_name.clone(),
-                driver_version: "?".to_string(),
-                compute_units: g.info().compute_units,
-            };
-            let passthrough: Box<dyn GpuBackend> = Box::new(OpenClPassthrough { inner: g, info });
-            passthrough
-        })
-    }
-}
-
-struct OpenClPassthrough {
-    inner: crate::gpu::GpuIntegral,
-    info: GpuInfo,
-}
-
-impl GpuBackend for OpenClPassthrough {
-    fn info(&self) -> &GpuInfo { &self.info }
-
-    fn variance_prefilter(
-        &self,
-        img: &GrayImage,
-        win_w: usize,
-        win_h: usize,
-        stride: usize,
-        variance_threshold: u64,
-    ) -> Vec<u8> {
-        self.inner.variance_prefilter(img, win_w, win_h, stride, variance_threshold)
-    }
-
-    fn detect_windows(
-        &self,
-        cascade: &Cascade,
-        img: &GrayImage,
-        max_detections: usize,
-    ) -> Vec<GpuDetection> {
-        let raw = self.inner.detect_windows(cascade, img, max_detections);
-        raw.into_iter()
-            .map(|g| GpuDetection {
-                x: g.x,
-                y: g.y,
-                w: 0, // OpenCL passthrough: cascade.window_w filled in by caller
-                h: 0,
-                score: g.score,
-            })
-            .collect()
     }
 }

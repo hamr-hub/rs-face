@@ -18,12 +18,15 @@
 //!   * NVIDIA driver installed and loaded (``nvidia-smi`` reports the card).
 //!   * CUDA toolkit (>= 12.x) so ``libcuda`` + NVRTC are available on
 //!     ``LD_LIBRARY_PATH`` (Linux) / ``PATH`` (Windows).
+//!   * You also need to pick a CUDA version feature for ``cudarc``
+//!     itself, e.g. ``--features "cuda-backend,cudarc/cuda-12060"``.
+//!     See ``cudarc``'s ``build.rs`` for the list of supported versions.
 //!
 //! Implementation
 //! --------------
 //!
 //! Kernels are written in CUDA C and compiled **just-in-time** at startup
-//! via NVRTC (``cudarc::nvrtc::safe::compile_ptx``). The source is a
+//! via NVRTC (``cudarc::nvrtc::compile_ptx``). The source is a
 //! line-for-line port of the OpenCL cascade kernels in
 //! ``mod.rs::CL_KERNEL_SRC``; only the address-space qualifiers and
 //! index intrinsics change:
@@ -33,8 +36,8 @@
 //!   __global       (address space) → drop qualifier (CUDA implicit global ptr)
 //!   __local                      → __shared__
 //!   get_global_id(d)             → blockIdx.*dim * blockDim.*dim + threadIdx.*dim
-//!   atom_inc(out_count)          → atomicAdd(out_count, 1u) (returns old value)
-//!   as_uint(total)               → __float_as_uint(total)
+//!   atom_inc(out)                → atomicAdd(out, 1u) (returns the old value)
+//!   as_uint(x)                   → __float_as_uint(x)
 //! ```
 //!
 //! The same algorithm, the same cascade weights, and the same integral
@@ -60,33 +63,53 @@
 
 #[cfg(feature = "cuda-backend")]
 mod imp {
-    use super::super::backend::{
-        BackendDescriptor, GpuBackend, GpuDetection, GpuInfo,
-    };
+    use super::super::backend::{BackendDescriptor, GpuBackend, GpuDetection, GpuInfo};
     use crate::haar::Cascade;
     use crate::image::GrayImage;
 
-    use cudarc::driver::{CudaDevice, CudaFunction, CudaSlice, LaunchAsync, LaunchConfig};
-    use cudarc::nvrtc::safe::compile_ptx;
+    use cudarc::driver::{
+        CudaDevice, CudaFunction, CudaSlice, DeviceRepr, LaunchAsync, LaunchConfig,
+    };
+    use cudarc::nvrtc::compile_ptx;
     use std::sync::Arc;
 
     pub struct CudaDescriptor;
     pub static CUDA_DESCRIPTOR: CudaDescriptor = CudaDescriptor;
 
     impl BackendDescriptor for CudaDescriptor {
-        fn id(&self) -> &'static str { "cuda" }
+        fn id(&self) -> &'static str {
+            "cuda"
+        }
         fn vendor(&self) -> &'static str {
             "NVIDIA CUDA (cudarc driver API + NVRTC)"
         }
         fn probe(&self) -> Option<Box<dyn GpuBackend>> {
-            // `CudaDevice::new(0)` opens device 0 via libcuda. Returns
-            // Err on hosts without an NVIDIA driver or when no GPU is
-            // installed (the common case on macOS / CI containers) — the
-            // dispatcher then falls through to OpenCL.
-            CudaDevice::new(0).ok().map(|dev| {
-                Box::new(CudaBackend::new(dev).expect("CUDA pipeline init"))
-                    as Box<dyn GpuBackend>
-            })
+            // `CudaDevice::new(0)` opens device 0 via libcuda. On hosts
+            // without an NVIDIA driver, cudarc 0.12 panics inside
+            // `result::init()` (it can't `dlopen("libcuda")`); we
+            // `catch_unwind` so the dispatcher can still gracefully
+            // fall through to OpenCL.
+            let dev = match std::panic::catch_unwind(|| CudaDevice::new(0)) {
+                Ok(Ok(d)) => d,
+                Ok(Err(e)) => {
+                    eprintln!("[rs-face] CUDA backend disabled: {}", e);
+                    return None;
+                }
+                Err(_) => {
+                    // cudarc panicked because libcuda is missing — the
+                    // common case on macOS / CI containers without
+                    // NVIDIA hardware. Quietly skip.
+                    return None;
+                }
+            };
+            let backend = match CudaBackend::new(dev) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("[rs-face] CUDA backend init failed: {}", e);
+                    return None;
+                }
+            };
+            Some(Box::new(backend) as Box<dyn GpuBackend>)
         }
     }
 
@@ -301,11 +324,13 @@ mod imp {
     // -----------------------------------------------------------------
 
     pub struct CudaBackend {
+        // `CudaDevice::new` returns `Arc<CudaDevice>` directly; we keep
+        // the Arc so multiple detect threads can clone() it if needed.
         device: Arc<CudaDevice>,
         // Function handles for each kernel. ``CudaDevice`` retains a
-        // reference to the loaded PTX module internally, so dropping
-        // these function handles does not unload the module — they are
-        // cheap to clone if needed in the future.
+        // reference to the loaded PTX module internally (keyed by
+        // module name), so dropping these function handles does not
+        // unload the module — they are cheap to clone if needed.
         func_int_row: CudaFunction,
         func_int_col: CudaFunction,
         func_int_row_dual: CudaFunction,
@@ -316,14 +341,13 @@ mod imp {
     }
 
     impl CudaBackend {
-        pub fn new(device: CudaDevice) -> Result<Self, String> {
+        pub fn new(device: Arc<CudaDevice>) -> Result<Self, String> {
             // Compile the kernel source via NVRTC and load the resulting
             // PTX into the device. Compilation happens once per backend
             // instance; subsequent calls reuse the compiled module
             // (cached inside ``CudaDevice`` keyed by module name).
-            let ptx = compile_ptx(CUDA_KERNEL_SRC)
-                .map_err(|e| format!("NVRTC compile failed: {}", e))?;
-            let device = Arc::new(device);
+            let ptx =
+                compile_ptx(CUDA_KERNEL_SRC).map_err(|e| format!("NVRTC compile failed: {}", e))?;
             device
                 .load_ptx(
                     ptx,
@@ -339,24 +363,26 @@ mod imp {
                 )
                 .map_err(|e| format!("load_ptx failed: {}", e))?;
 
-            let func_int_row      = device
+            // `get_func` returns Option in cudarc 0.12 — convert it to a
+            // Result so we can use `?` consistently.
+            let func_int_row = device
                 .get_func("rsface_cuda", "integral_row")
-                .map_err(|e| format!("get integral_row: {}", e))?;
-            let func_int_col      = device
+                .ok_or_else(|| "get integral_row: not found".to_string())?;
+            let func_int_col = device
                 .get_func("rsface_cuda", "integral_col")
-                .map_err(|e| format!("get integral_col: {}", e))?;
+                .ok_or_else(|| "get integral_col: not found".to_string())?;
             let func_int_row_dual = device
                 .get_func("rsface_cuda", "integral_row_dual")
-                .map_err(|e| format!("get integral_row_dual: {}", e))?;
+                .ok_or_else(|| "get integral_row_dual: not found".to_string())?;
             let func_int_col_dual = device
                 .get_func("rsface_cuda", "integral_col_dual")
-                .map_err(|e| format!("get integral_col_dual: {}", e))?;
-            let func_variance     = device
+                .ok_or_else(|| "get integral_col_dual: not found".to_string())?;
+            let func_variance = device
                 .get_func("rsface_cuda", "variance_prefilter")
-                .map_err(|e| format!("get variance_prefilter: {}", e))?;
-            let func_detect       = device
+                .ok_or_else(|| "get variance_prefilter: not found".to_string())?;
+            let func_detect = device
                 .get_func("rsface_cuda", "detect_windows")
-                .map_err(|e| format!("get detect_windows: {}", e))?;
+                .ok_or_else(|| "get detect_windows: not found".to_string())?;
 
             let info = GpuInfo {
                 backend: "cuda",
@@ -390,10 +416,7 @@ mod imp {
                 .device
                 .htod_copy(img.as_slice().to_vec())
                 .expect("upload input image");
-            let d_out: CudaSlice<u32> = self
-                .device
-                .alloc_zeros(out_size)
-                .expect("alloc ii buffer");
+            let d_out: CudaSlice<u32> = self.device.alloc_zeros(out_size).expect("alloc ii buffer");
             let d_out_sq: CudaSlice<u64> = self
                 .device
                 .alloc_zeros(out_size)
@@ -401,13 +424,19 @@ mod imp {
 
             // Row pass: 1D grid, one thread per row.
             let cfg_row = LaunchConfig {
-                grid_dim: ((h as u32 + 255) / 256, 1, 1),
+                grid_dim: ((h + 255) / 256, 1, 1),
                 block_dim: (256, 1, 1),
                 shared_mem_bytes: 0,
             };
+            // cudarc's LaunchAsync requires scalars to be passed BY VALUE
+            // (DeviceRepr is impl'd for primitives, not `&u32`), and
+            // slices by reference (D deref -> DevicePtr<T>). Also,
+            // `launch` consumes the receiver, so we `clone()` the
+            // `CudaFunction` handle each call (cheap: it's just an Arc).
             unsafe {
                 self.func_int_row_dual
-                    .launch(cfg_row, (&d_in, &d_out, &d_out_sq, &w, &h))
+                    .clone()
+                    .launch(cfg_row, (&d_in, &d_out, &d_out_sq, w, h))
                     .expect("launch integral_row_dual");
             }
 
@@ -420,17 +449,15 @@ mod imp {
             };
             unsafe {
                 self.func_int_col_dual
-                    .launch(cfg_col, (&d_out, &d_out_sq, &w_plus_1, &h))
+                    .clone()
+                    .launch(cfg_col, (&d_out, &d_out_sq, w_plus_1, h))
                     .expect("launch integral_col_dual");
             }
 
-            let ii: Vec<u32> = self
+            let ii = self.device.dtoh_sync_copy(&d_out).expect("download ii");
+            let ii_sq = self
                 .device
-                .dtoh_copy(&d_out)
-                .expect("download ii");
-            let ii_sq: Vec<u64> = self
-                .device
-                .dtoh_copy(&d_out_sq)
+                .dtoh_sync_copy(&d_out_sq)
                 .expect("download ii_sq");
             (ii, ii_sq)
         }
@@ -441,7 +468,9 @@ mod imp {
     // -----------------------------------------------------------------
 
     impl GpuBackend for CudaBackend {
-        fn info(&self) -> &GpuInfo { &self.info }
+        fn info(&self) -> &GpuInfo {
+            &self.info
+        }
 
         fn variance_prefilter(
             &self,
@@ -461,10 +490,7 @@ mod imp {
 
             let d_ii: CudaSlice<u32> = self.device.htod_copy(ii).expect("upload ii");
             let d_ii_sq: CudaSlice<u64> = self.device.htod_copy(ii_sq).expect("upload ii_sq");
-            let d_mask: CudaSlice<u8> = self
-                .device
-                .alloc_zeros(mask_size)
-                .expect("alloc mask");
+            let d_mask: CudaSlice<u8> = self.device.alloc_zeros(mask_size).expect("alloc mask");
 
             // 2D launch — 16x16 thread blocks. The kernel early-returns
             // for OOB windows, so we round the grid up rather than
@@ -481,26 +507,16 @@ mod imp {
             let tp = (win_w * win_h) as u32;
             unsafe {
                 self.func_variance
+                    .clone()
                     .launch(
                         cfg,
                         (
-                            &d_ii,
-                            &d_ii_sq,
-                            &d_mask,
-                            &w,
-                            &h,
-                            &win_w_u,
-                            &win_h_u,
-                            &stride_u,
-                            &vt_u,
-                            &tp,
+                            &d_ii, &d_ii_sq, &d_mask, w, h, win_w_u, win_h_u, stride_u, vt_u, tp,
                         ),
                     )
                     .expect("launch variance_prefilter");
             }
-            self.device
-                .dtoh_copy(&d_mask)
-                .expect("download mask")
+            self.device.dtoh_sync_copy(&d_mask).expect("download mask")
         }
 
         fn detect_windows(
@@ -586,37 +602,46 @@ mod imp {
             let win_h_arg = cascade.window_h as u32;
             let n_stages_arg = cascade.stages.len() as u32;
             let max_det_arg = max_detections as u32;
+            // cudarc's tuple-based `launch` is only impl'd for tuples
+            // up to 12 elements; detect_windows has 15 args (9 buffers
+            // + 6 scalars) so we drop down to the raw-pointer form.
+            // `as_kernel_param` (from the `DeviceRepr` trait) converts
+            // each arg into a `*mut c_void` that CUDA accepts in its
+            // variadic kernel-arg ABI. The order MUST match the kernel
+            // signature in `CUDA_KERNEL_SRC` exactly.
+            let mut args: [*mut std::ffi::c_void; 15] = [
+                (&d_ii).as_kernel_param(),
+                (&d_ii_sq).as_kernel_param(),
+                (&d_feat).as_kernel_param(),
+                (&d_feat_off).as_kernel_param(),
+                (&d_weak).as_kernel_param(),
+                (&d_stage_off).as_kernel_param(),
+                (&d_stage_thr).as_kernel_param(),
+                (&d_count).as_kernel_param(),
+                (&d_out).as_kernel_param(),
+                (&w).as_kernel_param(),
+                (&h).as_kernel_param(),
+                (&win_w_arg).as_kernel_param(),
+                (&win_h_arg).as_kernel_param(),
+                (&n_stages_arg).as_kernel_param(),
+                (&max_det_arg).as_kernel_param(),
+            ];
             unsafe {
                 self.func_detect
-                    .launch(
-                        cfg,
-                        (
-                            &d_ii,
-                            &d_ii_sq,
-                            &d_feat,
-                            &d_feat_off,
-                            &d_weak,
-                            &d_stage_off,
-                            &d_stage_thr,
-                            &d_count,
-                            &d_out,
-                            &w,
-                            &h,
-                            &win_w_arg,
-                            &win_h_arg,
-                            &n_stages_arg,
-                            &max_det_arg,
-                        ),
-                    )
+                    .clone()
+                    .launch(cfg, args.as_mut_slice())
                     .expect("launch detect_windows");
             }
 
             // ---- Read back ----
-            let count: Vec<u32> = self.device.dtoh_copy(&d_count).expect("download count");
+            let count: Vec<u32> = self
+                .device
+                .dtoh_sync_copy(&d_count)
+                .expect("download count");
             let actual = (count[0] as usize).min(max_detections);
             let xy: Vec<u32> = if actual > 0 {
                 self.device
-                    .dtoh_copy(&d_out)
+                    .dtoh_sync_copy(&d_out)
                     .expect("download out_xy_score")
             } else {
                 Vec::new()
@@ -700,17 +725,25 @@ mod imp {
     pub static CUDA_DESCRIPTOR: CudaDescriptor = CudaDescriptor;
 
     impl BackendDescriptor for CudaDescriptor {
-        fn id(&self) -> &'static str { "cuda" }
+        fn id(&self) -> &'static str {
+            "cuda"
+        }
         fn vendor(&self) -> &'static str {
             "NVIDIA CUDA (compile with --features cuda-backend)"
         }
-        fn probe(&self) -> Option<Box<dyn GpuBackend>> { None }
+        fn probe(&self) -> Option<Box<dyn GpuBackend>> {
+            None
+        }
     }
 
     #[allow(dead_code)]
-    pub struct CudaBackend { info: GpuInfo }
+    pub struct CudaBackend {
+        info: GpuInfo,
+    }
     impl GpuBackend for CudaBackend {
-        fn info(&self) -> &GpuInfo { &self.info }
+        fn info(&self) -> &GpuInfo {
+            &self.info
+        }
         fn variance_prefilter(
             &self,
             img: &GrayImage,
@@ -723,12 +756,7 @@ mod imp {
             let ny = (img.height() + s - 1) / s;
             vec![1u8; nx * ny]
         }
-        fn detect_windows(
-            &self,
-            _: &Cascade,
-            _: &GrayImage,
-            _: usize,
-        ) -> Vec<GpuDetection> {
+        fn detect_windows(&self, _: &Cascade, _: &GrayImage, _: usize) -> Vec<GpuDetection> {
             Vec::new()
         }
     }

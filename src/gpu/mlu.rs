@@ -24,18 +24,37 @@ pub struct MluDescriptor;
 pub static MLU: MluDescriptor = MluDescriptor;
 
 impl BackendDescriptor for MluDescriptor {
-    fn id(&self) -> &'static str { "mlu" }
-    fn vendor(&self) -> &'static str { "Cambricon MLU (BANG C)" }
-    fn probe(&self) -> Option<Box<dyn GpuBackend>> { None }
+    fn id(&self) -> &'static str {
+        "mlu"
+    }
+    fn vendor(&self) -> &'static str {
+        "Cambricon MLU (BANG C)"
+    }
+    fn probe(&self) -> Option<Box<dyn GpuBackend>> {
+        None
+    }
 }
 
-struct MluBackend { info: GpuInfo }
+struct MluBackend {
+    info: GpuInfo,
+}
 impl GpuBackend for MluBackend {
-    fn info(&self) -> &GpuInfo { &self.info }
-    fn variance_prefilter(&self, img: &GrayImage, _w: usize, _h: usize, s: usize, _t: u64) -> Vec<u8> {
+    fn info(&self) -> &GpuInfo {
+        &self.info
+    }
+    fn variance_prefilter(
+        &self,
+        img: &GrayImage,
+        _w: usize,
+        _h: usize,
+        s: usize,
+        _t: u64,
+    ) -> Vec<u8> {
         let nx = (img.width() + s - 1) / s;
         let ny = (img.height() + s - 1) / s;
         vec![1u8; nx * ny]
     }
-    fn detect_windows(&self, _: &Cascade, _: &GrayImage, _: usize) -> Vec<GpuDetection> { Vec::new() }
+    fn detect_windows(&self, _: &Cascade, _: &GrayImage, _: usize) -> Vec<GpuDetection> {
+        Vec::new()
+    }
 }

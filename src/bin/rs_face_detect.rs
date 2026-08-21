@@ -55,11 +55,38 @@ use rsface::haar::{params::demo_face_cascade, Cascade};
 use rsface::image::GrayImage;
 use rsface::source::{FfmpegPipeSource, FrameSource};
 
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+/// Parsed CLI arguments. Pure data — extracted from `parse_args` so the
+/// parsing logic can be unit-tested without spawning the binary.
+#[derive(Debug, PartialEq)]
+struct ParsedArgs {
+    input_path: PathBuf,
+    out_dir: PathBuf,
+    backend_arg: String,
+    sample_fps: u32,
+    max_frames: Option<usize>,
+    min_size: usize,
+    scale_factor: f32,
+    stride: usize,
+    skip_baseline: bool,
+}
+
+/// Argument-parser outcomes. `ShowHelp` is distinct from the error variants
+/// because the binary should exit 0 (graceful) when the user asked for help,
+/// versus exit 2 (error) when the input was malformed.
+#[derive(Debug, PartialEq)]
+enum ParseError {
+    ShowHelp,
+    MissingInput,
+    MissingOut,
+    UnknownArgument(String),
+}
+
+/// Parse CLI arguments into a `ParsedArgs`. Returns `Err(ParseError::ShowHelp)`
+/// when `--help` / `-h` is present or no args were supplied; `Err` for the
+/// remaining error variants otherwise.
+fn parse_args(args: &[String]) -> Result<ParsedArgs, ParseError> {
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
-        print_help();
-        return;
+        return Err(ParseError::ShowHelp);
     }
     let mut input_path: Option<PathBuf> = None;
     let mut out_dir: Option<PathBuf> = None;
@@ -114,30 +141,62 @@ fn main() {
                 input_path = Some(PathBuf::from(other));
             }
             other => {
-                eprintln!("unknown argument: {}", other);
-                print_help();
-                std::process::exit(2);
+                return Err(ParseError::UnknownArgument(other.to_string()));
             }
         }
         i += 1;
     }
 
-    let input_path = match input_path {
-        Some(p) => p,
-        None => {
+    let input_path = input_path.ok_or(ParseError::MissingInput)?;
+    let out_dir = out_dir.ok_or(ParseError::MissingOut)?;
+    Ok(ParsedArgs {
+        input_path,
+        out_dir,
+        backend_arg,
+        sample_fps,
+        max_frames,
+        min_size,
+        scale_factor,
+        stride,
+        skip_baseline,
+    })
+}
+
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let parsed = match parse_args(&args) {
+        Ok(p) => p,
+        Err(ParseError::ShowHelp) => {
+            print_help();
+            return;
+        }
+        Err(ParseError::MissingInput) => {
             eprintln!("missing <INPUT>");
             print_help();
             std::process::exit(2);
         }
-    };
-    let out_dir = match out_dir {
-        Some(p) => p,
-        None => {
+        Err(ParseError::MissingOut) => {
             eprintln!("missing --out <DIR>");
             print_help();
             std::process::exit(2);
         }
+        Err(ParseError::UnknownArgument(name)) => {
+            eprintln!("unknown argument: {}", name);
+            print_help();
+            std::process::exit(2);
+        }
     };
+    let ParsedArgs {
+        input_path,
+        out_dir,
+        backend_arg,
+        sample_fps,
+        max_frames,
+        min_size,
+        scale_factor,
+        stride,
+        skip_baseline,
+    } = parsed;
     if !input_path.exists() {
         eprintln!("input file not found: {}", input_path.display());
         std::process::exit(2);
@@ -181,6 +240,7 @@ fn main() {
         min_score: 0.0,
         variance_threshold: 200,
         use_gpu: false,
+        equalize_hist: false,
     };
     let nms_iou = det_cfg.nms_iou_threshold;
     let detector = Detector::new(cascade.clone(), det_cfg);
@@ -240,8 +300,16 @@ fn main() {
                     // passthrough fills 0 (the caller patches with the
                     // cascade window), so use the cascade window as the
                     // fallback.
-                    let w = if d.w > 0 { d.w as i32 } else { cascade.window_w as i32 };
-                    let h = if d.h > 0 { d.h as i32 } else { cascade.window_h as i32 };
+                    let w = if d.w > 0 {
+                        d.w as i32
+                    } else {
+                        cascade.window_w as i32
+                    };
+                    let h = if d.h > 0 {
+                        d.h as i32
+                    } else {
+                        cascade.window_h as i32
+                    };
                     (d.x as i32, d.y as i32, w, h, d.score)
                 })
                 .collect();
@@ -295,7 +363,14 @@ fn main() {
     println!("  cpu boxes: {}", n_boxes_cpu);
     println!("  gpu boxes: {}", n_boxes_gpu);
     println!("  wall     : {:.2}s (decode+detect)", wall);
-    println!("  per-f CPU: {:.1}ms", if n_frames > 0 { total_wall_ms / n_frames as f64 } else { 0.0 });
+    println!(
+        "  per-f CPU: {:.1}ms",
+        if n_frames > 0 {
+            total_wall_ms / n_frames as f64
+        } else {
+            0.0
+        }
+    );
     println!("  jsonl    : {}", det_path.display());
 }
 
@@ -393,8 +468,10 @@ fn boxes_json(s: &mut String, key: &str, boxes: &[Detection]) {
             s.push(',');
         }
         s.push('{');
-        s.push_str(&format!("\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"score\":{:.4}",
-                            b.x, b.y, b.w, b.h, b.score));
+        s.push_str(&format!(
+            "\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"score\":{:.4}",
+            b.x, b.y, b.w, b.h, b.score
+        ));
         s.push('}');
     }
     s.push(']');
@@ -415,4 +492,164 @@ fn json_str(s_in: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `print_help` is called from multiple error paths; verify it
+    /// doesn't panic (e.g. no dangling `{` in the format string).
+    #[test]
+    fn print_help_does_not_panic() {
+        print_help();
+    }
+
+    /// Empty argv + `--help` + `-h` should all map to `ShowHelp`, not to
+    /// `MissingInput` — the binary must exit 0 (graceful) when the user
+    /// asked for help.
+    #[test]
+    fn empty_args_or_help_returns_showhelp() {
+        assert_eq!(parse_args(&[]).unwrap_err(), ParseError::ShowHelp);
+        assert_eq!(
+            parse_args(&["--help".into()]).unwrap_err(),
+            ParseError::ShowHelp
+        );
+        assert_eq!(
+            parse_args(&["-h".into()]).unwrap_err(),
+            ParseError::ShowHelp
+        );
+    }
+
+    /// `<INPUT>` without `--out <DIR>` must fail with `MissingOut`, not
+    /// `MissingInput`. Guards the order of error reporting and the CLI UX
+    /// (telling the user what they did supply vs. what's missing).
+    #[test]
+    fn missing_out_dir_returns_missing_out() {
+        let args = vec!["video.mp4".to_string()];
+        match parse_args(&args) {
+            Err(ParseError::MissingOut) => {} // expected
+            other => panic!("expected MissingOut, got {:?}", other),
+        }
+    }
+
+    /// Bare argv (no `<INPUT>` at all) must fail with `MissingInput`.
+    #[test]
+    fn missing_input_returns_missing_input() {
+        let args = vec!["--out".to_string(), "out".to_string()];
+        match parse_args(&args) {
+            Err(ParseError::MissingInput) => {} // expected
+            other => panic!("expected MissingInput, got {:?}", other),
+        }
+    }
+
+    /// Unknown flags like `--frobnicate` must come back as
+    /// `UnknownArgument` so the binary can route them to `exit(2)`.
+    #[test]
+    fn unknown_flag_returns_unknown_argument() {
+        let args = vec![
+            "video.mp4".to_string(),
+            "--out".to_string(),
+            "out".to_string(),
+            "--frobnicate".to_string(),
+        ];
+        match parse_args(&args) {
+            Err(ParseError::UnknownArgument(name)) => {
+                assert_eq!(name, "--frobnicate");
+            }
+            other => panic!("expected UnknownArgument, got {:?}", other),
+        }
+    }
+
+    /// Happy-path parse: a minimal valid invocation must populate every
+    /// field on `ParsedArgs` with the expected defaults / supplied values.
+    /// Defaults come from the binary's "good citizen" production defaults.
+    #[test]
+    fn happy_path_parses_all_fields() {
+        // Use a guaranteed-existing argv slot: the parser doesn't validate
+        // file existence (that's done in `main` after parsing), so any
+        // path is fine here.
+        let args = vec![
+            "video.mp4".to_string(),
+            "--out".to_string(),
+            "outdir".to_string(),
+            "--backend".to_string(),
+            "cuda".to_string(),
+            "--sample-fps".to_string(),
+            "10".to_string(),
+            "--max-frames".to_string(),
+            "42".to_string(),
+            "--min-size".to_string(),
+            "32".to_string(),
+            "--scale".to_string(),
+            "1.1".to_string(),
+            "--stride".to_string(),
+            "6".to_string(),
+        ];
+        let p = parse_args(&args).expect("valid args");
+        assert_eq!(p.input_path, PathBuf::from("video.mp4"));
+        assert_eq!(p.out_dir, PathBuf::from("outdir"));
+        assert_eq!(p.backend_arg, "cuda");
+        assert_eq!(p.sample_fps, 10);
+        assert_eq!(p.max_frames, Some(42));
+        assert_eq!(p.min_size, 32);
+        assert!((p.scale_factor - 1.1).abs() < 1e-6);
+        assert_eq!(p.stride, 6);
+        assert!(!p.skip_baseline); // no --gpu-only
+    }
+
+    /// `--gpu-only` is the only flag that mutates `skip_baseline`. Default
+    /// is false (CPU pass runs alongside GPU pass for parity check).
+    #[test]
+    fn gpu_only_flag_sets_skip_baseline() {
+        let args = vec![
+            "video.mp4".to_string(),
+            "--out".to_string(),
+            "outdir".to_string(),
+            "--gpu-only".to_string(),
+        ];
+        let p = parse_args(&args).expect("valid args");
+        assert!(p.skip_baseline, "--gpu-only should set skip_baseline=true");
+        // --gpu-only does NOT touch backend_arg (unlike --cpu-only which
+        // forces "cpu"); the user can still pick a specific GPU backend.
+        assert_eq!(p.backend_arg, "auto");
+    }
+
+    /// `--cpu-only` is shorthand for `--backend cpu`. The two must agree.
+    #[test]
+    fn cpu_only_flag_forces_backend_cpu() {
+        let args = vec![
+            "video.mp4".to_string(),
+            "--out".to_string(),
+            "outdir".to_string(),
+            "--cpu-only".to_string(),
+        ];
+        let p = parse_args(&args).expect("valid args");
+        assert_eq!(p.backend_arg, "cpu");
+        assert!(
+            !p.skip_baseline,
+            "--cpu-only runs CPU pass alongside (no GPU)"
+        );
+    }
+
+    /// Numeric parsing must fall back to defaults on garbage, not crash.
+    #[test]
+    fn malformed_numeric_args_fall_back_to_defaults() {
+        let args = vec![
+            "video.mp4".to_string(),
+            "--out".to_string(),
+            "outdir".to_string(),
+            "--sample-fps".to_string(),
+            "not-a-number".to_string(),
+            "--min-size".to_string(),
+            "also-not-a-number".to_string(),
+            "--scale".to_string(),
+            "garbage".to_string(),
+        ];
+        let p = parse_args(&args).expect("valid arg layout");
+        // Each malformed value must default cleanly.
+        assert_eq!(p.sample_fps, 5);
+        assert_eq!(p.min_size, 24);
+        assert!((p.scale_factor - 1.2).abs() < 1e-6);
+    }
 }

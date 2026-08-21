@@ -27,18 +27,37 @@ pub struct AscendDescriptor;
 pub static ASCEND: AscendDescriptor = AscendDescriptor;
 
 impl BackendDescriptor for AscendDescriptor {
-    fn id(&self) -> &'static str { "ascend" }
-    fn vendor(&self) -> &'static str { "Huawei Ascend (CANN)" }
-    fn probe(&self) -> Option<Box<dyn GpuBackend>> { None }
+    fn id(&self) -> &'static str {
+        "ascend"
+    }
+    fn vendor(&self) -> &'static str {
+        "Huawei Ascend (CANN)"
+    }
+    fn probe(&self) -> Option<Box<dyn GpuBackend>> {
+        None
+    }
 }
 
-struct AscendBackend { info: GpuInfo }
+struct AscendBackend {
+    info: GpuInfo,
+}
 impl GpuBackend for AscendBackend {
-    fn info(&self) -> &GpuInfo { &self.info }
-    fn variance_prefilter(&self, img: &GrayImage, _w: usize, _h: usize, s: usize, _t: u64) -> Vec<u8> {
+    fn info(&self) -> &GpuInfo {
+        &self.info
+    }
+    fn variance_prefilter(
+        &self,
+        img: &GrayImage,
+        _w: usize,
+        _h: usize,
+        s: usize,
+        _t: u64,
+    ) -> Vec<u8> {
         let nx = (img.width() + s - 1) / s;
         let ny = (img.height() + s - 1) / s;
         vec![1u8; nx * ny]
     }
-    fn detect_windows(&self, _: &Cascade, _: &GrayImage, _: usize) -> Vec<GpuDetection> { Vec::new() }
+    fn detect_windows(&self, _: &Cascade, _: &GrayImage, _: usize) -> Vec<GpuDetection> {
+        Vec::new()
+    }
 }
