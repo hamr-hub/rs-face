@@ -12,8 +12,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     frames_with_face  BIGINT NOT NULL DEFAULT 0,
     total_detections  BIGINT NOT NULL DEFAULT 0,
     original_key  TEXT,
-    error         TEXT
+    error         TEXT,
+    -- v2:检测算法名(haar/cnn/yunet/mtcnn/hog)。前端算法过滤 chip 用。
+    -- 用 IF NOT EXISTS 兼容老库(虽然 PG 9.6+ 才支持,生产库 PG 17 OK)。
+    algo          TEXT
 );
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS algo TEXT;
 CREATE INDEX IF NOT EXISTS jobs_created_idx ON jobs(created_ms DESC);
 
 CREATE TABLE IF NOT EXISTS frames (

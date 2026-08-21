@@ -61,6 +61,13 @@ impl Db {
         .execute(pool).await;
     }
 
+    /// 记录任务实际使用的算法(在 run_job 构建 detector 后调用)。
+    pub async fn set_algo(&self, id: &str, algo: &str) {
+        let Some(pool) = &self.pool else { return; };
+        let _ = sqlx::query("UPDATE jobs SET algo=$2 WHERE id=$1")
+            .bind(id).bind(algo).execute(pool).await;
+    }
+
     pub async fn update_job_status(&self, id: &str, status: JobStatus, finished_ms: Option<u64>, error: Option<&str>) {
         let Some(pool) = &self.pool else { return; };
         let s = status_to_str(status);
@@ -138,7 +145,7 @@ impl Db {
     pub async fn list_jobs(&self) -> Vec<serde_json::Value> {
         let Some(pool) = &self.pool else { return vec![]; };
         let rows = sqlx::query(
-            "SELECT id, kind, display_name, status, created_ms, finished_ms, frames_processed, frames_with_face, total_detections, original_key, error FROM jobs ORDER BY created_ms DESC"
+            "SELECT id, kind, display_name, status, created_ms, finished_ms, frames_processed, frames_with_face, total_detections, original_key, error, algo FROM jobs ORDER BY created_ms DESC"
         )
         .fetch_all(pool).await.unwrap_or_default();
         rows.into_iter().map(|r| serde_json::json!({
@@ -154,6 +161,7 @@ impl Db {
                 "total_detections": r.get::<i64, _>("total_detections"),
                 "elapsed_ms": 0u64,
             },
+            "algo": r.get::<Option<String>, _>("algo"),
             "face_count": r.get::<i64, _>("total_detections"), // 近似
             "frame_count": 0,
             "original_key": r.get::<Option<String>, _>("original_key"),

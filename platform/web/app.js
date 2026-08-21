@@ -467,8 +467,10 @@ const sidebar = (() => {
     else if (state.filter === 'done') jobs = jobs.filter(j => j.status === 'done');
     else if (state.filter === 'error') jobs = jobs.filter(j => j.status === 'error' || j.status === 'cancelled');
     if (state.algoFilter) {
+      // algo 字段由后端在 detector 构建时写入,job 摘要里有 j.algo。
+      // 没记录的旧 job (eg. 服务重启前的) 不出现在任何算法 chip 的过滤里。
       const want = state.algoFilter;
-      jobs = jobs.filter(j => (j.stats && j.stats.algo === want) || (j.dispatch && j.dispatch.gpu_pct !== undefined && (j.stats && j.stats.algo === want)));
+      jobs = jobs.filter(j => j.algo === want);
     }
     const since = rangeMs();
     if (since > 0) jobs = jobs.filter(j => (j.created_ms || 0) >= since);
@@ -816,7 +818,7 @@ const preview = (() => {
     const wrap = utils.$('#pv-dispatch');
     if (!wrap) return;
     const d = job.dispatch;
-    const algo = (job.stats && job.stats.algo) || '';
+    const algo = job.algo || (job.stats && job.stats.algo) || '';
     const algoEl = utils.$('#pv-dispatch-algo');
     if (algoEl) {
       algoEl.textContent = algo ? algo.toUpperCase() : '—';

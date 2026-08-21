@@ -99,6 +99,9 @@ pub struct Job {
     pub status: Mutex<JobStatus>,
     pub frames: Mutex<Vec<FrameResult>>,
     pub stats: Mutex<JobStats>,
+    /// 检测算法名(haar/cnn/yunet/mtcnn/hog),由 run_job 在 detector 构建后写入,
+    /// 摘要里暴露给前端做算法过滤 chip。
+    pub algo: Mutex<Option<String>>,
     /// 原始媒体 S3 key(图片/视频任务)。
     pub original_media_key: Mutex<Option<String>>,
     pub error: Mutex<Option<String>>,
@@ -149,6 +152,7 @@ impl Job {
             "status": self.status(),
             "created_ms": self.created_ms,
             "stats": *self.stats.lock().unwrap(),
+            "algo": self.algo.lock().unwrap().clone(),
             "face_count": self.face_count(),
             "frame_count": frames.len(),
             "original_key": self.original_media_key.lock().unwrap().clone(),
@@ -196,6 +200,7 @@ impl JobRegistry {
             status: Mutex::new(JobStatus::Queued),
             frames: Mutex::new(Vec::new()),
             stats: Mutex::new(JobStats::default()),
+            algo: Mutex::new(None),
             original_media_key: Mutex::new(None),
             error: Mutex::new(None),
             archived: Mutex::new(false),
@@ -447,6 +452,15 @@ impl JobRegistry {
         //    frame 循环无需分支。SSE 事件同时带 `mode` (旧) 和 `algo` (新)
         //    字段,前端新老代码都能识别。
         let detector = build_detector(&self.cfg)?;
+        // 记录实际使用的算法,供 /api/jobs 摘要里的 algo 字段(算法过滤 chip 用)
+        let algo_name = detector.kind_name().to_string();
+        *job.algo.lock().unwrap() = Some(algo_name.clone());
+        {
+            let db = self.db.clone();
+            let id = job.id.clone();
+            let a = algo_name.clone();
+            tokio::spawn(async move { db.set_algo(&id, &a).await; });
+        }
         job.emit(&serde_json::json!({
             "type": "detector",
             "mode": detector.kind_name(),
