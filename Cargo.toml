@@ -19,6 +19,24 @@ path = "src/main.rs"
 # Video decoding falls back to a std-only path (HTTP image stream or
 # frame sequence) when no native decoder is compiled in.
 
+# GPU backends. Each is gated so the library still builds with zero deps
+# on hosts that only use the CPU cascade. The ``metal`` crate is enabled
+# on macOS / Apple Silicon by default because OpenCL.framework is being
+# phased out — Metal is the supported GPU path on current macOS.
+metal = { version = "0.33", optional = true }
+
+# Native CUDA backend (NVIDIA GPUs on Linux/Windows). Requires the CUDA
+# toolkit and NVIDIA driver at runtime; ``cudarc`` 0.12 wraps the driver
+# API + NVRTC just-in-time compiler. Off by default so the build stays
+# zero-dep on hosts without an NVIDIA stack.
+cudarc = { version = "0.12", optional = true }
+
+[features]
+default = []
+metal-backend = ["dep:metal"]
+cuda-backend  = ["dep:cudarc"]
+opencv-backend = []  # placeholder for future opencv-rust binding
+
 [profile.release]
 opt-level = 3
 lto = "thin"

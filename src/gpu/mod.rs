@@ -1,14 +1,22 @@
-//! GPU backend via OpenCL — dynamically loaded at runtime, zero Rust deps.
+//! GPU backends for rs-face.
 //!
-//! Two primitives are exposed:
-//! 1. `compute_integral_dual()` — regular + squared integral images in one
-//!    GPU pass. Used by the CPU variance pre-filter.
-//! 2. `variance_prefilter()` — variance-based window rejection in parallel
-//!    across all (x, y) positions. Each work-item is one window.
-//!
-//! The full Viola-Jones cascade is intentionally NOT run on the GPU because
-//! data-dependent early rejection makes parallelisation less effective than
-//! for the regular arithmetic of variance computation.
+//! This module exposes:
+//!   * The cross-platform OpenCL driver (default; works on Apple Silicon
+//!     via Metal-OpenCL, Intel iGPU, AMD, NVIDIA on Linux/Windows).
+//!     Loaded via FFI at runtime — no Rust deps.
+//!   * A backend-trait abstraction (``pub mod backend``) that lets the
+//!     same dispatch surface pick between Metal, CUDA, ROCm, Ascend and
+//!     MLU implementations. Per-vendor stubs live alongside this file
+//!     (see ``metal.rs``, ``cuda.rs``, ``rocm.rs``, ``ascend.rs``,
+//!     ``mlu.rs``); vendors with no SDK on the host probe as
+//!     unavailable and the dispatcher falls back to OpenCL.
+
+pub mod backend;
+pub mod metal;
+pub mod cuda;
+pub mod rocm;
+pub mod ascend;
+pub mod mlu;
 
 use crate::haar::Cascade;
 use crate::image::GrayImage;
@@ -33,6 +41,8 @@ pub fn probe() -> Option<GpuInfo> {
 pub struct GpuDetection {
     pub x: u32,
     pub y: u32,
+    pub w: u32,
+    pub h: u32,
     pub score: f32,
 }
 
@@ -160,12 +170,30 @@ mod opencl {
     static mut LIB_HANDLE: *mut std::ffi::c_void = ptr::null_mut();
 
     fn candidate_names() -> &'static [&'static str] {
-        &["libOpenCL.so.1", "libOpenCL.so", "/System/Library/Frameworks/OpenCL.framework/OpenCL"]
+        // Order matters: probe the most likely first. Recent macOS releases
+        // ship OpenCL.framework as a broken symlink (Apple has been
+        // deprecating since 10.14), so we prefer Homebrew's opencl-icd-loader
+        // path which actually works.
+        &[
+            // Linux (Khronos ICD loader paths)
+            "libOpenCL.so.1",
+            "libOpenCL.so",
+            "/usr/lib/x86_64-linux-gnu/libOpenCL.so.1",
+            "/usr/lib/aarch64-linux-gnu/libOpenCL.so.1",
+            // Homebrew on Apple Silicon (preferred on macOS — system framework
+            // is often a broken symlink since macOS 10.14 deprecation).
+            "/opt/homebrew/lib/libOpenCL.dylib",
+            "/opt/homebrew/Cellar/opencl-icd-loader/2026.05.29/lib/libOpenCL.dylib",
+            // Homebrew on Intel Mac
+            "/usr/local/lib/libOpenCL.dylib",
+            // macOS — Apple system framework (last resort — frequently broken)
+            "/System/Library/Frameworks/OpenCL.framework/OpenCL",
+        ]
     }
 
     unsafe fn c_dlsym(handle: *mut std::ffi::c_void, name: &str) -> Option<*mut std::ffi::c_void> {
         let c = CString::new(name).ok()?;
-        let p = dlsym(handle, c.as_ptr());
+        let p = dlsym(handle, c.as_ptr() as *const u8);
         if p.is_null() { None } else { Some(p) }
     }
 
@@ -174,7 +202,7 @@ mod opencl {
             if LIB.is_some() { return LIB.as_ref(); }
             for name in candidate_names() {
                 let c = match CString::new(*name) { Ok(s) => s, Err(_) => continue };
-                let h = dlopen(c.as_ptr(), RTLD_LAZY | RTLD_LOCAL);
+                let h = dlopen(c.as_ptr() as *const u8, RTLD_LAZY | RTLD_LOCAL);
                 if !h.is_null() { LIB_HANDLE = h; break; }
             }
             if LIB_HANDLE.is_null() { return None; }
@@ -457,7 +485,7 @@ mod opencl {
             if errc != CL_SUCCESS { (lib.release_context)(ctx); return Err("create_queue failed"); }
             let src = CString::new(CL_KERNEL_SRC).unwrap();
             let src_len = CL_KERNEL_SRC.len() as ClSize;
-            let program = (lib.create_program_with_source)(ctx, 1, &src.as_ptr(), &src_len, &mut errc);
+            let program = (lib.create_program_with_source)(ctx, 1, &(src.as_ptr() as *const u8), &src_len, &mut errc);
             if errc != CL_SUCCESS { (lib.release_command_queue)(queue); (lib.release_context)(ctx); return Err("create_program failed"); }
             let build_err = (lib.build_program)(program, 1, &device, ptr::null(), ptr::null_mut(), ptr::null_mut());
             if build_err != CL_SUCCESS {
@@ -469,7 +497,7 @@ mod opencl {
             let mk = |name: &str| -> Result<ClKernel, &'static str> {
                 let cs = CString::new(name).unwrap();
                 let mut errk: ClInt = 0;
-                let k = (lib.create_kernel)(program, cs.as_ptr(), &mut errk);
+                let k = (lib.create_kernel)(program, cs.as_ptr() as *const u8, &mut errk);
                 if errk != CL_SUCCESS { Err("create_kernel failed") } else { Ok(k) }
             };
             let kernel_integral = mk("integral_row").map_err(|_| { (lib.release_program)(program); (lib.release_command_queue)(queue); (lib.release_context)(ctx); "create_kernel integral_row" })?;
@@ -729,7 +757,7 @@ mod opencl {
                     let y = chunk[1];
                     let bits = chunk[2];
                     let score = f32::from_bits(bits);
-                    out.push(super::GpuDetection { x, y, score });
+                    out.push(super::GpuDetection { x, y, w: 0, h: 0, score });
                 }
                 out
             }
