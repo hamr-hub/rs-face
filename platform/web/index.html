@@ -16,17 +16,59 @@
     <button id="tb-search-opts" class="tb-search-opts" aria-label="搜索选项" title="搜索选项" aria-haspopup="true">⚙</button>
   </div>
   <div class="tb-right">
+    <button id="tb-theme" class="tb-theme-btn" title="主题切换(auto→dark→light→auto)" aria-label="主题切换">◐</button>
     <button id="tb-help" class="tb-icon-btn" title="快捷键 (?)" aria-label="显示快捷键">?</button>
     <button id="tb-settings" class="tb-icon-btn" title="设置" aria-label="打开设置">⚙</button>
     <button id="tb-new" class="tb-new-btn" title="新建任务 (n)" aria-label="新建任务"><span class="tb-plus" aria-hidden="true">+</span> 新建</button>
   </div>
 </header>
+<!-- 平台 KPI 实时条:从 /api/metrics 每 2s 拉取,Sparkline 60s 折线 -->
+<section class="kpi-strip" id="kpi-strip" aria-label="平台实时指标" role="region">
+  <div class="kpi" id="kpi-running" data-tip="正在运行的 job">
+    <span class="kpi-k">运行</span><span class="kpi-v" id="kpi-running-v">0</span><span class="kpi-sub" id="kpi-running-sub">/0 并发</span>
+  </div>
+  <div class="kpi kpi-fps" id="kpi-fps" data-tip="实时 fps(运行中 job 的最大)">
+    <span class="kpi-k">FPS</span><span class="kpi-v" id="kpi-fps-v">—</span>
+    <canvas class="kpi-spark" id="kpi-fps-spark" width="80" height="20" aria-hidden="true"></canvas>
+  </div>
+  <div class="kpi" id="kpi-gpu" data-tip="GPU 占比(pyramid level dispatch)">
+    <span class="kpi-k">GPU</span><span class="kpi-v" id="kpi-gpu-v">0%</span>
+    <div class="kpi-bar"><div class="kpi-bar-fill" id="kpi-gpu-bar"></div></div>
+  </div>
+  <div class="kpi" id="kpi-frames" data-tip="累计处理帧 / 含脸帧">
+    <span class="kpi-k">帧</span><span class="kpi-v" id="kpi-frames-v">0</span>
+    <span class="kpi-sub" id="kpi-frames-sub">含脸 0</span>
+  </div>
+  <div class="kpi" id="kpi-det" data-tip="累计人脸检出">
+    <span class="kpi-k">检出</span><span class="kpi-v" id="kpi-det-v">0</span>
+  </div>
+  <div class="kpi" id="kpi-rate" data-tip="cascade 通过率">
+    <span class="kpi-k">通过率</span><span class="kpi-v" id="kpi-rate-v">—</span>
+  </div>
+  <div class="kpi" id="kpi-fail" data-tip="错误 / 取消">
+    <span class="kpi-k">失败</span><span class="kpi-v" id="kpi-fail-v">0</span>
+    <span class="kpi-sub" id="kpi-fail-sub">取消 0</span>
+  </div>
+  <div class="kpi" id="kpi-mode" data-tip="当前算法">
+    <span class="kpi-k">算法</span><span class="kpi-v" id="kpi-mode-v">—</span>
+  </div>
+</section>
+
 <aside class="sidebar" id="sidebar" role="navigation" aria-label="任务列表">
   <div class="sb-filters" id="sb-filters" role="tablist">
-    <button class="sb-filter active" data-f="all" role="tab" aria-selected="true">全部</button>
-    <button class="sb-filter" data-f="running" role="tab" aria-selected="false">进行</button>
-    <button class="sb-filter" data-f="done" role="tab" aria-selected="false">完成</button>
-    <button class="sb-filter" data-f="error" role="tab" aria-selected="false">错误</button>
+    <button class="sb-filter active" data-f="all" role="tab" aria-selected="true"><span class="sb-filter-label">全部</span><span class="sb-filter-count" data-count="all">0</span></button>
+    <button class="sb-filter" data-f="running" role="tab" aria-selected="false"><span class="sb-filter-label">进行</span><span class="sb-filter-count" data-count="running">0</span></button>
+    <button class="sb-filter" data-f="done" role="tab" aria-selected="false"><span class="sb-filter-label">完成</span><span class="sb-filter-count" data-count="done">0</span></button>
+    <button class="sb-filter" data-f="error" role="tab" aria-selected="false"><span class="sb-filter-label">错误</span><span class="sb-filter-count" data-count="error">0</span></button>
+  </div>
+  <div class="sb-algofilter" id="sb-algofilter" role="group" aria-label="按算法过滤">
+    <span class="sb-algofilter-label">算法</span>
+    <button class="sb-algo-chip active" data-algo="" aria-pressed="true" title="全部算法">ALL</button>
+    <button class="sb-algo-chip" data-algo="haar" aria-pressed="false" title="Viola-Jones Haar">HAAR</button>
+    <button class="sb-algo-chip" data-algo="cnn" aria-pressed="false" title="24x24 CNN">CNN</button>
+    <button class="sb-algo-chip" data-algo="yunet" aria-pressed="false" title="YuNet 2023">YUNET</button>
+    <button class="sb-algo-chip" data-algo="mtcnn" aria-pressed="false" title="MTCNN 三段">MTCNN</button>
+    <button class="sb-algo-chip" data-algo="hog" aria-pressed="false" title="HOG+SVM">HOG</button>
   </div>
   <div class="sb-scroll" id="sb-scroll" tabindex="0" role="listbox" aria-label="任务列表(可键盘导航)">
     <div class="sb-spacer" id="sb-spacer"></div>
@@ -43,27 +85,52 @@
 </aside>
 <main class="preview" id="preview" role="main">
   <div class="pv-empty" id="pv-empty">
-    <div class="pv-empty-mark" aria-hidden="true">◐</div>
-    <h2>rs-face Platform</h2>
+    <div class="pv-empty-art" aria-hidden="true">
+      <svg viewBox="0 0 240 160" width="240" height="160">
+        <defs>
+          <linearGradient id="pv-glow" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.55"/>
+            <stop offset="100%" stop-color="var(--accent-2)" stop-opacity="0.55"/>
+          </linearGradient>
+        </defs>
+        <rect x="20" y="22" width="200" height="118" rx="10" fill="none" stroke="var(--border-2)" stroke-width="1.5" stroke-dasharray="3 4"/>
+        <rect x="74" y="58" width="38" height="46" rx="4" fill="none" stroke="url(#pv-glow)" stroke-width="2"/>
+        <rect x="124" y="68" width="34" height="42" rx="4" fill="none" stroke="url(#pv-glow)" stroke-width="2"/>
+        <circle cx="93" cy="81" r="2.5" fill="var(--accent)"/>
+        <circle cx="141" cy="89" r="2.5" fill="var(--accent-2)"/>
+      </svg>
+    </div>
+    <h2>人脸识别 · 任务台</h2>
     <p>从左侧选择任务查看详情,或点击 <strong>+ 新建</strong> 开始识别</p>
     <div class="pv-empty-kbd">
       <span><kbd>n</kbd> 新建</span>
       <span><kbd>↑</kbd>/<kbd>↓</kbd> 切换</span>
       <span><kbd>Esc</kbd> 关闭</span>
       <span><kbd>Ctrl+K</kbd> 搜索</span>
+      <span><kbd>b</kbd> 批量</span>
       <span><kbd>?</kbd> 帮助</span>
     </div>
   </div>
   <div class="pv-detail hidden" id="pv-detail">
     <div class="pv-head">
       <div class="pv-title-row"><span class="pv-dot" id="pv-dot"></span><h2 id="pv-title" class="pv-title">…</h2><span class="pv-status" id="pv-status">…</span></div>
-      <div class="pv-meta"><span id="pv-kind" class="pv-tag">…</span><span id="pv-frames" class="pv-meta-item">0 帧</span><span id="pv-faces" class="pv-meta-item">0 张脸</span><span id="pv-time" class="pv-meta-item"></span><span id="pv-id" class="pv-meta-item mono">#…</span></div>
+      <div class="pv-meta"><span id="pv-kind" class="pv-tag">…</span><span id="pv-frames" class="pv-meta-item">0 帧</span><span id="pv-faces" class="pv-meta-item">0 张脸</span><span id="pv-fps" class="pv-meta-item pv-fps">— fps</span><span id="pv-elapsed" class="pv-meta-item">—</span><span id="pv-time" class="pv-meta-item"></span><span id="pv-id" class="pv-meta-item mono">#…</span></div>
+      <div class="pv-dispatch" id="pv-dispatch" aria-label="GPU/CPU dispatch 拆分">
+        <span class="pv-dispatch-algo" id="pv-dispatch-algo">—</span>
+        <div class="pv-dispatch-bar" title="GPU 占比">
+          <span class="pv-dispatch-gpu" id="pv-dispatch-gpu">GPU 0</span>
+          <span class="pv-dispatch-cpu" id="pv-dispatch-cpu">CPU 0</span>
+        </div>
+        <span class="pv-dispatch-rate" id="pv-dispatch-rate" title="cascade 通过率">通过率 —</span>
+        <canvas class="pv-dispatch-spark" id="pv-dispatch-spark" width="120" height="22" aria-hidden="true" title="最近 fps 曲线"></canvas>
+      </div>
       <div class="pv-actions">
         <button id="pv-toggle-anno" class="pv-btn" aria-label="切换人脸标注" aria-pressed="true">标注 ●</button>
         <button id="pv-cancel" class="pv-btn hidden" aria-label="取消任务">⏹ 取消</button>
         <button id="pv-retry" class="pv-btn primary hidden" title="重新提交此任务" aria-label="重跑任务">↻ 重跑</button>
         <button id="pv-export-json" class="pv-btn ghost" aria-label="导出 JSON">↓ JSON</button>
         <button id="pv-export-csv" class="pv-btn ghost" aria-label="导出 CSV">↓ CSV</button>
+        <button id="pv-export-zip" class="pv-btn ghost" aria-label="下载所有标注+裁脸(zip)">↓ ZIP</button>
         <button id="pv-delete" class="pv-btn ghost danger" aria-label="删除任务">🗑 删除</button>
         <button id="pv-close" class="pv-btn ghost" aria-label="关闭预览">✕</button>
       </div>
@@ -84,7 +151,10 @@
         </div>
       </div>
       <div class="pv-stage-hint" id="pv-stage-hint">加载中…</div>
-      <div class="pv-error-banner hidden" id="pv-error-banner"></div>
+      <div class="pv-error-banner hidden" id="pv-error-banner" role="alert">
+        <span class="pv-error-msg"></span>
+        <span class="pv-error-act"></span>
+      </div>
     </div>
     <div class="pv-shared-controls hidden" id="pv-shared-controls">
       <button id="pv-shared-play" class="pv-btn primary" title="播放/暂停 (Space)" aria-label="播放/暂停">▶</button>
@@ -105,8 +175,35 @@
       <div class="pv-prog-track"><div class="pv-prog-fill" id="pv-prog-fill"></div><div class="pv-prog-marks" id="pv-prog-marks"></div></div>
       <div class="pv-prog-labels"><span id="pv-prog-text">0 / 0</span><span id="pv-prog-pct">0%</span></div>
     </div>
+    <div class="pv-bbar" id="pv-bbar" aria-label="检测统计">
+      <div class="pv-bbar-cell" id="pv-bb-det"><span class="k">检测</span><span class="v">0</span></div>
+      <div class="pv-bbar-cell" id="pv-bb-fwf"><span class="k">含脸帧</span><span class="v">0</span></div>
+      <div class="pv-bbar-cell" id="pv-bb-rate"><span class="k">命中率</span><span class="v">—</span></div>
+      <div class="pv-bbar-cell" id="pv-bb-top"><span class="k">最高分</span><span class="v">—</span></div>
+      <div class="pv-bbar-cell" id="pv-bb-cluster"><span class="k">聚类</span><span class="v">0</span></div>
+      <div class="pv-bbar-cell" id="pv-bb-algo"><span class="k">算法</span><span class="v">—</span></div>
+    </div>
     <section class="pv-faces" id="pv-faces" aria-label="检测到的人脸">
-      <div class="pv-faces-head"><h3>人脸卡片</h3><span id="pv-faces-count" class="pv-faces-count">—</span></div>
+      <div class="pv-faces-head">
+        <h3>人脸卡片</h3>
+        <span id="pv-faces-count" class="pv-faces-count">—</span>
+        <div class="pv-faces-filters" id="pv-faces-filters" role="group" aria-label="人脸筛选">
+          <label class="pv-ff-row">
+            <span>置信度 ≥</span>
+            <input type="range" id="pv-ff-score" min="0" max="100" value="0" step="1" aria-label="按置信度筛选">
+            <span id="pv-ff-score-val" class="pv-ff-val">0.00</span>
+          </label>
+          <label class="pv-ff-row">
+            <span>排序</span>
+            <select id="pv-ff-sort" class="pv-ff-select" aria-label="排序">
+              <option value="time">时间</option>
+              <option value="score-desc">置信度高 → 低</option>
+              <option value="score-asc">置信度低 → 高</option>
+              <option value="size-desc">尺寸大 → 小</option>
+            </select>
+          </label>
+        </div>
+      </div>
       <div class="pv-faces-grid" id="pv-faces-grid"></div>
     </section>
   </div>
@@ -239,6 +336,37 @@
       <button class="pv-btn ghost" id="confirm-cancel" data-close>取消</button>
       <button class="pv-btn danger" id="confirm-ok">确定</button>
     </div>
+  </div>
+</div>
+
+<!-- 人脸 lightbox(点击卡片 / 双击标注帧打开) -->
+<div class="modal hidden" id="modal-lightbox" role="dialog" aria-modal="true" aria-labelledby="modal-lb-title">
+  <div class="modal-backdrop" data-close></div>
+  <div class="lb-card">
+    <header class="lb-head">
+      <h2 id="modal-lb-title">人脸详情</h2>
+      <span id="lb-meta" class="lb-meta">—</span>
+      <button id="lb-zoom-reset" class="pv-btn ghost" title="重置缩放 (0)" aria-label="重置缩放" hidden>100%</button>
+      <button class="pv-btn ghost modal-x" data-close aria-label="关闭">✕</button>
+    </header>
+    <div class="lb-body">
+      <div class="lb-stage" id="lb-stage">
+        <div class="lb-skel" id="lb-skel"></div>
+        <img id="lb-img" alt="标注帧" decoding="async">
+        <canvas id="lb-overlay" class="lb-overlay" aria-hidden="true"></canvas>
+        <div class="lb-hint mono" id="lb-hint">滚轮缩放 · 拖动平移 · ←/→ 切换帧</div>
+      </div>
+      <aside class="lb-rail" id="lb-rail" aria-label="本帧人脸列表">
+        <div class="lb-rail-head">本帧 <span id="lb-rail-count">0</span> 张</div>
+        <div class="lb-rail-list" id="lb-rail-list"></div>
+      </aside>
+    </div>
+    <footer class="lb-foot">
+      <button id="lb-prev" class="pv-btn" aria-label="上一帧">← 上一帧</button>
+      <span id="lb-pos" class="lb-pos mono">— / —</span>
+      <button id="lb-next" class="pv-btn" aria-label="下一帧">下一帧 →</button>
+      <button id="lb-seek" class="pv-btn primary hidden" title="跳到视频对应时间点" aria-label="跳到视频">⏯ 跳到视频</button>
+    </footer>
   </div>
 </div>
 
