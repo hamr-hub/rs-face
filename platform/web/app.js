@@ -331,7 +331,10 @@ const sidebar = (() => {
 
   function updateItem(el, j) {
     const st = j.stats || {}, fp = st.frames_processed || 0, fc = j.face_count || 0;
-    const thumbSrc = j.original_key ? utils.mediaUrl(j.original_key) : null;
+    // For video/stream jobs prefer `cover_key` (first annotated frame as PNG)
+    // over `original_key` which points to the raw .mp4 and would render as
+    // a broken <img>. For image jobs both fields are the same.
+    const thumbSrc = (j.cover_key || j.original_key) ? utils.mediaUrl(j.cover_key || j.original_key) : null;
     let thumbHtml;
     if (j.status === 'running' || j.status === 'queued') thumbHtml = `<div class="sb-thumb"><div style="opacity:.6">⏳</div></div>`;
     else if (thumbSrc) thumbHtml = `<div class="sb-thumb"><img data-src="${utils.escapeHtml(thumbSrc)}" alt=""></div>`;

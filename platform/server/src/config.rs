@@ -53,6 +53,9 @@ pub struct Config {
     pub available_parallelism: usize,
     /// 启用 GPU(OpenCL)进行平方积分 / variance prefilter。需容器挂 NVIDIA runtime。
     pub use_gpu: bool,
+    /// 级联检测器最终 score 阈值(0=不过滤,1=必须通过所有 stage)。
+    /// OpenCV Haar 级联在 ~0.5 附近给出合理 F1;0.0=关闭,会接受所有通过 NMS 的框。
+    pub min_score: f32,
 }
 
 impl Config {
@@ -89,6 +92,10 @@ impl Config {
             sse_keepalive_secs: env_or("SSE_KEEPALIVE_SECS", "15")
                 .parse().unwrap_or(15),
             use_gpu: env_or("RSFACE_USE_GPU", "1") == "1",
+            // 默认 0.0(不过滤)— OpenCV Haar 训练已包含 stage 级阈值;
+            // 想严格压低 FP 可设 0.5。生产 drama 类素材通常 0.3 较平衡。
+            min_score: env_or("RSFACE_MIN_SCORE", "0.0")
+                .parse::<f32>().unwrap_or(0.0),
             // RSFACE_THREAD_POOL=0 时,自动用物理并行度(并降 1 给主线程 / tokio);
             // 显式设置时尊重 env。
             thread_pool_hint: if pool_hint == 0 { ap.saturating_sub(1).max(1) } else { pool_hint },

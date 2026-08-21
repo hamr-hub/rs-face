@@ -131,6 +131,17 @@ impl Job {
     }
 
     pub fn summary(&self) -> serde_json::Value {
+        // For video/stream jobs, prefer the first annotated frame as the cover
+        // thumbnail (the original key points to .mp4 which renders as a broken
+        // image in <img>). For image jobs, the original_key IS the cover.
+        let frames = self.frames.lock().unwrap();
+        let cover_key: Option<String> = match self.kind {
+            JobKind::Image => self.original_media_key.lock().unwrap().clone(),
+            _ => frames
+                .iter()
+                .find_map(|f| f.annotated_key.clone())
+                .or_else(|| self.original_media_key.lock().unwrap().clone()),
+        };
         serde_json::json!({
             "id": self.id,
             "kind": self.kind,
@@ -139,8 +150,9 @@ impl Job {
             "created_ms": self.created_ms,
             "stats": *self.stats.lock().unwrap(),
             "face_count": self.face_count(),
-            "frame_count": self.frames.lock().unwrap().len(),
+            "frame_count": frames.len(),
             "original_key": self.original_media_key.lock().unwrap().clone(),
+            "cover_key": cover_key,
             "error": self.error.lock().unwrap().clone(),
             "archived": *self.archived.lock().unwrap(),
             "original_input": self.original_input.lock().unwrap().clone(),
@@ -963,6 +975,7 @@ pub fn build_detector(cfg: &Config) -> std::io::Result<DetectorKind> {
                 min_size: cfg.min_face_size,
                 use_gpu: cfg.use_gpu,
                 equalize_hist: true,
+                min_score: cfg.min_score,
                 ..DetectorConfig::default()
             };
             Ok(DetectorKind::Haar(Detector::new(cascade, dcfg)))
