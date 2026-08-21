@@ -82,8 +82,8 @@ impl HogFaceDetector {
         // dummy weights → 0 detections, no panic).
         let weight_bytes = HOG_DIM * 4;
         let copy_len = weight_bytes.min(raw.len());
-        for (i, chunk) in raw[..copy_len].chunks_exact(4).enumerate() {
-            weights_f32[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        for (i, chunk) in raw[..copy_len].as_chunks::<4>().0.iter().enumerate() {
+            weights_f32[i] = f32::from_le_bytes(*chunk);
         }
         // Bias: last 4 bytes if present, else 0.
         let bias = if raw.len() >= weight_bytes + 4 {

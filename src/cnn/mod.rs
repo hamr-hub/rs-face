@@ -302,8 +302,8 @@ impl CnnWeights {
             let mut buf = vec![0f32; n];
             let mut raw = vec![0u8; n * 4];
             f.read_exact(&mut raw)?;
-            for (i, chunk) in raw.chunks_exact(4).enumerate() {
-                buf[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            for (i, chunk) in raw.as_chunks::<4>().0.iter().enumerate() {
+                buf[i] = f32::from_le_bytes(*chunk);
             }
             Ok(buf)
         };
