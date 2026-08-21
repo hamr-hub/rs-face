@@ -3,24 +3,36 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use rsface::face_detector::FaceDetector;
 use rsface::haar::Cascade;
+use rsface::hog_face::{HogConfig, HogFaceDetector};
+use rsface::image::GrayImage;
+use rsface::mtcnn::{MtcnnConfig, MtcnnDetector};
 use rsface::pipeline::{Pipeline, PipelineConfig};
 use rsface::source;
+use rsface::yunet::{YunetConfig, YunetDetector};
 
 fn print_help() {
     println!(
-        "rs-face — zero-dep Viola-Jones face detector\n\n\
+        "rs-face — zero-dep multi-algorithm face detector\n\n\
          USAGE:\n  \
-         rs-face <INPUT> --out <DIR> [options]\n\n\
+         rs-face <INPUT> --out <DIR> --algo <haar|cnn|yunet|mtcnn|hog> [options]\n\n\
          INPUT forms:\n  \
            test://N            synthetic test pattern (N frames)\n  \
            /path/to/dir        image sequence (PNG/PPM/JPG files)\n  \
            /path/file.png|jpg  single image\n  \
            http(s)://host/p    single image or PNG sequence base URL\n  \
            *.mp4|*.mov|*.avi|*.mkv|*.webm | rtsp://...\n                           (requires `ffmpeg` on PATH)\n\n\
+         ALGORITHMS:\n  \
+           haar     Viola-Jones Haar cascade (default; core::Detector)\n  \
+           cnn      small CNN (24x24, Conv+ReLU+Pool+FC, core::CnnDetector)\n  \
+           yunet    YuNet-style anchor-based, 5 scales (core::YunetDetector)\n  \
+           mtcnn    MTCNN 3-stage cascade (P-Net -> R-Net -> O-Net)\n  \
+           hog      HOG + Linear SVM, 64x128 window, dense multi-scale\n\n\
          OPTIONS:\n  \
            --out <DIR>           output directory (required)\n  \
-           --cascade <PATH>      load cascade from .rfcf file (default: built-in demo)\n  \
+           --algo <NAME>         detection algorithm (default: haar)\n  \
+           --cascade <PATH>      load cascade from .rfcf file (haar only, default: built-in demo)\n  \
            --threads N           worker thread count (default: # CPUs)\n  \
            --min-size PX         minimum detection size in pixels (default: 24)\n  \
            --max-size PX         maximum detection size in pixels (default: 1024)\n  \
@@ -33,6 +45,7 @@ fn print_help() {
            --cnn                 use the CNN face detector (default: built-in template weights)\n  \
            --cnn-weights PATH    load CNN weights from a .cnn.bin file (requires --cnn)\n  \
            --no-gpu              disable the GPU OpenCL backend\n  \
+           --no-equalize         skip the cv::equalizeHist preprocessing\n  \
            --help                print this help\n"
     );
 }
@@ -52,27 +65,68 @@ fn main() {
     let mut min_score: Option<f32> = None;
     let mut only_with_face = false;
     let mut no_gpu = false;
+    let mut no_equalize = false;
     let mut use_cnn = false;
     let mut cnn_weights_path: Option<PathBuf> = None;
+    let mut algo: Option<String> = None;
 
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--help" | "-h" => { print_help(); return; }
-            "--out" => { out = args.next().map(PathBuf::from); }
-            "--cascade" => { cascade_path = args.next().map(PathBuf::from); }
-            "--threads" => { threads = args.next().and_then(|s| s.parse().ok()); }
-            "--queue-depth" => { queue_depth = args.next().and_then(|s| s.parse().ok()); }
-            "--min-size" => { min_size = args.next().and_then(|s| s.parse().ok()); }
-            "--max-size" => { max_size = args.next().and_then(|s| s.parse().ok()); }
-            "--scale" => { scale = args.next().and_then(|s| s.parse().ok()); }
-            "--stride" => { stride = args.next().and_then(|s| s.parse().ok()); }
-            "--nms" => { nms = args.next().and_then(|s| s.parse().ok()); }
-            "--min-score" => { min_score = args.next().and_then(|s| s.parse().ok()); }
-            "--only-with-face" => { only_with_face = true; }
-            "--no-gpu" => { no_gpu = true; }
-            "--cnn" => { use_cnn = true; }
-            "--cnn-weights" => { cnn_weights_path = args.next().map(PathBuf::from); }
-            other if !other.starts_with("--") && input.is_none() => { input = Some(other.to_string()); }
+            "--help" | "-h" => {
+                print_help();
+                return;
+            }
+            "--out" => {
+                out = args.next().map(PathBuf::from);
+            }
+            "--cascade" => {
+                cascade_path = args.next().map(PathBuf::from);
+            }
+            "--threads" => {
+                threads = args.next().and_then(|s| s.parse().ok());
+            }
+            "--queue-depth" => {
+                queue_depth = args.next().and_then(|s| s.parse().ok());
+            }
+            "--min-size" => {
+                min_size = args.next().and_then(|s| s.parse().ok());
+            }
+            "--max-size" => {
+                max_size = args.next().and_then(|s| s.parse().ok());
+            }
+            "--scale" => {
+                scale = args.next().and_then(|s| s.parse().ok());
+            }
+            "--stride" => {
+                stride = args.next().and_then(|s| s.parse().ok());
+            }
+            "--nms" => {
+                nms = args.next().and_then(|s| s.parse().ok());
+            }
+            "--min-score" => {
+                min_score = args.next().and_then(|s| s.parse().ok());
+            }
+            "--only-with-face" => {
+                only_with_face = true;
+            }
+            "--no-gpu" => {
+                no_gpu = true;
+            }
+            "--no-equalize" => {
+                no_equalize = true;
+            }
+            "--cnn" => {
+                use_cnn = true;
+            }
+            "--cnn-weights" => {
+                cnn_weights_path = args.next().map(PathBuf::from);
+            }
+            "--algo" => {
+                algo = args.next().map(|s| s.to_ascii_lowercase());
+            }
+            other if !other.starts_with("--") && input.is_none() => {
+                input = Some(other.to_string());
+            }
             other => {
                 eprintln!("unknown argument: {}", other);
                 print_help();
@@ -83,41 +137,86 @@ fn main() {
 
     let input = match input {
         Some(s) => s,
-        None => { print_help(); std::process::exit(2); }
+        None => {
+            print_help();
+            std::process::exit(2);
+        }
     };
     let out = match out {
         Some(p) => p,
-        None => { eprintln!("--out <DIR> is required"); std::process::exit(2); }
+        None => {
+            eprintln!("--out <DIR> is required");
+            std::process::exit(2);
+        }
     };
+
+    // Resolve algorithm: --algo wins over --cnn for clarity.
+    let algo_name = match algo {
+        Some(s) => s,
+        None => {
+            if use_cnn {
+                "cnn".to_string()
+            } else {
+                "haar".to_string()
+            }
+        }
+    };
+    println!("[rs-face] algorithm: {}", algo_name);
 
     // Load cascade.
     let mut cascade = if let Some(p) = cascade_path {
         match Cascade::load(&p) {
             Ok(c) => c,
-            Err(e) => { eprintln!("failed to load cascade {}: {}", p.display(), e); std::process::exit(2); }
+            Err(e) => {
+                eprintln!("failed to load cascade {}: {}", p.display(), e);
+                std::process::exit(2);
+            }
         }
     } else {
         rsface::haar::params::demo_face_cascade()
     };
-    if let Some(b) = std::env::var("RS_FACE_CASCADE_BIAS").ok().and_then(|s| s.parse().ok()) {
+    if let Some(b) = std::env::var("RS_FACE_CASCADE_BIAS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         cascade.stage_bias = b;
         eprintln!("[rs-face] stage_bias overridden to {}", b);
     }
-    println!("[rs-face] cascade: {} stages, {} features, window {}x{}",
-             cascade.num_stages(), cascade.num_features(), cascade.window_w, cascade.window_h);
+    println!(
+        "[rs-face] cascade: {} stages, {} features, window {}x{}",
+        cascade.num_stages(),
+        cascade.num_features(),
+        cascade.window_w,
+        cascade.window_h
+    );
 
     // Debug: dump first 3 stages' weak features for sanity checking.
     if std::env::var("RS_FACE_DEBUG").is_ok() {
         for (i, st) in cascade.stages.iter().take(3).enumerate() {
-            eprintln!("[debug] stage {} threshold={:.4}, {} weak features", i, st.stage_threshold, st.weak_features.len());
+            eprintln!(
+                "[debug] stage {} threshold={:.4}, {} weak features",
+                i,
+                st.stage_threshold,
+                st.weak_features.len()
+            );
             for (j, w) in st.weak_features.iter().take(3).enumerate() {
-                eprintln!("[debug]   weak {}: feat_idx={} thr={:.4} sign={} left={:.4} right={:.4}",
-                    j, w.feature_index, w.threshold, w.sign, w.left_val, w.right_val);
+                eprintln!(
+                    "[debug]   weak {}: feat_idx={} thr={:.4} sign={} left={:.4} right={:.4}",
+                    j, w.feature_index, w.threshold, w.sign, w.left_val, w.right_val
+                );
                 let feat = &cascade.features[w.feature_index as usize];
-                eprintln!("[debug]     feature kind={:?} {}x{} rects={}",
-                    feat.kind, feat.width, feat.height, feat.rects.len());
+                eprintln!(
+                    "[debug]     feature kind={:?} {}x{} rects={}",
+                    feat.kind,
+                    feat.width,
+                    feat.height,
+                    feat.rects.len()
+                );
                 for r in &feat.rects {
-                    eprintln!("[debug]       rect {} {} {}x{} weight={}", r.x, r.y, r.w, r.h, r.weight);
+                    eprintln!(
+                        "[debug]       rect {} {} {}x{} weight={}",
+                        r.x, r.y, r.w, r.h, r.weight
+                    );
                 }
             }
         }
@@ -126,7 +225,10 @@ fn main() {
     // Open source.
     let mut src = match source::open(&input) {
         Ok(s) => s,
-        Err(e) => { eprintln!("failed to open source '{}': {}", input, e); std::process::exit(2); }
+        Err(e) => {
+            eprintln!("failed to open source '{}': {}", input, e);
+            std::process::exit(2);
+        }
     };
     if let Some(total) = src.total_hint() {
         println!("[rs-face] source: {} (≈{} frames)", input, total);
@@ -135,36 +237,99 @@ fn main() {
     }
 
     let mut cfg = PipelineConfig::default();
-    if let Some(t) = threads { cfg.threads = t; }
-    if let Some(q) = queue_depth { cfg.queue_depth = q; }
-    if let Some(v) = min_size { cfg.detector.min_size = v; }
-    if let Some(v) = max_size { cfg.detector.max_size = v; }
-    if let Some(v) = scale { cfg.detector.scale_factor = v; }
-    if let Some(v) = stride { cfg.detector.window_stride = v; }
-    if let Some(v) = nms { cfg.detector.nms_iou_threshold = v; }
-    if let Some(v) = min_score { cfg.min_score = v; }
+    if let Some(t) = threads {
+        cfg.threads = t;
+    }
+    if let Some(q) = queue_depth {
+        cfg.queue_depth = q;
+    }
+    if let Some(v) = min_size {
+        cfg.detector.min_size = v;
+    }
+    if let Some(v) = max_size {
+        cfg.detector.max_size = v;
+    }
+    if let Some(v) = scale {
+        cfg.detector.scale_factor = v;
+    }
+    if let Some(v) = stride {
+        cfg.detector.window_stride = v;
+    }
+    if let Some(v) = nms {
+        cfg.detector.nms_iou_threshold = v;
+    }
+    if let Some(v) = min_score {
+        cfg.min_score = v;
+    }
     cfg.only_with_face = only_with_face;
     cfg.detector.use_gpu = !no_gpu;
+    cfg.detector.equalize_hist = !no_equalize;
 
-    println!("[rs-face] threads={}, queue_depth={}, detector={:?}", cfg.threads, cfg.queue_depth, cfg.detector);
+    println!(
+        "[rs-face] threads={}, queue_depth={}, detector={:?}",
+        cfg.threads, cfg.queue_depth, cfg.detector
+    );
 
     let t0 = Instant::now();
-    let stats = if use_cnn {
-        // CNN detector path: bypass the Viola-Jones pipeline and run the
-        // modern CNN forward pass directly on each frame.
-        let stats = match run_cnn_pipeline(&mut *src, &out, &cfg, cnn_weights_path.as_deref()) {
+    let stats = match algo_name.as_str() {
+        "haar" => match Pipeline::run(&mut *src, cascade, &out, cfg) {
             Ok(s) => s,
-            Err(e) => { eprintln!("cnn pipeline error: {}", e); std::process::exit(1); }
-        };
-        stats
-    } else {
-        match Pipeline::run(&mut *src, cascade, &out, cfg) {
+            Err(e) => {
+                eprintln!("pipeline error: {}", e);
+                std::process::exit(1);
+            }
+        },
+        "cnn" => match run_cnn_pipeline(&mut *src, &out, &cfg, cnn_weights_path.as_deref()) {
             Ok(s) => s,
-            Err(e) => { eprintln!("pipeline error: {}", e); std::process::exit(1); }
+            Err(e) => {
+                eprintln!("cnn pipeline error: {}", e);
+                std::process::exit(1);
+            }
+        },
+        "yunet" => {
+            match run_algo_pipeline(&mut *src, &out, &cfg, |img: &GrayImage| {
+                YunetDetector::new(YunetConfig::default()).detect(img)
+            }) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("yunet pipeline error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "mtcnn" => {
+            match run_algo_pipeline(&mut *src, &out, &cfg, |img: &GrayImage| {
+                MtcnnDetector::new(MtcnnConfig::default()).detect(img)
+            }) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("mtcnn pipeline error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "hog" => {
+            match run_algo_pipeline(&mut *src, &out, &cfg, |img: &GrayImage| {
+                HogFaceDetector::new(HogConfig::default()).detect(img)
+            }) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("hog pipeline error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        other => {
+            eprintln!("unknown --algo: {} (use haar|cnn|yunet|mtcnn|hog)", other);
+            std::process::exit(2);
         }
     };
     let wall_ms = t0.elapsed().as_millis() as u64;
-    let fps = if wall_ms > 0 { stats.frames_processed as f32 * 1000.0 / wall_ms as f32 } else { 0.0 };
+    let fps = if wall_ms > 0 {
+        stats.frames_processed as f32 * 1000.0 / wall_ms as f32
+    } else {
+        0.0
+    };
     println!(
         "[rs-face] done: {} frames ({} with face), {} detections, wall {:.2}s, throughput {:.2} fps",
         stats.frames_processed, stats.frames_with_face, stats.total_detections,
@@ -184,8 +349,8 @@ fn run_cnn_pipeline(
     weights_path: Option<&std::path::Path>,
 ) -> std::io::Result<rsface::pipeline::PipelineStats> {
     use rsface::cnn::{CnnConfig, CnnDetector, CnnWeights};
-    use rsface::pipeline::PipelineStats;
     use rsface::output::PipelineSummary;
+    use rsface::pipeline::PipelineStats;
 
     std::fs::create_dir_all(out_dir)?;
     let cfg_cnn = CnnConfig {
@@ -213,7 +378,9 @@ fn run_cnn_pipeline(
 
     loop {
         let frame_opt = src.next_frame()?;
-        let Some(frame) = frame_opt else { break; };
+        let Some(frame) = frame_opt else {
+            break;
+        };
         let w = frame.gray.width();
         let h = frame.gray.height();
         // Convert u8 grayscale → f32 in [0, 1] for the CNN.
@@ -223,7 +390,9 @@ fn run_cnn_pipeline(
         }
         let dets = det.detect(&f32_img, w, h);
         let n = dets.len() as u64;
-        if n > 0 { frames_with_face += 1; }
+        if n > 0 {
+            frames_with_face += 1;
+        }
         total_detections += n;
 
         // Build RGB representation: prefer the source's RGB, fall back to
@@ -236,7 +405,9 @@ fn run_cnn_pipeline(
                 let row = rgb.row_mut(y);
                 let gray_row = frame.gray.row(y);
                 for (x, &v) in gray_row.iter().enumerate() {
-                    row[x*3] = v; row[x*3+1] = v; row[x*3+2] = v;
+                    row[x * 3] = v;
+                    row[x * 3 + 1] = v;
+                    row[x * 3 + 2] = v;
                 }
             }
             rgb
@@ -247,9 +418,16 @@ fn run_cnn_pipeline(
             image_file: String::new(),
             width: w,
             height: h,
-            detections: dets.iter().map(|d| rsface::Detection {
-                x: d.x, y: d.y, w: d.w, h: d.h, score: d.confidence,
-            }).collect(),
+            detections: dets
+                .iter()
+                .map(|d| rsface::Detection {
+                    x: d.x,
+                    y: d.y,
+                    w: d.w,
+                    h: d.h,
+                    score: d.confidence,
+                })
+                .collect(),
         };
         let fname = rsface::output::write_annotated_png(out_dir, &rec, &rgb)?;
         let mut rec = rec;
@@ -257,6 +435,93 @@ fn run_cnn_pipeline(
         if cfg.only_with_face && rec.detections.is_empty() {
             // Don't accumulate empty frames in the manifest when --only-with-face
             // is set (mirrors the Viola-Jones pipeline behaviour).
+        } else {
+            records.push(rec);
+        }
+    }
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let processed = records.len() as u64;
+    rsface::output::write_manifest(
+        &out_dir.join("manifest.json"),
+        &records,
+        &PipelineSummary {
+            frames_processed: processed,
+            frames_with_face,
+            total_detections,
+            elapsed_ms,
+        },
+    )?;
+    Ok(PipelineStats {
+        frames_processed: processed,
+        frames_with_face,
+        total_detections,
+        elapsed_ms,
+    })
+}
+
+/// Generic pipeline for the new algorithms (yunet, mtcnn, hog). The detector
+/// callable is supplied as a closure; the pipeline handles frame I/O, RGB
+/// fallback, annotated PNG write, and manifest generation. Output matches
+/// the haar/cnn paths (uses `rsface::Detection`).
+fn run_algo_pipeline<F>(
+    src: &mut dyn rsface::source::FrameSource,
+    out_dir: &std::path::Path,
+    cfg: &rsface::pipeline::PipelineConfig,
+    detect_fn: F,
+) -> std::io::Result<rsface::pipeline::PipelineStats>
+where
+    F: Fn(&GrayImage) -> Vec<rsface::Detection>,
+{
+    use rsface::output::PipelineSummary;
+    use rsface::pipeline::PipelineStats;
+
+    std::fs::create_dir_all(out_dir)?;
+    let start = std::time::Instant::now();
+    let mut records = Vec::<rsface::output::DetectionRecord>::new();
+    let mut frames_with_face: u64 = 0;
+    let mut total_detections: u64 = 0;
+
+    loop {
+        let frame_opt = src.next_frame()?;
+        let Some(frame) = frame_opt else {
+            break;
+        };
+        let w = frame.gray.width();
+        let h = frame.gray.height();
+        let dets = detect_fn(&frame.gray);
+        let n = dets.len() as u64;
+        if n > 0 {
+            frames_with_face += 1;
+        }
+        total_detections += n;
+
+        let rgb = if let Some(arc) = &frame.rgb {
+            (**arc).clone()
+        } else {
+            let mut rgb = rsface::image::RgbImage::new(w, h);
+            for y in 0..h {
+                let row = rgb.row_mut(y);
+                let gray_row = frame.gray.row(y);
+                for (x, &v) in gray_row.iter().enumerate() {
+                    row[x * 3] = v;
+                    row[x * 3 + 1] = v;
+                    row[x * 3 + 2] = v;
+                }
+            }
+            rgb
+        };
+        let rec = rsface::output::DetectionRecord {
+            frame_index: frame.index,
+            timestamp_ms: frame.timestamp_ms,
+            image_file: String::new(),
+            width: w,
+            height: h,
+            detections: dets,
+        };
+        let fname = rsface::output::write_annotated_png(out_dir, &rec, &rgb)?;
+        let mut rec = rec;
+        rec.image_file = fname;
+        if cfg.only_with_face && rec.detections.is_empty() {
         } else {
             records.push(rec);
         }

@@ -14,16 +14,27 @@ pub struct SyntheticSource {
 
 impl SyntheticSource {
     pub fn new(spec: &str) -> Self {
-        let frames: u64 = spec.strip_prefix("test://").unwrap_or("grid").split('?').next()
+        let frames: u64 = spec
+            .strip_prefix("test://")
+            .unwrap_or("grid")
+            .split('?')
+            .next()
             .and_then(|s| s.split('=').nth(1).and_then(|n| n.parse().ok()))
             .unwrap_or(60);
-        Self { frames, pos: 0, width: 320, height: 240 }
+        Self {
+            frames,
+            pos: 0,
+            width: 320,
+            height: 240,
+        }
     }
 }
 
 impl FrameSource for SyntheticSource {
     fn next_frame(&mut self) -> io::Result<Option<Frame>> {
-        if self.pos >= self.frames { return Ok(None); }
+        if self.pos >= self.frames {
+            return Ok(None);
+        }
         let mut img = GrayImage::new(self.width, self.height);
         let phase = (self.pos as f32) * 0.1;
         for y in 0..self.height {
@@ -42,5 +53,7 @@ impl FrameSource for SyntheticSource {
         }))
     }
 
-    fn total_hint(&self) -> Option<u64> { Some(self.frames) }
+    fn total_hint(&self) -> Option<u64> {
+        Some(self.frames)
+    }
 }

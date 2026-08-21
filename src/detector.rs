@@ -37,6 +37,13 @@ pub struct DetectorConfig {
     /// (which uses `minEig = 4000` for the 24x24 window — we use 1/20th of that
     /// since our variance calculation is on the same scale as `var = E[X²] - E[X]²`).
     pub variance_threshold: u64,
+    /// If `true`, apply `cv::equalizeHist`-style histogram equalization to the
+    /// image before running the cascade. OpenCV's Haar cascade is trained on
+    /// equalized data — without this, real photographs with low contrast or
+    /// shifted luminance get silently rejected at stage 0 because the
+    /// per-feature thresholds were calibrated for the equalized range.
+    /// Defaults to `true`; set to `false` to compare with raw input.
+    pub equalize_hist: bool,
     /// If `true`, attempt to use the GPU for the squared-integral computation
     /// and variance pre-filter. Falls back to CPU silently if no GPU/OpenCL
     /// is available.
@@ -53,6 +60,7 @@ impl Default for DetectorConfig {
             nms_iou_threshold: 0.3,
             min_score: 0.0,
             variance_threshold: 200,
+            equalize_hist: false,
             use_gpu: true,
         }
     }
@@ -67,12 +75,20 @@ pub struct Detector {
 
 impl Detector {
     pub fn new(cascade: Cascade, config: DetectorConfig) -> Self {
-        Self { cascade, config, gpu: std::sync::OnceLock::new() }
+        Self {
+            cascade,
+            config,
+            gpu: std::sync::OnceLock::new(),
+        }
     }
 
     fn gpu(&self) -> Option<&crate::gpu::GpuIntegral> {
-        if !self.config.use_gpu { return None; }
-        self.gpu.get_or_init(|| crate::gpu::GpuIntegral::new()).as_ref()
+        if !self.config.use_gpu {
+            return None;
+        }
+        self.gpu
+            .get_or_init(|| crate::gpu::GpuIntegral::new())
+            .as_ref()
     }
 
     /// True when GPU is worth invoking for an image of this size. GPU kernel
@@ -88,7 +104,9 @@ impl Detector {
         let mut raw: Vec<Detection> = Vec::new();
         let win_w = self.cascade.window_w;
         let win_h = self.cascade.window_h;
-        if img.width() < win_w || img.height() < win_h { return raw; }
+        if img.width() < win_w || img.height() < win_h {
+            return raw;
+        }
 
         // Per-thread scratch buffer. One allocation per Detector, reused for
         // every window — eliminated the previous `vec![None; 2913]` per-window
@@ -96,16 +114,35 @@ impl Detector {
         let mut cache = EvalCache::new(self.cascade.features.len());
 
         // Build pyramid by repeated downscaling.
-        let mut current = img.clone();
+        // OpenCV's Haar cascade is trained on histogram-equalized images
+        // (the canonical "Lena face detector" workflow applies
+        // `cv::equalizeHist` before `detectMultiScale`). Without it the
+        // integral-image sums land in a different numerical range than the
+        // cascade's learned thresholds/varianceNormFactor and most real
+        // faces silently fail stage 0. The equalization is a deterministic
+        // O(W*H) per pixel pass — cheap relative to the cascade eval.
+        let mut current = if self.config.equalize_hist {
+            let mut eq = img.clone();
+            eq.equalize_hist_inplace();
+            eq
+        } else {
+            img.clone()
+        };
         let mut current_scale: f32 = 1.0;
         loop {
             let cw = current.width();
             let ch = current.height();
             let det_w_at_cur = (win_w as f32 * current_scale).round() as usize;
             let det_h_at_cur = (win_h as f32 * current_scale).round() as usize;
-            if det_w_at_cur > self.config.max_size || det_h_at_cur > self.config.max_size { break; }
-            if det_w_at_cur < self.config.min_size || det_h_at_cur < self.config.min_size { break; }
-            if cw < win_w || ch < win_h { break; }
+            if det_w_at_cur > self.config.max_size || det_h_at_cur > self.config.max_size {
+                break;
+            }
+            if det_w_at_cur < self.config.min_size || det_h_at_cur < self.config.min_size {
+                break;
+            }
+            if cw < win_w || ch < win_h {
+                break;
+            }
 
             // Build integral images. The squared integral is rebuilt per-level
             // because variance normalisation must use the SAME pixels as the
@@ -114,15 +151,21 @@ impl Detector {
             let (ii, ii_sq) = if let Some(g) = self.gpu() {
                 if Self::gpu_worthwhile(cw, ch) {
                     let (ii_data, ii_sq_data) = g.compute_dual(&current);
-                    (IntegralImage::from_owned(ii_data, cw, ch),
-                     SquaredIntegralImage::from_owned(ii_sq_data, cw, ch))
+                    (
+                        IntegralImage::from_owned(ii_data, cw, ch),
+                        SquaredIntegralImage::from_owned(ii_sq_data, cw, ch),
+                    )
                 } else {
-                    (IntegralImage::from_gray(&current),
-                     SquaredIntegralImage::from_gray(&current))
+                    (
+                        IntegralImage::from_gray(&current),
+                        SquaredIntegralImage::from_gray(&current),
+                    )
                 }
             } else {
-                (IntegralImage::from_gray(&current),
-                 SquaredIntegralImage::from_gray(&current))
+                (
+                    IntegralImage::from_gray(&current),
+                    SquaredIntegralImage::from_gray(&current),
+                )
             };
             // Move the squared integral image into the cache without an
             // intermediate clone (previously this was `cached_sq.clone()`
@@ -146,12 +189,20 @@ impl Detector {
                         let max_dets = ((cw - win_w + 1) * (ch - win_h + 1)).min(8192);
                         let gpu_dets = g.detect_windows(&self.cascade, &current, max_dets);
                         for d in gpu_dets {
-                            if d.score < self.config.min_score { continue; }
+                            if d.score < self.config.min_score {
+                                continue;
+                            }
                             let ox = (d.x as f32 / current_scale).round() as usize;
                             let oy = (d.y as f32 / current_scale).round() as usize;
                             let ox = ox.min(img.width().saturating_sub(det_w_at_cur));
                             let oy = oy.min(img.height().saturating_sub(det_h_at_cur));
-                            raw.push(Detection { x: ox, y: oy, w: det_w_at_cur, h: det_h_at_cur, score: d.score });
+                            raw.push(Detection {
+                                x: ox,
+                                y: oy,
+                                w: det_w_at_cur,
+                                h: det_h_at_cur,
+                                score: d.score,
+                            });
                         }
                     }
                 }
@@ -164,8 +215,22 @@ impl Detector {
                     // Variance pre-filter: cheap O(1) rejection of windows that
                     // cannot contain a face. Caches rejects the vast majority of
                     // windows in real images and saves the full cascade evaluation.
-                    let passes = !use_variance || cache.passes_variance(
-                        &ii, x, y, win_w, win_h, self.config.variance_threshold);
+                    //
+                    // Mirrors OpenCV's `HaarEvaluator::setWindow` early-exit: the
+                    // variance is computed over the INNER normrect (1, 1, W-2, H-2)
+                    // — the same area the cascade's `varianceNormFactor` is built
+                    // from — so a window that passes the pre-filter is guaranteed
+                    // to have a positive normrect variance when the cascade
+                    // evaluates it (no wasted `variance_norm_factor == 0` rejects).
+                    let passes = !use_variance
+                        || cache.passes_variance(
+                            &ii,
+                            x + 1,
+                            y + 1,
+                            win_w - 2,
+                            win_h - 2,
+                            self.config.variance_threshold,
+                        );
                     if passes {
                         if let Some(score) = self.cascade.classify(&ii, &ri, x, y, &mut cache) {
                             if score >= self.config.min_score {
@@ -177,7 +242,13 @@ impl Detector {
                                 // Clamp to image bounds.
                                 let ox = ox.min(img.width().saturating_sub(ow));
                                 let oy = oy.min(img.height().saturating_sub(oh));
-                                raw.push(Detection { x: ox, y: oy, w: ow, h: oh, score });
+                                raw.push(Detection {
+                                    x: ox,
+                                    y: oy,
+                                    w: ow,
+                                    h: oh,
+                                    score,
+                                });
                             }
                         }
                     }
@@ -187,9 +258,15 @@ impl Detector {
             }
 
             // Prepare next pyramid level.
-            let next_w = ((cw as f32) / self.config.scale_factor).round().max(win_w as f32) as usize;
-            let next_h = ((ch as f32) / self.config.scale_factor).round().max(win_h as f32) as usize;
-            if next_w == cw || next_h == ch { break; }
+            let next_w = ((cw as f32) / self.config.scale_factor)
+                .round()
+                .max(win_w as f32) as usize;
+            let next_h = ((ch as f32) / self.config.scale_factor)
+                .round()
+                .max(win_h as f32) as usize;
+            if next_w == cw || next_h == ch {
+                break;
+            }
             // For downscaling (next_w < cw), use area averaging which matches
             // OpenCV's default `cv::resize` for >2× downscaling and is significantly
             // more accurate than bilinear for cascade evaluation.
@@ -199,7 +276,9 @@ impl Detector {
                 current = current.resize_bilinear(next_w, next_h);
             }
             current_scale = img.width() as f32 / current.width() as f32;
-            if current.width() <= win_w || current.height() <= win_h { break; }
+            if current.width() <= win_w || current.height() <= win_h {
+                break;
+            }
         }
 
         non_max_suppression(raw, self.config.nms_iou_threshold)
@@ -208,14 +287,22 @@ impl Detector {
 
 /// Standard greedy NMS: pick the highest-score box, suppress all with IoU > threshold.
 pub fn non_max_suppression(mut dets: Vec<Detection>, iou_threshold: f32) -> Vec<Detection> {
-    dets.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    dets.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut keep: Vec<Detection> = Vec::new();
     let mut suppressed = vec![false; dets.len()];
     for i in 0..dets.len() {
-        if suppressed[i] { continue; }
+        if suppressed[i] {
+            continue;
+        }
         keep.push(dets[i].clone());
         for j in (i + 1)..dets.len() {
-            if suppressed[j] { continue; }
+            if suppressed[j] {
+                continue;
+            }
             if iou(&dets[i], &dets[j]) > iou_threshold {
                 suppressed[j] = true;
             }
@@ -233,9 +320,13 @@ fn iou(a: &Detection, b: &Detection) -> f32 {
     let w = (x2 as i64 - x1 as i64).max(0) as usize;
     let h = (y2 as i64 - y1 as i64).max(0) as usize;
     let inter = (w * h) as f32;
-    if inter <= 0.0 { return 0.0; }
+    if inter <= 0.0 {
+        return 0.0;
+    }
     let union = (a.w * a.h + b.w * b.h) as f32 - inter;
-    if union <= 0.0 { return 0.0; }
+    if union <= 0.0 {
+        return 0.0;
+    }
     inter / union
 }
 
@@ -249,23 +340,49 @@ mod tests {
         let mut img = GrayImage::new(120, 120);
         for y in 0..120 {
             for x in 0..120 {
-                let v = if y < 20 { 20 }
-                       else if y < 40 && (40..80).contains(&x) { 200 }
-                       else if y < 100 && (40..80).contains(&x) { 220 }
-                       else { 20 };
+                let v = if y < 20 {
+                    20
+                } else if y < 40 && (40..80).contains(&x) {
+                    200
+                } else if y < 100 && (40..80).contains(&x) {
+                    220
+                } else {
+                    20
+                };
                 img[(x, y)] = v;
             }
         }
         let det = Detector::new(demo_face_cascade(), DetectorConfig::default());
         let r = det.detect(&img);
-        assert!(!r.is_empty(), "expected at least one detection in bright-center pattern");
+        assert!(
+            !r.is_empty(),
+            "expected at least one detection in bright-center pattern"
+        );
     }
 
     #[test]
     fn nsm_merges_overlapping() {
-        let a = Detection { x: 0, y: 0, w: 20, h: 20, score: 1.0 };
-        let b = Detection { x: 2, y: 2, w: 20, h: 20, score: 0.9 };
-        let c = Detection { x: 100, y: 100, w: 20, h: 20, score: 0.5 };
+        let a = Detection {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 20,
+            score: 1.0,
+        };
+        let b = Detection {
+            x: 2,
+            y: 2,
+            w: 20,
+            h: 20,
+            score: 0.9,
+        };
+        let c = Detection {
+            x: 100,
+            y: 100,
+            w: 20,
+            h: 20,
+            score: 0.5,
+        };
         let r = non_max_suppression(vec![a.clone(), b.clone(), c.clone()], 0.3);
         assert_eq!(r.len(), 2, "should merge a+b but keep c");
         assert_eq!(r[0].score, 1.0);

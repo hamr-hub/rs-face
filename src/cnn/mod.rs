@@ -54,10 +54,7 @@ impl Default for CnnConfig {
 
 /// 2D convolution (single channel input → single channel output, no padding).
 /// Used as a building block — not the production path (which uses im2col).
-fn conv2d_1to1(
-    img: &[f32], w: usize, h: usize,
-    kernel: &[f32], kw: usize, kh: usize,
-) -> Vec<f32> {
+fn conv2d_1to1(img: &[f32], w: usize, h: usize, kernel: &[f32], kw: usize, kh: usize) -> Vec<f32> {
     let mut out = vec![0.0; (w - kw + 1) * (h - kh + 1)];
     for y in 0..(h - kh + 1) {
         for x in 0..(w - kw + 1) {
@@ -76,8 +73,14 @@ fn conv2d_1to1(
 /// 2D convolution with multiple input channels → multiple output channels.
 /// Padded with zeros ("valid" conv, output size = input - kernel + 1).
 fn conv2d(
-    input: &[f32], w: usize, h: usize, c_in: usize,
-    kernel: &[f32], kw: usize, kh: usize, c_out: usize,
+    input: &[f32],
+    w: usize,
+    h: usize,
+    c_in: usize,
+    kernel: &[f32],
+    kw: usize,
+    kh: usize,
+    c_out: usize,
 ) -> Vec<f32> {
     let ow = w - kw + 1;
     let oh = h - kh + 1;
@@ -90,7 +93,7 @@ fn conv2d(
                     for ky in 0..kh {
                         for kx in 0..kw {
                             sum += input[((y + ky) * w + (x + kx)) * c_in + ci]
-                                  * kernel[((ky * kw + kx) * c_in + ci) * c_out + co];
+                                * kernel[((ky * kw + kx) * c_in + ci) * c_out + co];
                         }
                     }
                 }
@@ -104,7 +107,9 @@ fn conv2d(
 /// ReLU in-place.
 pub fn relu(x: &mut [f32]) {
     for v in x.iter_mut() {
-        if *v < 0.0 { *v = 0.0; }
+        if *v < 0.0 {
+            *v = 0.0;
+        }
     }
 }
 
@@ -120,7 +125,9 @@ fn maxpool2(input: &[f32], w: usize, h: usize, c: usize) -> Vec<f32> {
                 for dy in 0..2 {
                     for dx in 0..2 {
                         let v = input[((y * 2 + dy) * w + (x * 2 + dx)) * c + co];
-                        if v > m { m = v; }
+                        if v > m {
+                            m = v;
+                        }
                     }
                 }
                 out[(y * ow + x) * c + co] = m;
@@ -165,22 +172,10 @@ pub fn sigmoid(x: &mut [f32]) {
 /// (YuNet, SCRFD) use pretrained weights on millions of face images.
 pub fn template_face_weights() -> CnnWeights {
     // 3×3 edge kernel (Sobel-ish, detects brightness gradient)
-    let sobel_h = [
-        -1.0, 0.0, 1.0,
-        -2.0, 0.0, 2.0,
-        -1.0, 0.0, 1.0,
-    ];
-    let sobel_v = [
-        -1.0, -2.0, -1.0,
-         0.0,  0.0,  0.0,
-         1.0,  2.0, 1.0,
-    ];
+    let sobel_h = [-1.0, 0.0, 1.0, -2.0, 0.0, 2.0, -1.0, 0.0, 1.0];
+    let sobel_v = [-1.0, -2.0, -1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 1.0];
     // 3×3 Laplacian / "centre brighter than surrounds" detector
-    let centre_brighter = [
-        -0.5, -0.5, -0.5,
-        -0.5,  3.0, -0.5,
-        -0.5, -0.5, -0.5,
-    ];
+    let centre_brighter = [-0.5, -0.5, -0.5, -0.5, 3.0, -0.5, -0.5, -0.5, -0.5];
 
     // Conv1: 8 output channels from 1 input. Each output channel is a
     // different 3×3 kernel applied to the grayscale input.
@@ -209,7 +204,13 @@ pub fn template_face_weights() -> CnnWeights {
     for co in 0..16 {
         for ci in 0..8 {
             let k_base = ((0 * 3 + 0) * 8 + ci) * 16 + co;
-            let w = if ci < 3 { 0.0 } else if ci == 2 || ci == 5 { 0.5 } else { 0.2 };
+            let w = if ci < 3 {
+                0.0
+            } else if ci == 2 || ci == 5 {
+                0.5
+            } else {
+                0.2
+            };
             conv2[k_base] = w;
         }
     }
@@ -251,8 +252,13 @@ pub fn template_face_weights() -> CnnWeights {
     fc2_b[0] = -2.0;
 
     CnnWeights {
-        conv1_w: conv1, conv2_w: conv2, conv3_w: conv3,
-        fc1_w, fc1_b, fc2_w, fc2_b,
+        conv1_w: conv1,
+        conv2_w: conv2,
+        conv3_w: conv3,
+        fc1_w,
+        fc1_b,
+        fc2_w,
+        fc2_b,
     }
 }
 
@@ -264,7 +270,7 @@ pub struct CnnWeights {
     pub conv3_w: Vec<f32>, // 32 × 3 × 3 × 16
     pub fc1_w: Vec<f32>,   // 32 × 512
     pub fc1_b: Vec<f32>,
-    pub fc2_w: Vec<f32>,   // 32
+    pub fc2_w: Vec<f32>, // 32
     pub fc2_b: Vec<f32>,
 }
 
@@ -279,11 +285,14 @@ impl CnnWeights {
         let mut magic = [0u8; 4];
         f.read_exact(&mut magic)?;
         if &magic != b"RCNN" {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-                "not a CNN weights file"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "not a CNN weights file",
+            ));
         }
         let mut vbuf = [0u8; 4];
-        f.read_exact(&mut vbuf)?; let _version = u32::from_le_bytes(vbuf);
+        f.read_exact(&mut vbuf)?;
+        let _version = u32::from_le_bytes(vbuf);
         let mut lens = [0usize; 7];
         for slot in &mut lens {
             f.read_exact(&mut vbuf)?;
@@ -302,10 +311,10 @@ impl CnnWeights {
             conv1_w: read_vec(lens[0])?,
             conv2_w: read_vec(lens[1])?,
             conv3_w: read_vec(lens[2])?,
-            fc1_w:   read_vec(lens[3])?,
-            fc1_b:   read_vec(lens[4])?,
-            fc2_w:   read_vec(lens[5])?,
-            fc2_b:   read_vec(lens[6])?,
+            fc1_w: read_vec(lens[3])?,
+            fc1_b: read_vec(lens[4])?,
+            fc2_w: read_vec(lens[5])?,
+            fc2_b: read_vec(lens[6])?,
         })
     }
 }
@@ -334,13 +343,13 @@ impl CnnScratch {
     pub fn new() -> Self {
         Self {
             inner: std::cell::UnsafeCell::new(CnnScratchInner {
-                c1:  vec![0.0; 22 * 22 * 8],
-                c2:  vec![0.0; 20 * 20 * 16],
+                c1: vec![0.0; 22 * 22 * 8],
+                c2: vec![0.0; 20 * 20 * 16],
                 c2p: vec![0.0; 10 * 10 * 16],
-                c3:  vec![0.0; 8 * 8 * 32],
+                c3: vec![0.0; 8 * 8 * 32],
                 c3p: vec![0.0; 4 * 4 * 32],
-                f1:  vec![0.0; 32],
-                f2:  vec![0.0; 1],
+                f1: vec![0.0; 32],
+                f2: vec![0.0; 1],
             }),
         }
     }
@@ -396,8 +405,14 @@ pub fn forward(weights: &CnnWeights, window: &[f32], scratch: &CnnScratch) -> f3
 /// Like `conv2d` but writes into a caller-provided buffer. Buffer must be of
 /// length `ow * oh * c_out`.
 pub fn conv2d_into(
-    input: &[f32], w: usize, h: usize, c_in: usize,
-    kernel: &[f32], kw: usize, kh: usize, c_out: usize,
+    input: &[f32],
+    w: usize,
+    h: usize,
+    c_in: usize,
+    kernel: &[f32],
+    kw: usize,
+    kh: usize,
+    c_out: usize,
     out: &mut [f32],
 ) {
     let ow = w - kw + 1;
@@ -412,7 +427,7 @@ pub fn conv2d_into(
                     for ky in 0..kh {
                         for kx in 0..kw {
                             sum += input[((y + ky) * w + (x + kx)) * c_in + ci]
-                                  * kernel[((ky * kw + kx) * c_in + ci) * c_out + co];
+                                * kernel[((ky * kw + kx) * c_in + ci) * c_out + co];
                         }
                     }
                 }
@@ -435,7 +450,9 @@ pub fn maxpool2_into(input: &[f32], w: usize, h: usize, c: usize, out: &mut [f32
                 for dy in 0..2 {
                     for dx in 0..2 {
                         let v = input[((y * 2 + dy) * w + (x * 2 + dx)) * c + co];
-                        if v > m { m = v; }
+                        if v > m {
+                            m = v;
+                        }
                     }
                 }
                 out[(y * ow + x) * c + co] = m;
@@ -480,7 +497,11 @@ impl CnnDetector {
     /// Construct with explicit weights (e.g. loaded from a `.cnn.bin` file
     /// produced by `cnn_train`).
     pub fn with_weights(weights: CnnWeights, config: CnnConfig) -> Self {
-        Self { weights, config, scratch: CnnScratch::new() }
+        Self {
+            weights,
+            config,
+            scratch: CnnScratch::new(),
+        }
     }
 
     pub fn weights(&self) -> &CnnWeights {
@@ -499,7 +520,9 @@ impl CnnDetector {
         let ww = self.config.window_w;
         let wh = self.config.window_h;
         let stride = self.config.stride;
-        if w < ww || h < wh { return detections; }
+        if w < ww || h < wh {
+            return detections;
+        }
 
         let mut window = [0.0f32; 24 * 24];
         let mut y = 0;
@@ -516,7 +539,11 @@ impl CnnDetector {
                 let conf = forward(&self.weights, &window, &self.scratch);
                 if conf >= self.config.confidence_threshold {
                     detections.push(CnnDetection {
-                        x, y, w: ww, h: wh, confidence: conf,
+                        x,
+                        y,
+                        w: ww,
+                        h: wh,
+                        confidence: conf,
                     });
                 }
                 x += stride;
@@ -525,16 +552,26 @@ impl CnnDetector {
         }
 
         // Non-maximum suppression (greedy IoU 0.3)
-        detections.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        detections.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let mut kept = Vec::new();
         let mut suppressed = vec![false; detections.len()];
         for i in 0..detections.len() {
-            if suppressed[i] { continue; }
+            if suppressed[i] {
+                continue;
+            }
             kept.push(detections[i].clone());
             for j in (i + 1)..detections.len() {
-                if suppressed[j] { continue; }
+                if suppressed[j] {
+                    continue;
+                }
                 let iou = iou(&detections[i], &detections[j]);
-                if iou > 0.3 { suppressed[j] = true; }
+                if iou > 0.3 {
+                    suppressed[j] = true;
+                }
             }
         }
         kept
@@ -546,9 +583,17 @@ fn iou(a: &CnnDetection, b: &CnnDetection) -> f32 {
     let y1 = a.y.max(b.y);
     let x2 = (a.x + a.w).min(b.x + b.w);
     let y2 = (a.y + a.h).min(b.y + b.h);
-    let inter = if x2 > x1 && y2 > y1 { (x2 - x1) * (y2 - y1) } else { 0 };
+    let inter = if x2 > x1 && y2 > y1 {
+        (x2 - x1) * (y2 - y1)
+    } else {
+        0
+    };
     let union = a.w * a.h + b.w * b.h - inter;
-    if union == 0 { 0.0 } else { inter as f32 / union as f32 }
+    if union == 0 {
+        0.0
+    } else {
+        inter as f32 / union as f32
+    }
 }
 
 #[cfg(test)]
@@ -558,10 +603,14 @@ mod tests {
     #[test]
     fn forward_runs() {
         let w = template_face_weights();
-        let window: Vec<f32> = (0..24*24).map(|i| (i as f32) / 100.0).collect();
+        let window: Vec<f32> = (0..24 * 24).map(|i| (i as f32) / 100.0).collect();
         let scratch = CnnScratch::new();
         let conf = forward(&w, &window, &scratch);
-        assert!(conf >= 0.0 && conf <= 1.0, "sigmoid output out of [0,1]: {}", conf);
+        assert!(
+            conf >= 0.0 && conf <= 1.0,
+            "sigmoid output out of [0,1]: {}",
+            conf
+        );
     }
 
     #[test]
@@ -577,11 +626,19 @@ mod tests {
         let dets = det.detect(&img, 100, 100);
         // Should detect at least one face-like region in the centre
         // (the hand-crafted weights look for bright centre + dark border)
-        assert!(!dets.is_empty(), "expected at least one face-like detection in bright-centre pattern");
+        assert!(
+            !dets.is_empty(),
+            "expected at least one face-like detection in bright-centre pattern"
+        );
         let c = &dets[0];
         // The detected window should overlap the bright centre
-        assert!(c.x < 62 && c.x + c.w > 38 && c.y < 62 && c.y + c.h > 38,
+        assert!(
+            c.x < 62 && c.x + c.w > 38 && c.y < 62 && c.y + c.h > 38,
             "detection at ({},{}) {}x{} does not overlap bright centre (38,38)-(62,62)",
-            c.x, c.y, c.w, c.h);
+            c.x,
+            c.y,
+            c.w,
+            c.h
+        );
     }
 }

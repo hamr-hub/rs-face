@@ -31,7 +31,8 @@ impl HttpImageSource {
         Self {
             kind: HttpKind::Single,
             base: url.to_string(),
-            host, path_prefix: path,
+            host,
+            path_prefix: path,
             is_tls,
             frame_index: 0,
             total_hint: Some(1),
@@ -43,7 +44,8 @@ impl HttpImageSource {
         Self {
             kind: HttpKind::Sequence { width: 5, count },
             base: base.to_string(),
-            host, path_prefix: path,
+            host,
+            path_prefix: path,
             is_tls,
             frame_index: 0,
             total_hint: Some(count),
@@ -55,39 +57,62 @@ impl FrameSource for HttpImageSource {
     fn next_frame(&mut self) -> io::Result<Option<Frame>> {
         match self.kind {
             HttpKind::Single => {
-                if self.frame_index > 0 { return Ok(None); }
+                if self.frame_index > 0 {
+                    return Ok(None);
+                }
                 let stream = open_http_get(&self.host, &self.path_prefix, self.is_tls)?;
                 let (status, _headers, mut body) = read_http_response(stream)?;
                 if status != 200 {
-                    return Err(io::Error::new(io::ErrorKind::Other, format!("HTTP {}", status)));
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("HTTP {}", status),
+                    ));
                 }
                 let rgb = png::decode_to_rgb(&mut body)?;
                 let gray = rgb.to_gray();
                 self.frame_index += 1;
                 Ok(Some(Frame {
-                    index: 0, timestamp_ms: 0, gray: Arc::new(gray), rgb: Some(Arc::new(rgb)),
+                    index: 0,
+                    timestamp_ms: 0,
+                    gray: Arc::new(gray),
+                    rgb: Some(Arc::new(rgb)),
                 }))
             }
             HttpKind::Sequence { width, count } => {
-                if self.frame_index >= count { return Ok(None); }
-                let url = format!("{}frame_{:0width$}.png", self.base, self.frame_index, width = width as usize);
+                if self.frame_index >= count {
+                    return Ok(None);
+                }
+                let url = format!(
+                    "{}frame_{:0width$}.png",
+                    self.base,
+                    self.frame_index,
+                    width = width as usize
+                );
                 let (_tls, host_port, path) = parse_url(&url);
                 let stream = open_http_get(&host_port, &path, _tls)?;
                 let (status, _headers, mut body) = read_http_response(stream)?;
                 if status != 200 {
-                    return Err(io::Error::new(io::ErrorKind::Other, format!("HTTP {} for {}", status, url)));
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("HTTP {} for {}", status, url),
+                    ));
                 }
                 let gray = png::decode_to_gray(&mut body)?;
                 let idx = self.frame_index;
                 self.frame_index += 1;
                 Ok(Some(Frame {
-                    index: idx, timestamp_ms: idx * 33, gray: Arc::new(gray), rgb: None,
+                    index: idx,
+                    timestamp_ms: idx * 33,
+                    gray: Arc::new(gray),
+                    rgb: None,
                 }))
             }
         }
     }
 
-    fn total_hint(&self) -> Option<u64> { self.total_hint }
+    fn total_hint(&self) -> Option<u64> {
+        self.total_hint
+    }
 }
 
 pub(crate) fn parse_url(url: &str) -> (bool, String, String) {
@@ -128,18 +153,24 @@ pub(crate) fn open_http_get(host_port: &str, path: &str, _is_tls: bool) -> io::R
     Ok(s)
 }
 
-pub(crate) fn read_http_response(stream: TcpStream) -> io::Result<(u16, Vec<(String, String)>, HttpBody)> {
+pub(crate) fn read_http_response(
+    stream: TcpStream,
+) -> io::Result<(u16, Vec<(String, String)>, HttpBody)> {
     let mut br = BufReader::new(stream);
     let mut status_line = String::new();
     br.read_line(&mut status_line)?;
-    let status: u16 = status_line.split_whitespace().nth(1)
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad status"))?;
     let mut headers = Vec::new();
     loop {
         let mut line = String::new();
         let n = br.read_line(&mut line)?;
-        if n == 0 || line == "\r\n" || line == "\n" { break; }
+        if n == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
         if let Some(idx) = line.find(':') {
             let k = line[..idx].trim().to_string();
             let v = line[idx + 1..].trim().to_string();
@@ -151,7 +182,9 @@ pub(crate) fn read_http_response(stream: TcpStream) -> io::Result<(u16, Vec<(Str
 }
 
 /// Minimal HTTP body reader.
-pub(crate) struct HttpBody { inner: BufReader<TcpStream> }
+pub(crate) struct HttpBody {
+    inner: BufReader<TcpStream>,
+}
 
 impl Read for HttpBody {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {

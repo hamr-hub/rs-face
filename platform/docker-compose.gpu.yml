@@ -1,0 +1,93 @@
+# rs-face Platform 一键部署(GPU 版):rustfs(S3) + postgres + rsface-server(GPU)
+# 用法(在仓库根执行):
+#   docker compose -f platform/docker-compose.gpu.yml up -d --build
+#
+# Web 平台:    http://localhost:20080/
+# S3 控制台:   http://localhost:19000/
+# PostgreSQL:  localhost:15432 (rsface/rsface)
+
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: rsface-rustfs
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rsface}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rsface-secret}
+      RUSTFS_VOLUMES: /data
+    ports:
+      - "19000:9000"
+      - "19001:9001"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: rsface-postgres
+    environment:
+      POSTGRES_DB: rsface
+      POSTGRES_USER: rsface
+      POSTGRES_PASSWORD: rsface-pass
+    ports:
+      - "15432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rsface -d rsface"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  server:
+    build:
+      context: ..
+      dockerfile: platform/Dockerfile.gpu
+    image: rsface-server:gpu
+    container_name: rsface-server-gpu
+    depends_on:
+      rustfs:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    # NVIDIA runtime:容器启动时 host 端的 nvidia-container-cli 自动
+    # 挂 GPU + 注入 /dev/nvidia* 设备 + NVIDIA_VISIBLE_DEVICES env。
+    runtime: nvidia
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      S3_ENDPOINT: http://rustfs:9000
+      S3_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rsface}
+      S3_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rsface-secret}
+      S3_BUCKET: rsface
+      RSFACE_CASCADE: /app/cascade.rfcf
+      WEB_DIR: /app/web
+      TMP_DIR: /tmp/rsface-jobs
+      MAX_FRAMES_VIDEO: ${MAX_FRAMES_VIDEO:-3600}
+      MAX_FACE_CROPS: ${MAX_FACE_CROPS:-2000}
+      MIN_FACE_SIZE: ${MIN_FACE_SIZE:-24}
+      DATABASE_URL: postgres://rsface:rsface-pass@postgres:5432/rsface
+      LOCAL_MEDIA_DIR: /var/rsface-media
+      RSFACE_USE_GPU: ${RSFACE_USE_GPU:-1}
+      MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-4}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility, compute]
+    ports:
+      - "20080:8080"
+    volumes:
+      - rsface-media:/var/rsface-media
+    restart: unless-stopped
+
+volumes:
+  rustfs-data:
+  pg-data:
+  rsface-media:

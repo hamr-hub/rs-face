@@ -15,11 +15,15 @@ fn build_synthetic(w: usize, h: usize) -> GrayImage {
                 let dx = x as f32 - cx;
                 let dy = y as f32 - cy;
                 let d = (dx * dx + dy * dy).sqrt();
-                if d < r { v } else { 20 }
+                if d < r {
+                    v
+                } else {
+                    20
+                }
             };
             let v = spot(w as f32 * 0.25, h as f32 * 0.30, 60.0, 200)
-                  .max(spot(w as f32 * 0.70, h as f32 * 0.40, 90.0, 220))
-                  .max(spot(w as f32 * 0.50, h as f32 * 0.75, 45.0, 200));
+                .max(spot(w as f32 * 0.70, h as f32 * 0.40, 90.0, 220))
+                .max(spot(w as f32 * 0.50, h as f32 * 0.75, 45.0, 200));
             img[(x, y)] = v;
         }
     }
@@ -40,8 +44,14 @@ fn bench_640x480() {
         total += det.detect(&img).len();
     }
     let dt = t0.elapsed();
-    println!("640x480  iters={}  total_dets={}  total={:?}  per_frame={:?}  fps={:.2}",
-        iters, total, dt, dt / iters, iters as f32 / dt.as_secs_f32());
+    println!(
+        "640x480  iters={}  total_dets={}  total={:?}  per_frame={:?}  fps={:.2}",
+        iters,
+        total,
+        dt,
+        dt / iters,
+        iters as f32 / dt.as_secs_f32()
+    );
 }
 
 #[test]
@@ -57,6 +67,12 @@ fn bench_1920x1080() {
         total += det.detect(&img).len();
     }
     let dt = t0.elapsed();
-    println!("1920x1080 iters={}  total_dets={}  total={:?}  per_frame={:?}  fps={:.2}",
-        iters, total, dt, dt / iters, iters as f32 / dt.as_secs_f32());
+    println!(
+        "1920x1080 iters={}  total_dets={}  total={:?}  per_frame={:?}  fps={:.2}",
+        iters,
+        total,
+        dt,
+        dt / iters,
+        iters as f32 / dt.as_secs_f32()
+    );
 }

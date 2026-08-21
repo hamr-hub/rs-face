@@ -37,7 +37,9 @@ pub struct PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            threads: std::thread::available_parallelism().map(|n| n.get().max(1)).unwrap_or(1),
+            threads: std::thread::available_parallelism()
+                .map(|n| n.get().max(1))
+                .unwrap_or(1),
             queue_depth: 4,
             detector: DetectorConfig::default(),
             min_score: 0.0,
@@ -53,8 +55,7 @@ pub struct PipelineStats {
     pub elapsed_ms: u64,
 }
 
-#[derive(Debug)]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct WorkItem {
     frame: Frame,
     seq: u64,
@@ -127,9 +128,13 @@ impl Pipeline {
         let mut next_worker = 0usize;
         let mut seq: u64 = 0;
         loop {
-            if cancel.load(Ordering::Relaxed) { break; }
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
             let frame_opt = source.next_frame()?;
-            let Some(frame) = frame_opt else { break; };
+            let Some(frame) = frame_opt else {
+                break;
+            };
             _frames_seen.fetch_add(1, Ordering::Relaxed);
             let item = WorkItem { frame, seq };
             // Round-robin: try the next worker; if its queue is full, fall back to any non-full channel.
@@ -145,7 +150,9 @@ impl Pipeline {
             if !placed {
                 // All queues full → backpressure: block on the next worker.
                 if let Err(e) = worker_txs[next_worker].send(Some(item)) {
-                    if cancel.load(Ordering::Relaxed) { break; }
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
                     return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, e));
                 }
                 next_worker = (next_worker + 1) % n;
@@ -159,8 +166,12 @@ impl Pipeline {
         drop(worker_txs);
 
         // Wait for workers + sink.
-        for h in workers { let _ = h.join(); }
-        let records = sink_handle.join().map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "sink panicked"))??;
+        for h in workers {
+            let _ = h.join();
+        }
+        let records = sink_handle
+            .join()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "sink panicked"))??;
 
         let summary = PipelineSummary {
             frames_processed: records.len() as u64,
@@ -190,14 +201,20 @@ fn worker_loop(
         let start = Instant::now();
         let detections = detector.detect(&item.frame.gray);
         let elapsed_us = start.elapsed().as_micros() as u64;
-        let detections: Vec<Detection> = detections.into_iter().filter(|d| d.score >= min_score).collect();
+        let detections: Vec<Detection> = detections
+            .into_iter()
+            .filter(|d| d.score >= min_score)
+            .collect();
         let res = WorkResult {
             seq: item.seq,
             frame: item.frame,
             detections,
             elapsed_us,
         };
-        if result_tx.send(res).is_err() { cancel.store(true, Ordering::Relaxed); break; }
+        if result_tx.send(res).is_err() {
+            cancel.store(true, Ordering::Relaxed);
+            break;
+        }
         let _ = elapsed_us; // recorded for future per-frame stats
     }
 }
@@ -210,26 +227,36 @@ fn sink_loop(
     let mut records = Vec::new();
     // Sink must receive results in arrival order; we don't reorder because we want
     // manifest order to reflect detection order, not source order.
-    let mut seq_map: std::collections::BTreeMap<u64, WorkResult> = std::collections::BTreeMap::new();
+    let mut seq_map: std::collections::BTreeMap<u64, WorkResult> =
+        std::collections::BTreeMap::new();
     let mut next_seq: u64 = 0;
     while let Ok(res) = rx.recv() {
         seq_map.insert(res.seq, res);
         while let Some(r) = seq_map.remove(&next_seq) {
             next_seq += 1;
-            if only_with_face && r.detections.is_empty() { continue; }
-            let rgb = r.frame.rgb.clone().map(|a| (*a).clone()).unwrap_or_else(|| {
-                // Reconstruct an RGB from gray by replication so we can always draw boxes.
-                let g = &r.frame.gray;
-                let mut rgb = crate::image::RgbImage::new(g.width(), g.height());
-                for y in 0..g.height() {
-                    for x in 0..g.width() {
-                        let v = (*g)[(x, y)];
-                        let row = rgb.row_mut(y);
-                        row[x*3] = v; row[x*3+1] = v; row[x*3+2] = v;
+            if only_with_face && r.detections.is_empty() {
+                continue;
+            }
+            let rgb = r
+                .frame
+                .rgb
+                .clone()
+                .map(|a| (*a).clone())
+                .unwrap_or_else(|| {
+                    // Reconstruct an RGB from gray by replication so we can always draw boxes.
+                    let g = &r.frame.gray;
+                    let mut rgb = crate::image::RgbImage::new(g.width(), g.height());
+                    for y in 0..g.height() {
+                        for x in 0..g.width() {
+                            let v = (*g)[(x, y)];
+                            let row = rgb.row_mut(y);
+                            row[x * 3] = v;
+                            row[x * 3 + 1] = v;
+                            row[x * 3 + 2] = v;
+                        }
                     }
-                }
-                rgb
-            });
+                    rgb
+                });
             let rec = DetectionRecord {
                 frame_index: r.frame.index,
                 timestamp_ms: r.frame.timestamp_ms,

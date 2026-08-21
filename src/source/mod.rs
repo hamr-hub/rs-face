@@ -14,14 +14,14 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
 
-pub mod image_seq;
-pub mod http;
 pub mod ffmpeg_pipe;
+pub mod http;
+pub mod image_seq;
 pub mod synthetic;
 
-pub use image_seq::ImageSequenceSource;
-pub use http::HttpImageSource;
 pub use ffmpeg_pipe::FfmpegPipeSource;
+pub use http::HttpImageSource;
+pub use image_seq::ImageSequenceSource;
 pub use synthetic::SyntheticSource;
 
 /// A single decoded video frame plus metadata.
@@ -40,7 +40,9 @@ pub struct Frame {
 /// Trait for objects that can produce frames sequentially.
 pub trait FrameSource: Send {
     fn next_frame(&mut self) -> std::io::Result<Option<Frame>>;
-    fn total_hint(&self) -> Option<u64> { None }
+    fn total_hint(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Build the most appropriate `FrameSource` for a URL/path string.
@@ -70,21 +72,32 @@ pub fn open(source: &str) -> std::io::Result<Box<dyn FrameSource>> {
             ));
         }
         // If URL looks like a video, try ffmpeg pipe.
-        if lower.ends_with(".mp4") || lower.ends_with(".mov") || lower.ends_with(".avi")
-            || lower.ends_with(".mkv") || lower.ends_with(".webm")
-            || lower.contains("/upload-") || lower.contains("video")
+        if lower.ends_with(".mp4")
+            || lower.ends_with(".mov")
+            || lower.ends_with(".avi")
+            || lower.ends_with(".mkv")
+            || lower.ends_with(".webm")
+            || lower.contains("/upload-")
+            || lower.contains("video")
         {
             if which("ffmpeg").is_some() {
                 return Ok(Box::new(FfmpegPipeSource::new(source, 30)?));
             }
         }
         // Default: treat as base URL for image sequence at /frame_NNNNN.png.
-        let base = if source.ends_with('/') { source.to_string() } else { format!("{}/", source) };
+        let base = if source.ends_with('/') {
+            source.to_string()
+        } else {
+            format!("{}/", source)
+        };
         return Ok(Box::new(HttpImageSource::new_sequence(&base, 0)));
     }
-    if source.starts_with("rtsp://") || source.to_ascii_lowercase().ends_with(".mp4")
-        || source.to_ascii_lowercase().ends_with(".mov") || source.to_ascii_lowercase().ends_with(".avi")
-        || source.to_ascii_lowercase().ends_with(".mkv") || source.to_ascii_lowercase().ends_with(".webm")
+    if source.starts_with("rtsp://")
+        || source.to_ascii_lowercase().ends_with(".mp4")
+        || source.to_ascii_lowercase().ends_with(".mov")
+        || source.to_ascii_lowercase().ends_with(".avi")
+        || source.to_ascii_lowercase().ends_with(".mkv")
+        || source.to_ascii_lowercase().ends_with(".webm")
     {
         if which("ffmpeg").is_some() {
             return Ok(Box::new(FfmpegPipeSource::new(source, 30)?));
@@ -103,17 +116,23 @@ fn which(cmd: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(cmd);
-        if candidate.is_file() { return Some(cmd.to_string()); }
+        if candidate.is_file() {
+            return Some(cmd.to_string());
+        }
         #[cfg(windows)]
         {
             let candidate_exe = dir.join(format!("{}.exe", cmd));
-            if candidate_exe.is_file() { return Some(format!("{}.exe", cmd)); }
+            if candidate_exe.is_file() {
+                return Some(format!("{}.exe", cmd));
+            }
         }
     }
     None
 }
 
-pub(crate) fn read_image_file(path: &Path) -> std::io::Result<(GrayImage, Option<crate::image::RgbImage>)> {
+pub(crate) fn read_image_file(
+    path: &Path,
+) -> std::io::Result<(GrayImage, Option<crate::image::RgbImage>)> {
     let mut f = BufReader::new(File::open(path)?);
     let mut head = [0u8; 8];
     f.read_exact(&mut head)?;
@@ -139,5 +158,8 @@ pub(crate) fn read_image_file(path: &Path) -> std::io::Result<(GrayImage, Option
         let gray = rgb.to_gray();
         return Ok((gray, Some(rgb)));
     }
-    Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "unsupported image format"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "unsupported image format",
+    ))
 }

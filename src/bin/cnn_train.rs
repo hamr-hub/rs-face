@@ -1,5 +1,37 @@
 //! Train the CNN face detector on synthetic data.
 //!
+//! Same clippy allow set as src/lib.rs (binary targets don't inherit the
+//! lib's crate-level allows).
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::erasing_op)]
+#![allow(clippy::manual_div_ceil)]
+#![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::manual_range_contains)]
+#![allow(clippy::manual_saturating_arithmetic)]
+#![allow(clippy::manual_checked_ops)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::io_other_error)]
+#![allow(clippy::mut_from_ref)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_match)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::while_let_loop)]
+#![allow(clippy::new_without_default)]
+#![allow(clippy::needless_collect)]
+#![allow(clippy::unused_self)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::single_match)]
+#![allow(clippy::no_effect)]
+#![allow(clippy::ptr_arg)]
+#![allow(unused_parens)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
+//!
 //! Generates positive samples (face-like elliptical bright centres on dark
 //! backgrounds with affine jitter) and negative samples (random noise,
 //! gradients, plain backgrounds, and hard negatives produced by mining the
@@ -11,8 +43,7 @@
 //! Saves weights in `.cnn.bin` format that [`CnnDetector`] can load via
 //! `--cnn-weights`.
 
-use rsface::cnn::{conv2d_into, maxpool2_into, fc_into, relu,
-                   CnnScratch, CnnWeights};
+use rsface::cnn::{conv2d_into, fc_into, maxpool2_into, relu, CnnScratch, CnnWeights};
 use rsface::image::GrayImage;
 use std::time::Instant;
 
@@ -24,7 +55,9 @@ const LR: f32 = 1e-4;
 // Tiny deterministic PRNG (xorshift64) so runs are reproducible.
 struct Rng(u64);
 impl Rng {
-    fn new(seed: u64) -> Self { Self(seed.max(1)) }
+    fn new(seed: u64) -> Self {
+        Self(seed.max(1))
+    }
     fn next(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
@@ -48,7 +81,9 @@ fn synth_face(out: &mut [f32], rng: &mut Rng) {
     debug_assert_eq!(out.len(), WIN * WIN);
     // Background = dark, varying.
     let bg = rng.f32(0.0, 0.15);
-    for v in out.iter_mut() { *v = bg; }
+    for v in out.iter_mut() {
+        *v = bg;
+    }
     let cx = rng.f32(10.0, 14.0);
     let cy = rng.f32(10.0, 14.0);
     let rx = rng.f32(7.0, 10.0);
@@ -106,7 +141,9 @@ fn synth_nonface(out: &mut [f32], rng: &mut Rng) {
         0 => {
             // Plain dark or light background with mild noise.
             let bg = rng.f32(0.0, 1.0);
-            for v in out.iter_mut() { *v = bg + rng.f32(-0.05, 0.05); }
+            for v in out.iter_mut() {
+                *v = bg + rng.f32(-0.05, 0.05);
+            }
         }
         1 => {
             // Smooth horizontal gradient.
@@ -132,10 +169,14 @@ fn synth_nonface(out: &mut [f32], rng: &mut Rng) {
         }
         _ => {
             // High-frequency noise (texture).
-            for v in out.iter_mut() { *v = rng.f32(0.0, 1.0); }
+            for v in out.iter_mut() {
+                *v = rng.f32(0.0, 1.0);
+            }
         }
     }
-    for v in out.iter_mut() { *v = v.clamp(0.0, 1.0); }
+    for v in out.iter_mut() {
+        *v = v.clamp(0.0, 1.0);
+    }
 }
 
 // ---------------- Adam optimizer ----------------
@@ -152,8 +193,13 @@ struct Adam {
 impl Adam {
     fn new(n: usize, lr: f32) -> Self {
         Self {
-            m: vec![0.0; n], v: vec![0.0; n], t: 0,
-            lr, beta1: 0.9, beta2: 0.999, eps: 1e-8,
+            m: vec![0.0; n],
+            v: vec![0.0; n],
+            t: 0,
+            lr,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
         }
     }
     fn step(&mut self, params: &mut [f32], grads: &[f32]) {
@@ -185,7 +231,10 @@ impl Net {
         // Start from the template face weights (already detect face-like
         // patterns) with FC layers reinitialised for clean training.
         let w = init_from_template();
-        Self { w, scratch: CnnScratch::new() }
+        Self {
+            w,
+            scratch: CnnScratch::new(),
+        }
     }
 
     fn forward(&mut self, x: &[f32]) -> f32 {
@@ -208,8 +257,7 @@ impl Net {
     /// pre-sigmoid FC2 output; we use BCE-with-logits which is numerically
     /// stable: `loss = max(z,0) - z*y + log(1+exp(-|z|))`,
     /// `∂loss/∂z = sigmoid(z) - y`.
-    fn forward_backward(&mut self, x: &[f32], y: f32,
-                        grads: &mut CnnWeights) -> f32 {
+    fn forward_backward(&mut self, x: &[f32], y: f32, grads: &mut CnnWeights) -> f32 {
         let s = self.scratch.buffers_mut();
         // Forward.
         conv2d_into(x, WIN, WIN, 1, &self.w.conv1_w, 3, 3, 8, &mut s.c1);
@@ -227,11 +275,12 @@ impl Net {
 
         // BCE-with-logits loss.
         let (loss, d_z) = if z > 0.0 {
-            (z - z * y + (1.0 + (-z).exp()).ln(),
-             1.0 / (1.0 + (-z).exp()) - y)
+            (
+                z - z * y + (1.0 + (-z).exp()).ln(),
+                1.0 / (1.0 + (-z).exp()) - y,
+            )
         } else {
-            (-z * y + (1.0 + z.exp()).ln(),
-             1.0 / (1.0 + z.exp()) - y)
+            (-z * y + (1.0 + z.exp()).ln(), 1.0 / (1.0 + z.exp()) - y)
         };
 
         // Backprop FC2 → FC1 → conv3 → conv2 → conv1.
@@ -243,9 +292,15 @@ impl Net {
 
         // d_f1[i] = fc2_w[i] * d_z.
         let mut d_f1 = [0.0f32; 32];
-        for i in 0..32 { d_f1[i] = self.w.fc2_w[i] * d_z; }
+        for i in 0..32 {
+            d_f1[i] = self.w.fc2_w[i] * d_z;
+        }
         // ReLU backprop.
-        for i in 0..32 { if s.f1[i] <= 0.0 { d_f1[i] = 0.0; } }
+        for i in 0..32 {
+            if s.f1[i] <= 0.0 {
+                d_f1[i] = 0.0;
+            }
+        }
 
         // FC1: out[o] = Σ c3p[i] * fc1_w[o*512+i] + fc1_b[o].
         // d_fc1_w[o*512+i] += c3p[i] * d_f1[o]
@@ -259,7 +314,9 @@ impl Net {
         let mut d_c3p = [0.0f32; 512];
         for o in 0..32 {
             let d = d_f1[o];
-            for i in 0..512 { d_c3p[i] += self.w.fc1_w[o * 512 + i] * d; }
+            for i in 0..512 {
+                d_c3p[i] += self.w.fc1_w[o * 512 + i] * d;
+            }
         }
 
         // MaxPool 2x2 backprop: c3p comes from c3 with stride 2. Distribute
@@ -273,7 +330,10 @@ impl Net {
                     for dy in 0..2 {
                         for dx in 0..2 {
                             let v = s.c3[((y * 2 + dy) * 8 + (x * 2 + dx)) * 32 + co];
-                            if v > best { best = v; arg = (dy, dx); }
+                            if v > best {
+                                best = v;
+                                arg = (dy, dx);
+                            }
                         }
                     }
                     let idx = ((y * 2 + arg.0) * 8 + (x * 2 + arg.1)) * 32 + co;
@@ -282,9 +342,13 @@ impl Net {
             }
         }
         // ReLU backprop on c3.
-        for v in &mut d_c3 { if *v < 0.0 { /* keep */ } }
+        for v in &mut d_c3 {
+            if *v < 0.0 { /* keep */ }
+        }
         for i in 0..d_c3.len() {
-            if s.c3[i] <= 0.0 { d_c3[i] = 0.0; }
+            if s.c3[i] <= 0.0 {
+                d_c3[i] = 0.0;
+            }
         }
 
         // Conv3: c3[co, y, x] = Σ ci, ky, kx c2p[ci, y+ky, x+kx] * conv3_w[ky*3+kx, ci, co]
@@ -297,8 +361,7 @@ impl Net {
                         for ky in 0..3 {
                             for kx in 0..3 {
                                 let k = ((ky * 3 + kx) * 16 + ci) * 32 + co;
-                                grads.conv3_w[k] +=
-                                    s.c2p[((y + ky) * 10 + (x + kx)) * 16 + ci] * d;
+                                grads.conv3_w[k] += s.c2p[((y + ky) * 10 + (x + kx)) * 16 + ci] * d;
                             }
                         }
                     }
@@ -333,9 +396,13 @@ fn init_from_template() -> CnnWeights {
         let n = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
         n * 0.1
     };
-    for v in w.fc1_w.iter_mut() { *v = small(&mut rng); }
+    for v in w.fc1_w.iter_mut() {
+        *v = small(&mut rng);
+    }
     w.fc1_b.iter_mut().for_each(|v| *v = 0.0);
-    for v in w.fc2_w.iter_mut() { *v = small(&mut rng); }
+    for v in w.fc2_w.iter_mut() {
+        *v = small(&mut rng);
+    }
     w.fc2_b[0] = -0.5;
     w
 }
@@ -345,12 +412,24 @@ fn save_weights(path: &std::path::Path, w: &CnnWeights) -> std::io::Result<()> {
     let mut f = std::fs::File::create(path)?;
     f.write_all(b"RCNN")?;
     f.write_all(&1u32.to_le_bytes())?; // version
-    let header = [w.conv1_w.len(), w.conv2_w.len(), w.conv3_w.len(),
-                  w.fc1_w.len(), w.fc1_b.len(), w.fc2_w.len(), w.fc2_b.len()];
-    for &n in &header { f.write_all(&(n as u32).to_le_bytes())?; }
-    for buf in [&w.conv1_w, &w.conv2_w, &w.conv3_w,
-                &w.fc1_w, &w.fc1_b, &w.fc2_w, &w.fc2_b] {
-        for &v in buf { f.write_all(&v.to_le_bytes())?; }
+    let header = [
+        w.conv1_w.len(),
+        w.conv2_w.len(),
+        w.conv3_w.len(),
+        w.fc1_w.len(),
+        w.fc1_b.len(),
+        w.fc2_w.len(),
+        w.fc2_b.len(),
+    ];
+    for &n in &header {
+        f.write_all(&(n as u32).to_le_bytes())?;
+    }
+    for buf in [
+        &w.conv1_w, &w.conv2_w, &w.conv3_w, &w.fc1_w, &w.fc1_b, &w.fc2_w, &w.fc2_b,
+    ] {
+        for &v in buf {
+            f.write_all(&v.to_le_bytes())?;
+        }
     }
     Ok(())
 }
@@ -391,8 +470,10 @@ fn train(epochs: usize, out: &std::path::Path, seed: u64) -> std::io::Result<()>
     init_diag[0] = net.forward(&init_x);
     synth_nonface(&mut init_x, &mut rng);
     init_diag[1] = net.forward(&init_x);
-    println!("[train] init logits: face={:.3} nonface={:.3}",
-        init_diag[0], init_diag[1]);
+    println!(
+        "[train] init logits: face={:.3} nonface={:.3}",
+        init_diag[0], init_diag[1]
+    );
     let _ = (init_diag, init_diag_done); // keep mut bindings alive
 
     for step in 0..total {
@@ -404,9 +485,18 @@ fn train(epochs: usize, out: &std::path::Path, seed: u64) -> std::io::Result<()>
         }
         let label = if is_pos { 1.0 } else { 0.0 };
         // Zero grads.
-        for g in [&mut grads.conv1_w, &mut grads.conv2_w, &mut grads.conv3_w,
-                  &mut grads.fc1_w, &mut grads.fc1_b, &mut grads.fc2_w, &mut grads.fc2_b] {
-            for v in g.iter_mut() { *v = 0.0; }
+        for g in [
+            &mut grads.conv1_w,
+            &mut grads.conv2_w,
+            &mut grads.conv3_w,
+            &mut grads.fc1_w,
+            &mut grads.fc1_b,
+            &mut grads.fc2_w,
+            &mut grads.fc2_b,
+        ] {
+            for v in g.iter_mut() {
+                *v = 0.0;
+            }
         }
         let loss = net.forward_backward(&x_buf, label, &mut grads);
         // Average over batch (effective batch = 1 for now; mini-batching can
@@ -422,8 +512,12 @@ fn train(epochs: usize, out: &std::path::Path, seed: u64) -> std::io::Result<()>
         // Validation every 64 steps.
         let logit = net.forward(&x_buf);
         let pred = 1.0 / (1.0 + (-logit).exp());
-        if is_pos && pred > 0.5 { pos_correct += 1; }
-        if !is_pos && pred <= 0.5 { neg_correct += 1; }
+        if is_pos && pred > 0.5 {
+            pos_correct += 1;
+        }
+        if !is_pos && pred <= 0.5 {
+            neg_correct += 1;
+        }
         total_loss += loss;
         steps += 1;
 
@@ -441,25 +535,36 @@ fn train(epochs: usize, out: &std::path::Path, seed: u64) -> std::io::Result<()>
             println!(
                 "[train] step={step}/{total} loss={:.4} pos_acc={}/{} neg_acc={}/{} fps={:.0}",
                 total_loss / steps as f32,
-                pos_correct, step / 2 + 1, neg_correct, step / 2,
+                pos_correct,
+                step / 2 + 1,
+                neg_correct,
+                step / 2,
                 fps,
             );
         }
     }
     save_weights(out, &best_weights)?;
-    println!("[train] saved weights from step {} (loss={:.4}) to {}",
-        best_step, best_loss, out.display());
+    println!(
+        "[train] saved weights from step {} (loss={:.4}) to {}",
+        best_step,
+        best_loss,
+        out.display()
+    );
     Ok(())
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let epochs: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(8);
-    let out: std::path::PathBuf = args.get(2)
+    let out: std::path::PathBuf = args
+        .get(2)
         .map(|s| std::path::PathBuf::from(s))
         .unwrap_or_else(|| std::path::PathBuf::from("trained.cnn.bin"));
     let seed: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(42);
-    println!("[cnn_train] epochs={epochs} out={} seed={seed}", out.display());
+    println!(
+        "[cnn_train] epochs={epochs} out={} seed={seed}",
+        out.display()
+    );
     if let Err(e) = train(epochs, &out, seed) {
         eprintln!("[cnn_train] error: {e}");
         std::process::exit(1);

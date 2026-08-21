@@ -1,0 +1,38 @@
+[package]
+name = "rsface-platform"
+version = "0.1.0"
+edition = "2021"
+description = "rs-face platform server: web API, job engine, S3 (rustfs) storage. Uses rsface core as SDK."
+license = "MIT"
+
+[[bin]]
+name = "rsface-server"
+path = "server/src/main.rs"
+
+[dependencies]
+# 人脸识别核心库(SDK)。core 保持零依赖,平台层在此引入服务端依赖。
+# 包名为 rs-face,lib 名为 rsface;此处重命名为 rsface 以便 `use rsface::…`。
+rsface = { package = "rs-face", path = ".." }
+
+# Web 服务
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "fs"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# S3 (rustfs) 客户端:仅 HTTP,无 TLS 依赖(内网通信)
+ureq = { version = "2", default-features = false }
+
+# AWS SigV4 签名所需
+sha2 = "0.10"
+hmac = "0.12"
+
+# PostgreSQL(任务/帧/人脸持久化)
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "migrate"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

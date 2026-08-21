@@ -45,7 +45,9 @@ pub fn demo_face_cascade() -> Cascade {
 
     // Build a small bank of useful features.
     let f_vert_center_full = HaarFeature {
-        kind: FeatureKind::VerticalCenter, width: 1, height: 3,
+        kind: FeatureKind::VerticalCenter,
+        width: 1,
+        height: 3,
         rects: vec![
             Rect::new(0, 0, 1, 1, 1.0),
             Rect::new(0, 1, 1, 1, -2.0),
@@ -53,7 +55,9 @@ pub fn demo_face_cascade() -> Cascade {
         ],
     };
     let f_horiz_center_full = HaarFeature {
-        kind: FeatureKind::HorizontalCenter, width: 3, height: 1,
+        kind: FeatureKind::HorizontalCenter,
+        width: 3,
+        height: 1,
         rects: vec![
             Rect::new(0, 0, 1, 1, 1.0),
             Rect::new(1, 0, 1, 1, -2.0),
@@ -66,7 +70,9 @@ pub fn demo_face_cascade() -> Cascade {
     // Eye-band feature: top 30%, mid 40%, bottom 30% vertical layout. Eye band
     // is typically slightly darker than forehead and cheeks.
     let f_eye_band = HaarFeature {
-        kind: FeatureKind::VerticalCenter, width: 1, height: 5,
+        kind: FeatureKind::VerticalCenter,
+        width: 1,
+        height: 5,
         rects: vec![
             Rect::new(0, 0, 1, 1, 1.0),
             Rect::new(0, 1, 1, 1, -1.0),
@@ -79,7 +85,9 @@ pub fn demo_face_cascade() -> Cascade {
     // Nose-bridge feature: 3-column horizontal center-surround, but with
     // weighted mid column to detect a vertical bright streak.
     let f_nose_bridge = HaarFeature {
-        kind: FeatureKind::HorizontalCenter, width: 3, height: 1,
+        kind: FeatureKind::HorizontalCenter,
+        width: 3,
+        height: 1,
         rects: vec![
             Rect::new(0, 0, 1, 1, 1.0),
             Rect::new(1, 0, 1, 1, -3.0),
@@ -89,20 +97,18 @@ pub fn demo_face_cascade() -> Cascade {
 
     // Top-half vs bottom-half: 1x2 vertical edge covering the upper region.
     let f_top_bottom = HaarFeature {
-        kind: FeatureKind::VerticalEdge, width: 1, height: 2,
-        rects: vec![
-            Rect::new(0, 0, 1, 1, 1.0),
-            Rect::new(0, 1, 1, 1, -1.0),
-        ],
+        kind: FeatureKind::VerticalEdge,
+        width: 1,
+        height: 2,
+        rects: vec![Rect::new(0, 0, 1, 1, 1.0), Rect::new(0, 1, 1, 1, -1.0)],
     };
 
     // Left-half vs right-half: horizontal edge for vertical symmetry.
     let f_left_right = HaarFeature {
-        kind: FeatureKind::HorizontalEdge, width: 2, height: 1,
-        rects: vec![
-            Rect::new(0, 0, 1, 1, 1.0),
-            Rect::new(1, 0, 1, 1, -1.0),
-        ],
+        kind: FeatureKind::HorizontalEdge,
+        width: 2,
+        height: 1,
+        rects: vec![Rect::new(0, 0, 1, 1, 1.0), Rect::new(1, 0, 1, 1, -1.0)],
     };
 
     let all = vec![
@@ -116,7 +122,9 @@ pub fn demo_face_cascade() -> Cascade {
         f_left_right,
     ];
     let idx_of = |f: &HaarFeature| -> usize {
-        all.iter().position(|x| std::ptr::eq(x, f)).expect("feature not in bank")
+        all.iter()
+            .position(|x| std::ptr::eq(x, f))
+            .expect("feature not in bank")
     };
     let i_vc = idx_of(&all[0]);
     let i_hc = idx_of(&all[1]);
@@ -134,49 +142,73 @@ pub fn demo_face_cascade() -> Cascade {
     // Eval convention: value < threshold → left_val (face), else → right_val.
     c.stages.push(Stage {
         stage_threshold: 0.5,
-        weak_features: vec![
-            WeakFeature { feature_index: i_vc as u32, threshold: 0.0, sign: 1, left_val: 1.5, right_val: -1.0 },
-        ],
+        weak_features: vec![WeakFeature {
+            feature_index: i_vc as u32,
+            threshold: 0.0,
+            sign: 1,
+            left_val: 1.5,
+            right_val: -1.0,
+        }],
     });
 
     // Stage 2 — bright center vs dark sides.
     c.stages.push(Stage {
         stage_threshold: 0.5,
-        weak_features: vec![
-            WeakFeature { feature_index: i_hc as u32, threshold: 0.0, sign: 1, left_val: 1.0, right_val: -1.0 },
-        ],
+        weak_features: vec![WeakFeature {
+            feature_index: i_hc as u32,
+            threshold: 0.0,
+            sign: 1,
+            left_val: 1.0,
+            right_val: -1.0,
+        }],
     });
 
     // Stage 3 — eye band darker than forehead + chin.
     c.stages.push(Stage {
         stage_threshold: -1.0,
-        weak_features: vec![
-            WeakFeature { feature_index: i_eye as u32, threshold: 0.0, sign: 1, left_val: 0.8, right_val: -0.6 },
-        ],
+        weak_features: vec![WeakFeature {
+            feature_index: i_eye as u32,
+            threshold: 0.0,
+            sign: 1,
+            left_val: 0.8,
+            right_val: -0.6,
+        }],
     });
 
     // Stage 4 — vertical edge between top and bottom halves.
     c.stages.push(Stage {
         stage_threshold: -1.0,
-        weak_features: vec![
-            WeakFeature { feature_index: i_ve as u32, threshold: 0.0, sign: 1, left_val: 0.6, right_val: -0.5 },
-        ],
+        weak_features: vec![WeakFeature {
+            feature_index: i_ve as u32,
+            threshold: 0.0,
+            sign: 1,
+            left_val: 0.6,
+            right_val: -0.5,
+        }],
     });
 
     // Stage 5 — nose bridge brightness.
     c.stages.push(Stage {
         stage_threshold: -1.0,
-        weak_features: vec![
-            WeakFeature { feature_index: i_nose as u32, threshold: 0.0, sign: 1, left_val: 0.5, right_val: -0.4 },
-        ],
+        weak_features: vec![WeakFeature {
+            feature_index: i_nose as u32,
+            threshold: 0.0,
+            sign: 1,
+            left_val: 0.5,
+            right_val: -0.4,
+        }],
     });
 
     // Stage 6 — top vs bottom.
     c.stages.push(Stage {
         stage_threshold: -1.0,
-        weak_features: vec![
-            WeakFeature { feature_index: i_tb as u32, threshold: 0.0, sign: 1, left_val: 0.4, right_val: -0.3 },
-        ],
+        weak_features: vec![WeakFeature {
+            feature_index: i_tb as u32,
+            threshold: 0.0,
+            sign: 1,
+            left_val: 0.4,
+            right_val: -0.3,
+        }],
     });
 
     // Stage 7 — vertical symmetry. Threshold slightly positive so a
@@ -184,17 +216,33 @@ pub fn demo_face_cascade() -> Cascade {
     // variance normalisation) hits the face branch.
     c.stages.push(Stage {
         stage_threshold: -1.0,
-        weak_features: vec![
-            WeakFeature { feature_index: i_lr as u32, threshold: 0.01, sign: 1, left_val: 0.3, right_val: -0.3 },
-        ],
+        weak_features: vec![WeakFeature {
+            feature_index: i_lr as u32,
+            threshold: 0.01,
+            sign: 1,
+            left_val: 0.3,
+            right_val: -0.3,
+        }],
     });
 
     // Stage 8 — combine the strongest cues for a final pass.
     c.stages.push(Stage {
         stage_threshold: -0.5,
         weak_features: vec![
-            WeakFeature { feature_index: i_ve as u32, threshold: 0.0, sign: 1, left_val: 0.3, right_val: -0.2 },
-            WeakFeature { feature_index: i_hc as u32, threshold: 0.0, sign: 1, left_val: 0.2, right_val: -0.2 },
+            WeakFeature {
+                feature_index: i_ve as u32,
+                threshold: 0.0,
+                sign: 1,
+                left_val: 0.3,
+                right_val: -0.2,
+            },
+            WeakFeature {
+                feature_index: i_hc as u32,
+                threshold: 0.0,
+                sign: 1,
+                left_val: 0.2,
+                right_val: -0.2,
+            },
         ],
     });
 
@@ -235,10 +283,21 @@ mod tests {
         let mut img = GrayImage::new(24, 24);
         for y in 0..24 {
             for x in 0..24 {
-                let v = if y < 4 { 20 }              // top "sky" / dark
-                       else if y < 8 && (4..20).contains(&x) { 200 }  // bright forehead band
-                       else if y < 18 && (4..20).contains(&x) { 220 } // bright face oval
-                       else { 20 };                  // dark border
+                let v = if y < 4 {
+                    20
+                }
+                // top "sky" / dark
+                else if y < 8 && (4..20).contains(&x) {
+                    200
+                }
+                // bright forehead band
+                else if y < 18 && (4..20).contains(&x) {
+                    220
+                }
+                // bright face oval
+                else {
+                    20
+                }; // dark border
                 img[(x, y)] = v;
             }
         }
@@ -247,6 +306,9 @@ mod tests {
         let c = demo_face_cascade();
         let mut cache = crate::haar::EvalCache::new(c.features.len());
         let res = c.classify(&ii, &ri, 0, 0, &mut cache);
-        assert!(res.is_some(), "demo cascade should accept bright-center pattern");
+        assert!(
+            res.is_some(),
+            "demo cascade should accept bright-center pattern"
+        );
     }
 }

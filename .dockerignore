@@ -1,0 +1,6 @@
+target/
+platform/target/
+.git/
+.claude/
+docs/samples/
+*.log

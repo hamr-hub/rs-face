@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  # ------- Core CLI: rs-face (zero-dep) -------
+  # Build each target on its native runner to avoid cross-compilation.
+  # macOS runners are universal: x86_64 and aarch64 share the same image.
+  cli-linux-x86_64:
+    name: rs-face (linux-x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            target
+      - name: Build rs-face
+        run: cargo build --release --bin rs-face
+      - name: Package binary
+        run: |
+          mkdir -p out
+          cp target/release/rs-face out/rs-face-linux-x86_64
+          chmod +x out/rs-face-linux-x86_64
+          (cd out && tar -czf rs-face-linux-x86_64.tar.gz rs-face-linux-x86_64)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rs-face-linux-x86_64
+          path: out/rs-face-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  cli-macos-universal:
+    name: rs-face (macos-${{ matrix.arch }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            rust_target: x86_64-apple-darwin
+            artifact: rs-face-macos-x86_64
+          - arch: aarch64
+            rust_target: aarch64-apple-darwin
+            artifact: rs-face-macos-aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            target
+          target: ${{ matrix.rust_target }}
+      - name: Build rs-face
+        run: cargo build --release --bin rs-face --target ${{ matrix.rust_target }}
+      - name: Package binary
+        run: |
+          mkdir -p out
+          cp target/${{ matrix.rust_target }}/release/rs-face out/${{ matrix.artifact }}
+          chmod +x out/${{ matrix.artifact }}
+          (cd out && tar -czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }})
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  cli-windows:
+    name: rs-face (windows-x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            target
+      - name: Build rs-face
+        run: cargo build --release --bin rs-face
+      - name: Package binary
+        shell: bash
+        run: |
+          mkdir -p out
+          cp target/release/rs-face.exe out/rs-face-windows-x86_64.exe
+          (cd out && tar -czf rs-face-windows-x86_64.tar.gz rs-face-windows-x86_64.exe)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rs-face-windows-x86_64
+          path: out/rs-face-windows-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  # ------- Platform server: rsface-server (linux-x86_64 only) -------
+  # The platform server depends on tokio + axum + sqlx + ureq and is
+  # primarily deployed via the Docker images in platform/Dockerfile*.
+  platform-linux:
+    name: rsface-server (linux-x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # sqlx needs DATABASE_URL at build time for compile-time query
+      # checking. We point it at a stub and set SQLX_OFFLINE so the
+      # build succeeds without a live Postgres.
+      - name: Stub DATABASE_URL
+        working-directory: platform
+        run: |
+          echo "DATABASE_URL=postgres://localhost/_unused" > .env
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            target
+            platform/target
+
+      - name: Build platform server
+        working-directory: platform
+        env:
+          SQLX_OFFLINE: 'true'
+        run: |
+          cargo build --release --bin rsface-server
+          cp target/release/rsface-server ../rsface-server-linux-x86_64
+
+      - name: Package platform server
+        run: tar -czf rsface-server-linux-x86_64.tar.gz rsface-server-linux-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rsface-server-linux-x86_64
+          path: rsface-server-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  # ------- Publish a GitHub Release -------
+  release:
+    name: Publish release
+    needs:
+      - cli-linux-x86_64
+      - cli-macos-universal
+      - cli-windows
+      - platform-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.tar.gz

@@ -12,18 +12,54 @@
 //! The library is `no_std`-friendly for the core types (integral, haar, detector)
 //! but uses `std` for I/O and threading.
 
+#![allow(clippy::too_many_arguments)] // Pipeline knobs are independently tuned; bundling them hides call sites.
+#![allow(clippy::type_complexity)] // Detector/Cascade generics are spelled out in public APIs; not worth a type alias.
+#![allow(clippy::result_large_err)] // PipelineError carries the source path for the UI to surface; not boxed.
+#![allow(clippy::identity_op)] // 0-index placeholder math in CNN kernel index calcs; harmless.
+#![allow(clippy::erasing_op)] // Same reason: the CNN scaffold uses 0 * N terms that are clearly placeholders.
+#![allow(clippy::manual_div_ceil)] // Readability: written as `(a + b - 1) / b` for parity with OpenCV refs.
+#![allow(clippy::manual_is_multiple_of)] // Avoid pulling the unstable div_rem helper.
+#![allow(clippy::manual_range_contains)] // Readability: `x >= 1 && x <= 10` reads clearer in numerical kernels.
+#![allow(clippy::manual_saturating_arithmetic)] // Pipeline hot path; explicit branches are measurably faster.
+#![allow(clippy::manual_checked_ops)] // `(a / b)` written as `checked_div` reads worse in image-size math.
+#![allow(clippy::unnecessary_cast)] // `u16 as u16` is sometimes emitted by cfg-gated code paths.
+#![allow(clippy::io_other_error)] // PipelineError -> io::Error::new uses Display string for surfacing.
+#![allow(clippy::mut_from_ref)] // OpenCL FFI returns *mut opaque; the wrapper holds the same ptr through an aliasing layer.
+#![allow(clippy::redundant_closure)] // `|x| f(x)` is sometimes clearer than bare `f` for type inference.
+#![allow(clippy::needless_range_loop)] // `for i in 0..n` indexing is intentional in numerical kernels.
+#![allow(clippy::collapsible_if)] // Nested `if`s are clearer when each branch has a descriptive comment.
+#![allow(clippy::unnecessary_map_or)] // `map_or(false, |x| ...)` reads more directly than `is_some_and` in variance checks.
+#![allow(clippy::while_let_loop)] // `loop { match it.next() { ... } }` is clearer when the body has multiple branches.
+#![allow(clippy::new_without_default)] // Dummy detector constructors (CNN/HoG/YuNet/MTCNN) don't need Default — `new()` is fine.
+#![allow(clippy::needless_collect)]
+// Intentional Vec build for the next step.
+// OpenCL loader caches dlopen handles in `static mut LIB`/`LIB_HANDLE`; access is gated by unsafe.
+#![allow(static_mut_refs)]
+#![allow(unused_parens)] // `cargo fmt` produces parens around some assignments; harmless.
+#![allow(unused_unsafe)] // The OpenCL wrapper uses `unsafe {}` blocks defensively even where the call is itself unsafe.
+#![allow(dead_code)] // Dummy CNN/HoG/YuNet/MTCNN scaffolds ship with all primitives even if a few are unreferenced.
+#![allow(unused_variables)] // Same reason as dead_code; placeholder code paths.
+
+pub mod cnn;
+pub mod detector;
+pub mod face_detector;
+pub mod gpu;
+pub mod haar;
+pub mod hog_face;
 pub mod image;
 pub mod integral;
-pub mod haar;
-pub mod detector;
-pub mod pipeline;
-pub mod source;
+pub mod mtcnn;
 pub mod output;
-pub mod gpu;
+pub mod pipeline;
 pub mod pool;
-pub mod cnn;
+pub mod source;
+pub mod yunet;
 
 pub use detector::{Detection, Detector};
+pub use face_detector::FaceDetector;
 pub use haar::Cascade;
+pub use hog_face::{HogConfig, HogFaceDetector};
 pub use image::GrayImage;
+pub use mtcnn::{MtcnnConfig, MtcnnDetector};
 pub use pipeline::{Pipeline, PipelineConfig, PipelineStats};
+pub use yunet::{YunetConfig, YunetDetector};

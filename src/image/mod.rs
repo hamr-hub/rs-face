@@ -22,24 +22,52 @@ pub struct GrayImage {
 
 impl GrayImage {
     pub fn new(width: usize, height: usize) -> Self {
-        Self { data: vec![0; width * height], width, height }
+        Self {
+            data: vec![0; width * height],
+            width,
+            height,
+        }
     }
 
     pub fn from_vec(data: Vec<u8>, width: usize, height: usize) -> Self {
         assert_eq!(data.len(), width * height, "data size mismatch");
-        Self { data, width, height }
+        Self {
+            data,
+            width,
+            height,
+        }
     }
 
-    #[inline] pub fn width(&self) -> usize { self.width }
-    #[inline] pub fn height(&self) -> usize { self.height }
-    #[inline] pub fn as_slice(&self) -> &[u8] { &self.data }
-    #[inline] pub fn as_mut_slice(&mut self) -> &mut [u8] { &mut self.data }
-    #[inline] pub fn row(&self, y: usize) -> &[u8] { &self.data[y * self.width..(y + 1) * self.width] }
-    #[inline] pub fn row_mut(&mut self, y: usize) -> &mut [u8] { &mut self.data[y * self.width..(y + 1) * self.width] }
+    #[inline]
+    pub fn width(&self) -> usize {
+        self.width
+    }
+    #[inline]
+    pub fn height(&self) -> usize {
+        self.height
+    }
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+    #[inline]
+    pub fn row(&self, y: usize) -> &[u8] {
+        &self.data[y * self.width..(y + 1) * self.width]
+    }
+    #[inline]
+    pub fn row_mut(&mut self, y: usize) -> &mut [u8] {
+        &mut self.data[y * self.width..(y + 1) * self.width]
+    }
 
     /// Mean luminance — used for adaptive thresholding / lighting normalization.
     pub fn mean(&self) -> f32 {
-        if self.data.is_empty() { return 0.0; }
+        if self.data.is_empty() {
+            return 0.0;
+        }
         let s: u64 = self.data.iter().map(|&v| v as u64).sum();
         s as f32 / self.data.len() as f32
     }
@@ -47,18 +75,26 @@ impl GrayImage {
     /// Standard deviation of luminance.
     pub fn stddev(&self) -> f32 {
         let m = self.mean();
-        let v: f64 = self.data.iter().map(|&p| {
-            let d = p as f64 - m as f64;
-            d * d
-        }).sum();
+        let v: f64 = self
+            .data
+            .iter()
+            .map(|&p| {
+                let d = p as f64 - m as f64;
+                d * d
+            })
+            .sum();
         ((v / self.data.len() as f64) as f32).sqrt()
     }
 
     /// Histogram-based contrast stretch to `[0, 255]` (ignoring saturated 1% tails).
     pub fn normalize_contrast(&mut self) {
-        if self.data.is_empty() { return; }
+        if self.data.is_empty() {
+            return;
+        }
         let mut hist = [0u32; 256];
-        for &p in &self.data { hist[p as usize] += 1; }
+        for &p in &self.data {
+            hist[p as usize] += 1;
+        }
         let total = self.data.len() as u32;
         let low_cut = total / 100;
         let high_cut = total - total / 100;
@@ -67,19 +103,84 @@ impl GrayImage {
         let mut hi = 255u8;
         for (i, &c) in hist.iter().enumerate() {
             acc += c;
-            if acc >= low_cut { lo = i as u8; break; }
+            if acc >= low_cut {
+                lo = i as u8;
+                break;
+            }
         }
         acc = 0;
         for (i, &c) in hist.iter().enumerate().rev() {
             acc += c;
-            if acc >= high_cut { hi = i as u8; break; }
+            if acc >= high_cut {
+                hi = i as u8;
+                break;
+            }
         }
-        if hi <= lo { return; }
+        if hi <= lo {
+            return;
+        }
         let range = (hi - lo) as f32;
         for p in self.data.iter_mut() {
             let v = *p as i32 - lo as i32;
             let stretched = (v as f32 / range * 255.0).clamp(0.0, 255.0) as u8;
             *p = stretched;
+        }
+    }
+
+    /// Histogram equalization — `cv::equalizeHist` reference.
+    ///
+    /// Maps each pixel `p` to `round(cdf[p] * 255 / total)` where `cdf` is
+    /// the cumulative distribution of the image histogram. This is the
+    /// preprocessing OpenCV's `detectMultiScale` callers are expected to
+    /// apply before running the cascade — the trained thresholds and
+    /// variance normalisation factors assume input in the equalized
+    /// luminance range. Without it the cascade's stage-0 weak features
+    /// (which are calibrated to "bright forehead over dark border"-type
+    /// responses on equalized data) consistently reject real faces on
+    /// raw photographs.
+    ///
+    /// Cost: one histogram pass + one CDF pass over 256 entries + one
+    /// pixel remap = O(W·H) for typical face window sizes.
+    pub fn equalize_hist_inplace(&mut self) {
+        if self.data.is_empty() {
+            return;
+        }
+        let mut hist = [0u32; 256];
+        for &p in &self.data {
+            hist[p as usize] += 1;
+        }
+        // Cumulative distribution, then scale into 0..=255.
+        let mut cdf = [0u32; 256];
+        let mut acc: u32 = 0;
+        for i in 0..256 {
+            acc += hist[i];
+            cdf[i] = acc;
+        }
+        // The OpenCV equalizeHist formula: `round(cdf[p] * 255 / total)`,
+        // but only using the part of the cdf after the first non-zero
+        // entry (`cdf_min`). This avoids a global brightness shift on
+        // mostly-dark images and matches `cv::equalizeHist` byte-for-byte.
+        let mut cdf_min: u32 = 0;
+        for i in 0..256 {
+            if cdf[i] != 0 {
+                cdf_min = cdf[i];
+                break;
+            }
+        }
+        let total = self.data.len() as u32;
+        let denom = total - cdf_min;
+        if denom == 0 {
+            return;
+        }
+        // Build a 256-entry LUT so the per-pixel remap is a single load.
+        let mut lut = [0u8; 256];
+        for i in 0..256 {
+            let num = cdf[i].saturating_sub(cdf_min) as u64;
+            let v = (num * 255 + (denom as u64 / 2)) / (denom as u64);
+            lut[i] = (v as u32).min(255) as u8;
+        }
+        for p in self.data.iter_mut() {
+            *p = lut[*p as usize];
         }
     }
 
@@ -141,17 +242,25 @@ impl GrayImage {
                 for yy in y0..y1 {
                     let ycov = (yy + 1) as f32 - fy_start.max(yy as f32);
                     let ycov = ycov.min(fy_end - yy as f32).max(0.0);
-                    if ycov <= 0.0 { continue; }
+                    if ycov <= 0.0 {
+                        continue;
+                    }
                     for xx in x0..x1 {
                         let xcov = (xx + 1) as f32 - fx_start.max(xx as f32);
                         let xcov = xcov.min(fx_end - xx as f32).max(0.0);
-                        if xcov <= 0.0 { continue; }
+                        if xcov <= 0.0 {
+                            continue;
+                        }
                         let w = (xcov * ycov) as f64;
                         sum += w * self.data[yy * self.width + xx] as f64;
                         area += w;
                     }
                 }
-                out.data[y * new_w + x] = if area > 0.0 { (sum / area).round().clamp(0.0, 255.0) as u8 } else { 0 };
+                out.data[y * new_w + x] = if area > 0.0 {
+                    (sum / area).round().clamp(0.0, 255.0) as u8
+                } else {
+                    0
+                };
             }
         }
         out
@@ -159,7 +268,9 @@ impl GrayImage {
 
     /// Downscale by an integer factor using box averaging (memory- and time-friendly).
     pub fn downscale(&self, factor: usize) -> GrayImage {
-        if factor <= 1 { return self.clone(); }
+        if factor <= 1 {
+            return self.clone();
+        }
         let nw = self.width / factor;
         let nh = self.height / factor;
         let mut out = GrayImage::new(nw, nh);
@@ -204,15 +315,37 @@ pub struct RgbImage {
 
 impl RgbImage {
     pub fn new(width: usize, height: usize) -> Self {
-        Self { data: vec![0; width * height * 3], width, height }
+        Self {
+            data: vec![0; width * height * 3],
+            width,
+            height,
+        }
     }
 
-    #[inline] pub fn width(&self) -> usize { self.width }
-    #[inline] pub fn height(&self) -> usize { self.height }
-    #[inline] pub fn as_slice(&self) -> &[u8] { &self.data }
-    #[inline] pub fn as_mut_slice(&mut self) -> &mut [u8] { &mut self.data }
-    #[inline] pub fn row(&self, y: usize) -> &[u8] { &self.data[y * self.width * 3..(y + 1) * self.width * 3] }
-    #[inline] pub fn row_mut(&mut self, y: usize) -> &mut [u8] { &mut self.data[y * self.width * 3..(y + 1) * self.width * 3] }
+    #[inline]
+    pub fn width(&self) -> usize {
+        self.width
+    }
+    #[inline]
+    pub fn height(&self) -> usize {
+        self.height
+    }
+    #[inline]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data
+    }
+    #[inline]
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+    #[inline]
+    pub fn row(&self, y: usize) -> &[u8] {
+        &self.data[y * self.width * 3..(y + 1) * self.width * 3]
+    }
+    #[inline]
+    pub fn row_mut(&mut self, y: usize) -> &mut [u8] {
+        &mut self.data[y * self.width * 3..(y + 1) * self.width * 3]
+    }
 
     /// RGB → grayscale using BT.601 luma weights.
     pub fn to_gray(&self) -> GrayImage {
@@ -236,28 +369,40 @@ impl RgbImage {
         let (cr, cg, cb) = color;
         for i in 0..w {
             let xx = x + i;
-            if xx >= self.width { break; }
+            if xx >= self.width {
+                break;
+            }
             if y < self.height {
                 let idx = (y * self.width + xx) * 3;
-                self.data[idx] = cr; self.data[idx + 1] = cg; self.data[idx + 2] = cb;
+                self.data[idx] = cr;
+                self.data[idx + 1] = cg;
+                self.data[idx + 2] = cb;
             }
             let yy = y + h;
             if yy < self.height {
                 let idx = (yy * self.width + xx) * 3;
-                self.data[idx] = cr; self.data[idx + 1] = cg; self.data[idx + 2] = cb;
+                self.data[idx] = cr;
+                self.data[idx + 1] = cg;
+                self.data[idx + 2] = cb;
             }
         }
         for j in 0..h {
             let yy = y + j;
-            if yy >= self.height { break; }
+            if yy >= self.height {
+                break;
+            }
             if x < self.width {
                 let idx = (yy * self.width + x) * 3;
-                self.data[idx] = cr; self.data[idx + 1] = cg; self.data[idx + 2] = cb;
+                self.data[idx] = cr;
+                self.data[idx + 1] = cg;
+                self.data[idx + 2] = cb;
             }
             let xx = x + w;
             if xx < self.width {
                 let idx = (yy * self.width + xx) * 3;
-                self.data[idx] = cr; self.data[idx + 1] = cg; self.data[idx + 2] = cb;
+                self.data[idx] = cr;
+                self.data[idx + 1] = cg;
+                self.data[idx + 2] = cb;
             }
         }
     }
