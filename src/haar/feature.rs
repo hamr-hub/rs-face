@@ -133,6 +133,75 @@ impl HaarFeature {
         }
         total as f32
     }
+
+    /// Same as [`Self::eval`] but with the rectangle-sum clamping elided.
+    ///
+    /// # Safety contract (caller must uphold)
+    /// For every rect `r` of this feature, `(rx + rw) <= ii_w` and
+    /// `(ry + rh) <= ii_h` must hold **after** the same coordinate mapping
+    /// `eval` performs (feature-local → window pixels → + (x, y)).
+    ///
+    /// This is the detector's window-scan configuration: `x + win_w <= ii_w`
+    /// and `y + win_h <= ii_h` are guaranteed by the scan loop bounds, rects
+    /// are subsets of the window (`rx ≥ x`, `ry ≥ y`, `rx + rw ≤ x + win_w`),
+    /// and `ii_w/ii_h` equal the image dimensions, so every derived rect is
+    /// inside the table. Under that contract the clamps in `eval` are
+    /// identities and this function returns the exact same `f32` (each
+    /// rect's sum and the f64 accumulation order are unchanged).
+    ///
+    /// Cascades whose rects overhang the window (possible with hand-edited
+    /// `.rfcf` files) must keep using `eval`.
+    pub(crate) fn eval_inbounds(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        win_w: usize,
+        win_h: usize,
+        ii_w: usize,
+        ii_h: usize,
+    ) -> f32 {
+        debug_assert!(x + win_w <= ii_w && y + win_h <= ii_h);
+        let mut total: f64 = 0.0;
+        let is_custom = matches!(self.kind, FeatureKind::CustomRects);
+        let fw = if is_custom {
+            1usize
+        } else {
+            self.width.max(1) as usize
+        };
+        let fh = if is_custom {
+            1usize
+        } else {
+            self.height.max(1) as usize
+        };
+        for r in &self.rects {
+            let (rx, ry, rw, rh) = if is_custom {
+                (
+                    x + r.x as usize,
+                    y + r.y as usize,
+                    std::cmp::max(1, r.w as usize),
+                    std::cmp::max(1, r.h as usize),
+                )
+            } else {
+                let rx = x + r.x as usize * win_w / fw;
+                let ry = y + r.y as usize * win_h / fh;
+                let rw = std::cmp::max(1, r.w as usize * win_w / fw);
+                let rh = std::cmp::max(1, r.h as usize * win_h / fh);
+                (rx, ry, rw, rh)
+            };
+            // SAFETY (rect_sum_unchecked): rx < rx2 ≤ ii_w and ry < ry2 ≤ ii_h
+            // follow from the documented contract of this method — rects map
+            // inside the window, the window fits the image, and rw/rh ≥ 1.
+            let sum: i64 = match self.kind {
+                FeatureKind::DiagonalEdge => ri.tilted_rect_sum_unchecked(rx, ry, rx + rw, ry + rh),
+                _ => ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as i64,
+            };
+            let contribution = (sum as f64) * (r.weight as f64);
+            total += contribution;
+        }
+        total as f32
+    }
 }
 
 /// Factory helpers — build the standard 5 features at a given feature size.
@@ -246,5 +315,52 @@ mod tests {
         let feat = HaarFeature::horizontal_edge(2, 1);
         let r = feat.eval(&ii, &ri, 0, 0, 2, 2, ii.width(), ii.height());
         assert_eq!(r, -510.0);
+    }
+
+    #[test]
+    fn eval_inbounds_matches_eval_bit_for_bit() {
+        // Deterministic pseudo-random image covering all feature families.
+        let (w, h) = (48usize, 40usize);
+        let mut img = GrayImage::new(w, h);
+        let mut s = 0x0BAD_C0DEu32;
+        for y in 0..h {
+            for x in 0..w {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                img[(x, y)] = (s >> 24) as u8;
+            }
+        }
+        let ii = IntegralImage::from_gray(&img);
+        let ri = RotatedIntegralImage::from_gray(&img);
+        let feats = vec![
+            HaarFeature::vertical_edge(1, 2),
+            HaarFeature::horizontal_edge(2, 1),
+            HaarFeature::diagonal_edge(2, 2),
+            HaarFeature::vertical_center(1, 3),
+            HaarFeature::horizontal_center(3, 1),
+        ];
+        // Custom-rects feature (OpenCV style): rects in window pixels.
+        let custom = HaarFeature {
+            kind: FeatureKind::CustomRects,
+            width: 24,
+            height: 24,
+            rects: vec![Rect::new(2, 2, 8, 8, 1.0), Rect::new(12, 4, 9, 10, -2.0)],
+        };
+        let mut all = feats;
+        all.push(custom);
+        // Windows fully inside the image — the detector's scan regime.
+        for y in [0usize, 3, 9] {
+            for x in [0usize, 5, 17] {
+                for feat in &all {
+                    let a = feat.eval(&ii, &ri, x, y, 24, 24, w, h);
+                    let b = feat.eval_inbounds(&ii, &ri, x, y, 24, 24, w, h);
+                    assert_eq!(
+                        a.to_bits(),
+                        b.to_bits(),
+                        "eval mismatch feat={:?} at ({x},{y})",
+                        feat.kind
+                    );
+                }
+            }
+        }
     }
 }

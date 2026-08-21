@@ -24,6 +24,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+    mem_limit: ${RUSTFS_MEM_LIMIT:-1g}
     restart: unless-stopped
 
   postgres:
@@ -42,6 +43,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+    mem_limit: ${PG_MEM_LIMIT:-512m}
     restart: unless-stopped
 
   server:
@@ -70,10 +72,35 @@ services:
       MAX_FRAMES_VIDEO: ${MAX_FRAMES_VIDEO:-3600}
       MAX_FACE_CROPS: ${MAX_FACE_CROPS:-2000}
       MIN_FACE_SIZE: ${MIN_FACE_SIZE:-24}
+      MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-2}
+      MAX_QUEUE_DEPTH: ${MAX_QUEUE_DEPTH:-64}
+      # 任务硬超时(可配 0 关闭):图片 10min / 视频 60min / 流不限。
+      JOB_TIMEOUT_SECS: ${JOB_TIMEOUT_SECS:-600}
+      JOB_TIMEOUT_VIDEO_SECS: ${JOB_TIMEOUT_VIDEO_SECS:-3600}
+      JOB_TIMEOUT_STREAM_SECS: ${JOB_TIMEOUT_STREAM_SECS:-0}
+      # 优雅停机:SIGTERM 后等任务排空的上限(docker stop 默认只等 10s,
+      # 需配 stop_grace_period 一起调大)。
+      SHUTDOWN_GRACE_SECS: ${SHUTDOWN_GRACE_SECS:-120}
       DATABASE_URL: postgres://rsface:rsface-pass@127.0.0.1:15432/rsface
       LOCAL_MEDIA_DIR: /var/rsface-media
+      # 跨域前端(留空 = 同源部署,不开 CORS)
+      CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-}
     volumes:
       - rsface-media:/var/rsface-media
+    healthcheck:
+      # host 网络模式下容器内 curl 打自己端口。
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:20080/api/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    # 资源限制:检测线程 + ffmpeg 子进程 + 上传缓冲的合理上限。
+    # 2G:足以跑 2 并发 haar/cnn + 2GB 上限的视频转码;OOM 时容器重启
+    # (restart: unless-stopped)而不是拖垮宿主。
+    mem_limit: ${SERVER_MEM_LIMIT:-2g}
+    memswap_limit: ${SERVER_MEMSWAP_LIMIT:-2g}
+    # docker stop 的宽限期要 ≥ SHUTDOWN_GRACE_SECS,让优雅停机跑完。
+    stop_grace_period: ${SERVER_STOP_GRACE:-2m30s}
     restart: unless-stopped
 
 volumes:

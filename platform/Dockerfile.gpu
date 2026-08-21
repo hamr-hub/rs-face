@@ -34,7 +34,12 @@ RUN mkdir -p /etc/OpenCL/vendors \
 COPY --from=build /build/platform/target/release/rsface-server /usr/local/bin/rsface-server
 COPY platform/web /app/web
 COPY cascade.rfcf /app/cascade.rfcf
-RUN mkdir -p /var/rsface-media
+RUN mkdir -p /var/rsface-media /tmp/rsface-jobs \
+    # 非 root 运行:rsface 用户(UID 10001)。NVIDIA 设备节点由
+    # nvidia-container-cli 注入,权限走 video/render 组,普通用户可访问。
+    && groupadd -g 10001 rsface \
+    && useradd -u 10001 -g rsface -s /usr/sbin/nologin rsface \
+    && chown -R rsface:rsface /var/rsface-media /tmp/rsface-jobs /app
 
 ENV BIND_ADDR=0.0.0.0:8080 \
     S3_ENDPOINT=http://rustfs:9000 \
@@ -49,5 +54,12 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     NVIDIA_VISIBLE_DEVICES=all
 
+USER rsface
+WORKDIR /app
 EXPOSE 8080
+
+# 容器级健康检查(镜像已带 curl)。
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+    CMD curl -sf http://127.0.0.1:8080/api/health || exit 1
+
 CMD ["rsface-server"]

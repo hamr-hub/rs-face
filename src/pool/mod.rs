@@ -24,6 +24,7 @@ struct Pool {
     gray: HashMap<(usize, usize), Vec<GrayImage>>,
     rgb: HashMap<(usize, usize), Vec<RgbImage>>,
     integrals: HashMap<(usize, usize), Vec<Vec<u32>>>,
+    integrals_u64: HashMap<(usize, usize), Vec<Vec<u64>>>,
     detections: Vec<Vec<crate::detector::Detection>>,
 }
 
@@ -33,6 +34,7 @@ impl Pool {
             gray: HashMap::new(),
             rgb: HashMap::new(),
             integrals: HashMap::new(),
+            integrals_u64: HashMap::new(),
             detections: Vec::new(),
         }
     }
@@ -88,6 +90,10 @@ pub fn release_rgb(img: RgbImage) {
 }
 
 /// Acquire a pre-sized `Vec<u32>` for use as an integral image buffer.
+/// The buffer is **not** zeroed on recycle — the caller
+/// (`IntegralImage::from_gray`) overwrites every cell it reads except the
+/// padding row/column, which it zeroes itself, so skip the redundant
+/// `memset` over the whole `(W+1)×(H+1)` table on every frame.
 pub fn acquire_integral(w: usize, h: usize) -> Vec<u32> {
     let stride = w + 1;
     let needed = stride * (h + 1);
@@ -97,7 +103,6 @@ pub fn acquire_integral(w: usize, h: usize) -> Vec<u32> {
         if let Some(bucket) = p.integrals.get_mut(&key) {
             if let Some(mut v) = bucket.pop() {
                 if v.capacity() >= needed {
-                    v.clear();
                     v.resize(needed, 0);
                     return v;
                 }
@@ -112,6 +117,39 @@ pub fn release_integral(w: usize, h: usize, buf: Vec<u32>) {
         let mut p = p.borrow_mut();
         let key = (w, h);
         p.integrals.entry(key).or_insert_with(Vec::new).push(buf);
+    });
+}
+
+/// Acquire a pre-sized `Vec<u64>` for the squared integral image
+/// (same layout: `(w+1) * (h+1)` elements). Like [`acquire_integral`],
+/// recycled buffers are length-reset but not zeroed — the caller zeroes
+/// exactly the padding cells it depends on.
+pub fn acquire_integral_u64(w: usize, h: usize) -> Vec<u64> {
+    let stride = w + 1;
+    let needed = stride * (h + 1);
+    POOL.with(|p| {
+        let mut p = p.borrow_mut();
+        let key = (w, h);
+        if let Some(bucket) = p.integrals_u64.get_mut(&key) {
+            if let Some(mut v) = bucket.pop() {
+                if v.capacity() >= needed {
+                    v.resize(needed, 0);
+                    return v;
+                }
+            }
+        }
+        vec![0u64; needed]
+    })
+}
+
+pub fn release_integral_u64(w: usize, h: usize, buf: Vec<u64>) {
+    POOL.with(|p| {
+        let mut p = p.borrow_mut();
+        let key = (w, h);
+        p.integrals_u64
+            .entry(key)
+            .or_insert_with(Vec::new)
+            .push(buf);
     });
 }
 
@@ -145,6 +183,7 @@ pub fn clear() {
         p.gray.clear();
         p.rgb.clear();
         p.integrals.clear();
+        p.integrals_u64.clear();
         p.detections.clear();
     });
 }
@@ -173,5 +212,25 @@ mod tests {
         release_integral(10, 10, v1);
         let v2 = acquire_integral(10, 10);
         assert_eq!(v2.len(), 11 * 11);
+    }
+
+    #[test]
+    fn pool_recycles_integral_u64_zeroed() {
+        clear();
+        let p1 = {
+            let v = acquire_integral_u64(10, 10);
+            assert_eq!(v.len(), 11 * 11);
+            v.as_ptr()
+        };
+        // Release, dirty it, release again — the pool hands back the same
+        // allocation with the right length. It is NOT pre-zeroed (the
+        // integral builders zero exactly the padding cells they read);
+        // length is what the pool must guarantee.
+        let mut v = acquire_integral_u64(10, 10);
+        assert_eq!(p1, v.as_ptr(), "pool should reuse the backing allocation");
+        v.fill(0xDEAD_BEEF);
+        release_integral_u64(10, 10, v);
+        let v2 = acquire_integral_u64(10, 10);
+        assert_eq!(v2.len(), 11 * 11, "recycled buffer must have exact length");
     }
 }

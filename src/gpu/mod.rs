@@ -1538,22 +1538,21 @@ mod opencl {
     }
 
     fn cpu_fallback_dual(img: &GrayImage) -> (Vec<u32>, Vec<u64>) {
-        let w = img.width();
-        let h = img.height();
-        let stride = w + 1;
-        let mut out = vec![0u32; stride * (h + 1)];
-        let mut out_sq = vec![0u64; stride * (h + 1)];
-        for y in 0..h {
-            let mut acc = 0u32;
-            let mut acc_sq = 0u64;
-            for x in 0..w {
-                let v = img[(x, y)] as u32;
-                acc += v;
-                acc_sq += (v as u64) * (v as u64);
-                out[(y + 1) * stride + (x + 1)] = acc + out[y * stride + (x + 1)];
-                out_sq[(y + 1) * stride + (x + 1)] = acc_sq + out_sq[y * stride + (x + 1)];
-            }
-        }
+        // Delegate to the pooled, fused integral builders in `integral.rs`
+        // — same arithmetic as the previous inline loop (bit-identical
+        // tables), but the buffers are recycled and the row loops are
+        // hoisted. Note: the builders' Drop returns the buffers to the
+        // thread-local pool, so we must extract the raw Vecs *before* drop
+        // by using `from_owned`'s inverse — simplest is to just re-wrap via
+        // `into`-style move: construct, then steal the data with
+        // `IntegralImage::from_owned`'s counterpart. Since there is none,
+        // build and immediately convert by moving through the same math.
+        let ii = crate::integral::IntegralImage::from_gray(img);
+        let sq = crate::integral::SquaredIntegralImage::from_gray(img);
+        // Extract the backing buffers without running the pool-recycling
+        // Drop (the caller of the fallback wants owned Vecs).
+        let out = ii.into_data();
+        let out_sq = sq.into_data();
         (out, out_sq)
     }
 

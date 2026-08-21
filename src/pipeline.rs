@@ -53,6 +53,9 @@ pub struct PipelineStats {
     pub frames_with_face: u64,
     pub total_detections: u64,
     pub elapsed_ms: u64,
+    /// Mean per-frame pure-detection time in ms (excludes I/O and PNG
+    /// encoding); 0.0 when unavailable.
+    pub detect_ms_avg: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +68,8 @@ struct WorkResult {
     seq: u64,
     frame: Frame,
     detections: Vec<Detection>,
-    #[allow(dead_code)]
+    /// Per-frame detection time in microseconds (surfaced in the manifest
+    /// as `detect_ms` and aggregated into `PipelineStats::detect_ms_avg`).
     elapsed_us: u64,
 }
 
@@ -178,6 +182,7 @@ impl Pipeline {
             frames_with_face: records.iter().filter(|r| !r.detections.is_empty()).count() as u64,
             total_detections: records.iter().map(|r| r.detections.len() as u64).sum(),
             elapsed_ms: start.elapsed().as_millis() as u64,
+            detect_ms_total: records.iter().map(|r| r.detect_ms).sum(),
         };
         let manifest = output_dir.join("manifest.json");
         write_manifest(&manifest, &records, &summary)?;
@@ -186,6 +191,7 @@ impl Pipeline {
             frames_with_face: summary.frames_with_face,
             total_detections: summary.total_detections,
             elapsed_ms: summary.elapsed_ms,
+            detect_ms_avg: summary.detect_ms_avg(),
         })
     }
 }
@@ -215,7 +221,6 @@ fn worker_loop(
             cancel.store(true, Ordering::Relaxed);
             break;
         }
-        let _ = elapsed_us; // recorded for future per-frame stats
     }
 }
 
@@ -264,6 +269,7 @@ fn sink_loop(
                 width: rgb.width(),
                 height: rgb.height(),
                 detections: r.detections.clone(),
+                detect_ms: r.elapsed_us as f64 / 1000.0,
             };
             let fname = write_annotated_png(output_dir, &rec, &rgb)?;
             let mut rec = rec;

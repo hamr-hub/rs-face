@@ -45,12 +45,16 @@ RUN touch src/lib.rs src/main.rs platform/server/src/main.rs \
 
 # 运行时:alpine + ffmpeg + ca-certificates
 FROM alpine:3.20
-RUN apk add --no-cache ffmpeg ca-certificates tini \
-    && mkdir -p /var/rsface-media /tmp/rsface-jobs /app
+RUN apk add --no-cache ffmpeg ca-certificates tini curl \
+    && mkdir -p /var/rsface-media /tmp/rsface-jobs /app \
+    # 非 root 运行:rsface 用户(UID 10001),媒体/临时目录授权
+    && addgroup -S -g 10001 rsface \
+    && adduser -S -D -u 10001 -G rsface rsface \
+    && chown -R rsface:rsface /var/rsface-media /tmp/rsface-jobs /app
 
 # 复制静态二进制与资产
 COPY --from=build /build/platform/target/aarch64-unknown-linux-musl/release/rsface-server /usr/local/bin/rsface-server
-COPY platform/web /app/web
+COPY --chown=rsface:rsface platform/web /app/web
 COPY cascade.rfcf /app/cascade.rfcf
 
 ENV BIND_ADDR=0.0.0.0:8080 \
@@ -63,7 +67,15 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     TMP_DIR=/tmp/rsface-jobs \
     LOCAL_MEDIA_DIR=/var/rsface-media
 
+USER rsface
+WORKDIR /app
 EXPOSE 8080
-# tini:正确处理 PID 1 / 信号转发
+
+# 容器级健康检查:HTTP /api/health(alpine 自带 curl,已安装)。
+# 3 次连续失败(约 30s)才标 unhealthy,避免启动期误杀。
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
+    CMD curl -sf http://127.0.0.1:8080/api/health || exit 1
+
+# tini:正确处理 PID 1 / 信号转发(SIGTERM → 优雅停机排空任务)
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["rsface-server"]

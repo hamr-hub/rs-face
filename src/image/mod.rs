@@ -219,6 +219,12 @@ impl GrayImage {
     /// Each output pixel is the average of the input pixels it covers.
     /// This is significantly more accurate than bilinear for >2× downscaling and
     /// matches OpenCV's default behavior in `cv::resize` with downscaling.
+    ///
+    /// Optimized relative to the naive form: the per-`y` column coverage terms
+    /// are hoisted out of the `x` loop (they do not depend on `x`), and the
+    /// inner window walks row slices instead of re-indexing the full buffer.
+    /// The f64 accumulation order per output pixel is unchanged, so the
+    /// output bytes are bit-identical to the naive version.
     pub fn resize_area(&self, new_w: usize, new_h: usize) -> GrayImage {
         if new_w == 0 || new_h == 0 || self.width == 0 || self.height == 0 {
             return GrayImage::new(new_w.max(1), new_h.max(1));
@@ -231,6 +237,16 @@ impl GrayImage {
             let fy_end = (y + 1) as f32 * sy;
             let y0 = fy_start.floor() as usize;
             let y1 = (fy_end.ceil() as usize).min(self.height);
+            // Per-yy vertical coverage — hoisted out of the x loop (it is
+            // independent of x). Same expressions as the naive inner loop.
+            let mut ycov = Vec::with_capacity(y1.saturating_sub(y0));
+            for yy in y0..y1 {
+                let cov = ((yy + 1) as f32 - fy_start.max(yy as f32))
+                    .min(fy_end - yy as f32)
+                    .max(0.0);
+                ycov.push(cov);
+            }
+            let out_row = &mut out.data[y * new_w..(y + 1) * new_w];
             for x in 0..new_w {
                 let fx_start = x as f32 * sx;
                 let fx_end = (x + 1) as f32 * sx;
@@ -239,24 +255,25 @@ impl GrayImage {
                 // Compute weighted sum using exact sub-pixel coverage.
                 let mut sum = 0.0f64;
                 let mut area = 0.0f64;
-                for yy in y0..y1 {
-                    let ycov = (yy + 1) as f32 - fy_start.max(yy as f32);
-                    let ycov = ycov.min(fy_end - yy as f32).max(0.0);
-                    if ycov <= 0.0 {
+                for (row_idx, yy) in (y0..y1).enumerate() {
+                    let ycov_v = ycov[row_idx];
+                    if ycov_v <= 0.0 {
                         continue;
                     }
+                    let src_row = &self.data[yy * self.width..(yy + 1) * self.width];
                     for xx in x0..x1 {
-                        let xcov = (xx + 1) as f32 - fx_start.max(xx as f32);
-                        let xcov = xcov.min(fx_end - xx as f32).max(0.0);
+                        let xcov = ((xx + 1) as f32 - fx_start.max(xx as f32))
+                            .min(fx_end - xx as f32)
+                            .max(0.0);
                         if xcov <= 0.0 {
                             continue;
                         }
-                        let w = (xcov * ycov) as f64;
-                        sum += w * self.data[yy * self.width + xx] as f64;
+                        let w = (xcov * ycov_v) as f64;
+                        sum += w * src_row[xx] as f64;
                         area += w;
                     }
                 }
-                out.data[y * new_w + x] = if area > 0.0 {
+                out_row[x] = if area > 0.0 {
                     (sum / area).round().clamp(0.0, 255.0) as u8
                 } else {
                     0
@@ -405,5 +422,101 @@ impl RgbImage {
                 self.data[idx + 2] = cb;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic LCG image for stable tests.
+    fn lcg_image(w: usize, h: usize) -> GrayImage {
+        let mut img = GrayImage::new(w, h);
+        let mut s = 0xC0FF_EE00u32;
+        for y in 0..h {
+            for x in 0..w {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                img[(x, y)] = (s >> 24) as u8;
+            }
+        }
+        img
+    }
+
+    /// Reference implementation of the pre-optimisation `resize_area`
+    /// (verbatim) — proves the hoisted/sliced rewrite is bit-identical.
+    fn resize_area_reference(src: &GrayImage, new_w: usize, new_h: usize) -> GrayImage {
+        if new_w == 0 || new_h == 0 || src.width == 0 || src.height == 0 {
+            return GrayImage::new(new_w.max(1), new_h.max(1));
+        }
+        let mut out = GrayImage::new(new_w, new_h);
+        let sx = src.width as f32 / new_w as f32;
+        let sy = src.height as f32 / new_h as f32;
+        for y in 0..new_h {
+            let fy_start = y as f32 * sy;
+            let fy_end = (y + 1) as f32 * sy;
+            let y0 = fy_start.floor() as usize;
+            let y1 = (fy_end.ceil() as usize).min(src.height);
+            for x in 0..new_w {
+                let fx_start = x as f32 * sx;
+                let fx_end = (x + 1) as f32 * sx;
+                let x0 = fx_start.floor() as usize;
+                let x1 = (fx_end.ceil() as usize).min(src.width);
+                let mut sum = 0.0f64;
+                let mut area = 0.0f64;
+                for yy in y0..y1 {
+                    let ycov = (yy + 1) as f32 - fy_start.max(yy as f32);
+                    let ycov = ycov.min(fy_end - yy as f32).max(0.0);
+                    if ycov <= 0.0 {
+                        continue;
+                    }
+                    for xx in x0..x1 {
+                        let xcov = (xx + 1) as f32 - fx_start.max(xx as f32);
+                        let xcov = xcov.min(fx_end - xx as f32).max(0.0);
+                        if xcov <= 0.0 {
+                            continue;
+                        }
+                        let w = (xcov * ycov) as f64;
+                        sum += w * src.data[yy * src.width + xx] as f64;
+                        area += w;
+                    }
+                }
+                out.data[y * new_w + x] = if area > 0.0 {
+                    (sum / area).round().clamp(0.0, 255.0) as u8
+                } else {
+                    0
+                };
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn resize_area_optimized_matches_reference_bit_for_bit() {
+        let img = lcg_image(97, 61);
+        for (nw, nh) in [
+            (48usize, 30usize),
+            (13, 9),
+            (96, 60),
+            (7, 5),
+            (1, 1),
+            (97, 61), // identity scale (sx = sy = 1)
+        ] {
+            let a = img.resize_area(nw, nh);
+            let b = resize_area_reference(&img, nw, nh);
+            assert_eq!(a.as_slice(), b.as_slice(), "mismatch at {nw}x{nh}");
+        }
+        // Up-/down-mixed aspect.
+        let img2 = lcg_image(33, 100);
+        let a = img2.resize_area(50, 17);
+        let b = resize_area_reference(&img2, 50, 17);
+        assert_eq!(a.as_slice(), b.as_slice());
+    }
+
+    #[test]
+    fn resize_area_uniform_image_stays_uniform() {
+        let mut img = GrayImage::new(64, 64);
+        img.as_mut_slice().fill(137);
+        let out = img.resize_area(21, 13);
+        assert!(out.as_slice().iter().all(|&v| v == 137));
     }
 }

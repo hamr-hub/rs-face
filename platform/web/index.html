@@ -5,6 +5,7 @@
 </head><body>
 <header class="topbar" id="topbar" role="banner">
   <div class="tb-left">
+    <button id="tb-drawer" class="tb-icon-btn tb-drawer-btn" title="任务列表" aria-label="打开任务列表" aria-expanded="false" aria-controls="sidebar"><span aria-hidden="true">☰</span></button>
     <span class="tb-logo" aria-hidden="true">◐</span>
     <div class="tb-titles"><h1 class="tb-title">rs-face</h1><span class="tb-sub">Platform</span></div>
     <button id="tb-dashboard" class="tb-mini-btn" title="统计仪表板" aria-label="打开统计仪表板">◔</button>
@@ -101,10 +102,40 @@
       </svg>
     </div>
     <h2>人脸识别 · 任务台</h2>
-    <p>从左侧选择任务查看详情,或点击 <strong>+ 新建</strong> 开始识别</p>
+    <p>从左侧选择任务查看详情,或按下方的三步引导开始识别</p>
+    <!-- 三步引导(任务列表为空时给出明确路径) -->
+    <ol class="pv-empty-steps" aria-label="三步开始检测">
+      <li class="pv-step">
+        <span class="pv-step-num" aria-hidden="true">1</span>
+        <div class="pv-step-body">
+          <span class="pv-step-title">上传图片 / 视频</span>
+          <span class="pv-step-desc">点击 + 新建,或把文件拖到页面任意位置</span>
+        </div>
+      </li>
+      <li class="pv-step">
+        <span class="pv-step-num" aria-hidden="true">2</span>
+        <div class="pv-step-body">
+          <span class="pv-step-title">粘贴图片或媒体 URL</span>
+          <span class="pv-step-desc">Ctrl+V 粘贴剪贴板截图,或粘贴 http(s)/rtsp 地址</span>
+        </div>
+      </li>
+      <li class="pv-step">
+        <span class="pv-step-num" aria-hidden="true">3</span>
+        <div class="pv-step-body">
+          <span class="pv-step-title">查看实时结果</span>
+          <span class="pv-step-desc">任务列表实时刷新,点击卡片查看标注与人脸详情</span>
+        </div>
+      </li>
+    </ol>
+    <div class="pv-empty-cta">
+      <button id="pv-empty-new" class="pv-btn primary" aria-label="新建检测任务">+ 新建检测任务</button>
+      <button id="pv-empty-paste" class="pv-btn ghost" aria-label="从剪贴板粘贴图片" title="Ctrl+V 也随时可用">📋 粘贴图片</button>
+    </div>
     <div class="pv-empty-kbd">
       <span><kbd>n</kbd> 新建</span>
-      <span><kbd>↑</kbd>/<kbd>↓</kbd> 切换</span>
+      <span><kbd>j</kbd>/<kbd>k</kbd> 或 <kbd>↑</kbd>/<kbd>↓</kbd> 切换</span>
+      <span><kbd>Enter</kbd> 打开</span>
+      <span><kbd>p</kbd> 置顶</span>
       <span><kbd>Esc</kbd> 关闭</span>
       <span><kbd>Ctrl+K</kbd> 搜索</span>
       <span><kbd>b</kbd> 批量</span>
@@ -136,6 +167,7 @@
       </div>
     </div>
     <div class="pv-stage" id="pv-stage">
+      <div class="pv-stage-skel hidden" id="pv-stage-skel" aria-hidden="true"></div>
       <img id="pv-img" class="pv-media" alt="原图" loading="lazy" decoding="async">
       <video id="pv-vid" class="pv-media hidden" controls preload="metadata" playsinline></video>
       <div id="pv-double" class="pv-double hidden">
@@ -314,14 +346,16 @@
     <header class="modal-head"><h2 id="modal-help-title">键盘快捷键</h2><button class="pv-btn ghost modal-x" data-close aria-label="关闭">✕</button></header>
     <div class="kbd-list">
       <div class="kbd-row"><kbd>n</kbd> 新建任务</div>
-      <div class="kbd-row"><kbd>↑</kbd> / <kbd>↓</kbd> 上下切换任务</div>
+      <div class="kbd-row"><kbd>↑</kbd> / <kbd>↓</kbd> 或 <kbd>j</kbd> / <kbd>k</kbd> 上下切换任务</div>
       <div class="kbd-row"><kbd>Enter</kbd> 打开当前任务</div>
       <div class="kbd-row"><kbd>Delete</kbd> 删除当前任务(确认)</div>
+      <div class="kbd-row"><kbd>p</kbd> 置顶 / 取消置顶当前任务</div>
       <div class="kbd-row"><kbd>Ctrl</kbd>+<kbd>K</kbd> 聚焦搜索</div>
       <div class="kbd-row"><kbd>a</kbd> 切换人脸标注</div>
       <div class="kbd-row"><kbd>Esc</kbd> 关闭弹窗 / 预览</div>
       <div class="kbd-row"><kbd>?</kbd> 弹出本帮助</div>
       <div class="kbd-row"><kbd>Shift</kbd>+点击 任务卡片 多选</div>
+      <div class="kbd-row"><kbd>Ctrl</kbd>+<kbd>V</kbd> 粘贴图片/URL 创建任务</div>
     </div>
   </div>
 </div>
@@ -374,5 +408,23 @@
 <div class="toast-host" id="toast-host" aria-live="polite" aria-atomic="false"></div>
 <!-- 兼容旧逻辑的隐藏 toast -->
 <div class="toast hidden" id="toast" aria-hidden="true"></div>
+
+<!-- 全屏拖放遮罩(拖文件进窗口时显示) -->
+<div class="dropzone-overlay hidden" id="dropzone-overlay" aria-hidden="true">
+  <div class="dzo-card">
+    <div class="dzo-icon" aria-hidden="true">⬇</div>
+    <p class="dzo-title">松手即上传</p>
+    <p class="dzo-sub">图片 → 图片检测 · 视频 → 视频检测</p>
+  </div>
+</div>
+
+<!-- 移动端侧栏抽屉遮罩 -->
+<div class="drawer-backdrop hidden" id="drawer-backdrop" aria-hidden="true"></div>
+
+<!-- 拆分模块(顺序敏感:依赖 utils/state 的模块必须在 app.js 前定义) -->
+<script src="/toast.js"></script>
+<script src="/modal.js"></script>
+<script src="/dashboard.js"></script>
+<script src="/visibility.js"></script>
 <script src="/app.js"></script>
 </body></html>

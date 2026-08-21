@@ -119,6 +119,35 @@ impl EvalCache {
             r
         }
     }
+    /// Same as [`Self::get_or_eval`] but evaluates via
+    /// [`HaarFeature::eval_inbounds`] (clamping elided). Only call with
+    /// window positions where `x + ww <= ii_w && y + wh <= ii_h` — i.e. the
+    /// detector's sliding-window regime; results are bit-identical to
+    /// `get_or_eval` under that contract.
+    #[inline(always)]
+    pub(crate) fn get_or_eval_inbounds(
+        &mut self,
+        idx: usize,
+        f: &HaarFeature,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        ww: usize,
+        wh: usize,
+        ii_w: usize,
+        ii_h: usize,
+    ) -> f32 {
+        debug_assert!(x + ww <= ii_w && y + wh <= ii_h);
+        let slot = &mut self.responses[idx];
+        if slot.0 == self.gen {
+            slot.1
+        } else {
+            let r = f.eval_inbounds(ii, ri, x, y, ww, wh, ii_w, ii_h);
+            *slot = (self.gen, r);
+            r
+        }
+    }
     /// O(1) clear — just bump the generation counter. Old slots are
     /// considered stale and re-evaluated on next access.
     #[inline(always)]
@@ -150,6 +179,28 @@ impl EvalCache {
     #[inline]
     pub fn has_squared_iis(&self) -> bool {
         self.sum_sq_iis.is_some()
+    }
+
+    /// Clamp-free inner-normrect square sum for the detector's scan regime
+    /// (window strictly inside the image). `0` when no squared integral is
+    /// attached, mirroring [`Self::sum_sq_rect_sum`].
+    ///
+    /// # Safety contract
+    /// `x1 < x2 <= width` and `y1 < y2 <= height` on the attached squared
+    /// integral image (see [`SquaredIntegralImage::rect_sum_sq_unchecked`]).
+    #[inline]
+    pub(crate) unsafe fn sum_sq_rect_sum_unchecked(
+        &self,
+        x1: usize,
+        y1: usize,
+        x2: usize,
+        y2: usize,
+    ) -> u64 {
+        match self.sum_sq_iis.as_ref() {
+            // SAFETY: forwarded to the callee under the same contract.
+            Some(sq) => unsafe { sq.rect_sum_sq_unchecked(x1, y1, x2, y2) },
+            None => 0,
+        }
     }
 
     /// Set the squared integral image. Should be called once per frame from
@@ -259,6 +310,57 @@ impl Cascade {
         y: usize,
         cache: &mut EvalCache,
     ) -> Option<f32> {
+        self.classify_impl(ii, ri, x, y, cache, false, None)
+    }
+
+    /// `classify` for the detector's window-scan regime
+    /// (`x + window_w <= ii.width() && y + window_h <= ii.height()`):
+    /// identical arithmetic, but the integral-image rectangle reads skip
+    /// their clamping branches and the feature evaluation skips its
+    /// per-rect clamps. See [`HaarFeature::eval_inbounds`] for the safety
+    /// contract; results are bit-identical to `classify`.
+    pub(crate) fn classify_inbounds(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        cache: &mut EvalCache,
+    ) -> Option<f32> {
+        self.classify_impl(ii, ri, x, y, cache, true, None)
+    }
+
+    /// [`Self::classify_inbounds`] with the inner-normrect `(sum, sum_sq)`
+    /// pair supplied by the caller — the detector's variance pre-filter
+    /// already computes exactly these two rectangle sums, so the cascade's
+    /// `varianceNormFactor` reuses them instead of reading the corners a
+    /// second time. `sums` must equal
+    /// `(ii.rect_sum(x+1, y+1, x+ww-1, y+wh-1), sq.rect_sum_sq(same))`;
+    /// inside the scan regime the clamped and unchecked reads are identical,
+    /// so the result is bit-identical to `classify`.
+    pub(crate) fn classify_inbounds_with_sums(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        cache: &mut EvalCache,
+        sums: (u64, u64),
+    ) -> Option<f32> {
+        debug_assert!(x + self.window_w <= ii.width() && y + self.window_h <= ii.height());
+        self.classify_impl(ii, ri, x, y, cache, true, Some(sums))
+    }
+
+    fn classify_impl(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        cache: &mut EvalCache,
+        inbounds: bool,
+        sums: Option<(u64, u64)>,
+    ) -> Option<f32> {
         let ww = self.window_w;
         let wh = self.window_h;
         // OpenCV's variance normalization: compute over the inner rect
@@ -272,9 +374,24 @@ impl Cascade {
         let nx2 = nx1 + nw;
         let ny2 = ny1 + nh;
         let nw_area = (nw as f64) * (nh as f64);
-        let sum_in = ii.rect_sum(nx1, ny1, nx2, ny2);
+        let (sum_in, sum_sq_in) = if let Some((s, ss)) = sums {
+            (s, ss)
+        } else if inbounds {
+            debug_assert!(x + ww <= ii.width() && y + wh <= ii.height());
+            // SAFETY: the normrect is the inner (ww-2)×(wh-2) rect of a
+            // window that fits the image, so it is strictly inside the table.
+            let s = unsafe { ii.rect_sum_unchecked(nx1, ny1, nx2, ny2) };
+            let sq = match cache.sum_sq_iis.as_ref() {
+                Some(sq) => unsafe { sq.rect_sum_sq_unchecked(nx1, ny1, nx2, ny2) },
+                None => 0,
+            };
+            (s, sq)
+        } else {
+            let s = ii.rect_sum(nx1, ny1, nx2, ny2);
+            let sq = cache.sum_sq_rect_sum(nx1, ny1, nx2, ny2);
+            (s, sq)
+        };
         let variance_norm_factor: f32 = if cache.has_squared_iis() {
-            let sum_sq_in = cache.sum_sq_rect_sum(nx1, ny1, nx2, ny2);
             // OpenCV variance: var = E[X²] - E[X]² = (sum_sq / N) - (sum / N)²
             // Multiplying by N² gives the scale-invariant numerator we compare
             // against the integral-image accumulator widths.
@@ -302,18 +419,33 @@ impl Cascade {
         for stage in &self.stages {
             let mut stage_sum: f32 = 0.0;
             for w in &stage.weak_features {
-                let raw = cache.get_or_eval(
-                    w.feature_index as usize,
-                    &self.features[w.feature_index as usize],
-                    ii,
-                    ri,
-                    x,
-                    y,
-                    ww,
-                    wh,
-                    ii_w,
-                    ii_h,
-                );
+                let raw = if inbounds {
+                    cache.get_or_eval_inbounds(
+                        w.feature_index as usize,
+                        &self.features[w.feature_index as usize],
+                        ii,
+                        ri,
+                        x,
+                        y,
+                        ww,
+                        wh,
+                        ii_w,
+                        ii_h,
+                    )
+                } else {
+                    cache.get_or_eval(
+                        w.feature_index as usize,
+                        &self.features[w.feature_index as usize],
+                        ii,
+                        ri,
+                        x,
+                        y,
+                        ww,
+                        wh,
+                        ii_w,
+                        ii_h,
+                    )
+                };
                 let value = raw * variance_norm_factor;
                 let v = if value < w.threshold {
                     w.left_val
@@ -465,5 +597,92 @@ impl Cascade {
             stages,
             stage_bias: 0.0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::haar::params::demo_face_cascade;
+    use crate::image::GrayImage;
+    use crate::integral::SquaredIntegralImage;
+
+    /// Deterministic pseudo-random image (LCG) so the test never flakes.
+    fn lcg_image(w: usize, h: usize) -> GrayImage {
+        let mut img = GrayImage::new(w, h);
+        let mut s = 0x1234_ABCDu32;
+        for y in 0..h {
+            for x in 0..w {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                img[(x, y)] = (s >> 24) as u8;
+            }
+        }
+        img
+    }
+
+    /// `classify_inbounds` must be bit-identical to `classify` for every
+    /// window inside the scan regime, both with and without a squared
+    /// integral image attached (the two variance-normalisation paths).
+    #[test]
+    fn classify_inbounds_matches_classify_bit_for_bit() {
+        let (w, h) = (64usize, 48usize);
+        let img = lcg_image(w, h);
+        let ii = IntegralImage::from_gray(&img);
+        let ri = RotatedIntegralImage::from_gray(&img);
+        let cascade = demo_face_cascade();
+
+        for attach_sq in [false, true] {
+            let mut c1 = EvalCache::new(cascade.features.len());
+            let mut c2 = EvalCache::new(cascade.features.len());
+            if attach_sq {
+                let sq = SquaredIntegralImage::from_gray(&img);
+                c1.set_squared_iis(sq.clone());
+                c2.set_squared_iis(sq);
+            }
+            for y in [0usize, 1, 5, 13] {
+                for x in [0usize, 2, 9, 24] {
+                    let a = cascade.classify(&ii, &ri, x, y, &mut c1);
+                    let b = cascade.classify_inbounds(&ii, &ri, x, y, &mut c2);
+                    match (a, b) {
+                        (Some(sa), Some(sb)) => assert_eq!(
+                            sa.to_bits(),
+                            sb.to_bits(),
+                            "score mismatch at ({x},{y}) attach_sq={attach_sq}"
+                        ),
+                        (None, None) => {}
+                        other => {
+                            panic!("accept mismatch at ({x},{y}) attach_sq={attach_sq}: {other:?}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The generation-counter cache must invalidate between windows: two
+    /// different window positions must not reuse each other's responses.
+    #[test]
+    fn eval_cache_invalidates_between_windows() {
+        let img = lcg_image(48, 32);
+        let ii = IntegralImage::from_gray(&img);
+        let ri = RotatedIntegralImage::from_gray(&img);
+        let cascade = demo_face_cascade();
+        let mut cache = EvalCache::new(cascade.features.len());
+
+        let with_cache = cascade.classify(&ii, &ri, 0, 0, &mut cache);
+        // A fresh cache (no cross-window reuse) must agree.
+        let mut fresh = EvalCache::new(cascade.features.len());
+        let without = cascade.classify(&ii, &ri, 0, 0, &mut fresh);
+        assert_eq!(
+            with_cache.map(|s| s.to_bits()),
+            without.map(|s| s.to_bits())
+        );
+
+        // Different window, same shared cache — must not return the first
+        // window's cached responses.
+        let a = cascade.classify(&ii, &ri, 5, 3, &mut cache);
+        let mut fresh2 = EvalCache::new(cascade.features.len());
+        let b = cascade.classify(&ii, &ri, 5, 3, &mut fresh2);
+        assert_eq!(a.map(|s| s.to_bits()), b.map(|s| s.to_bits()));
     }
 }

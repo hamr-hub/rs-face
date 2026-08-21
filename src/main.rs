@@ -331,9 +331,9 @@ fn main() {
         0.0
     };
     println!(
-        "[rs-face] done: {} frames ({} with face), {} detections, wall {:.2}s, throughput {:.2} fps",
+        "[rs-face] done: {} frames ({} with face), {} detections, wall {:.2}s, throughput {:.2} fps, detect avg {:.2} ms/frame",
         stats.frames_processed, stats.frames_with_face, stats.total_detections,
-        wall_ms as f32 / 1000.0, fps
+        wall_ms as f32 / 1000.0, fps, stats.detect_ms_avg
     );
     println!("[rs-face] output: {}/", out.display());
 }
@@ -428,6 +428,7 @@ fn run_cnn_pipeline(
                     score: d.confidence,
                 })
                 .collect(),
+            detect_ms: 0.0,
         };
         let fname = rsface::output::write_annotated_png(out_dir, &rec, &rgb)?;
         let mut rec = rec;
@@ -449,6 +450,7 @@ fn run_cnn_pipeline(
             frames_with_face,
             total_detections,
             elapsed_ms,
+            detect_ms_total: 0.0,
         },
     )?;
     Ok(PipelineStats {
@@ -456,6 +458,7 @@ fn run_cnn_pipeline(
         frames_with_face,
         total_detections,
         elapsed_ms,
+        detect_ms_avg: 0.0,
     })
 }
 
@@ -517,6 +520,7 @@ where
             width: w,
             height: h,
             detections: dets,
+            detect_ms: 0.0,
         };
         let fname = rsface::output::write_annotated_png(out_dir, &rec, &rgb)?;
         let mut rec = rec;
@@ -536,6 +540,7 @@ where
             frames_with_face,
             total_detections,
             elapsed_ms,
+            detect_ms_total: 0.0,
         },
     )?;
     Ok(PipelineStats {
@@ -543,5 +548,6 @@ where
         frames_with_face,
         total_detections,
         elapsed_ms,
+        detect_ms_avg: 0.0,
     })
 }

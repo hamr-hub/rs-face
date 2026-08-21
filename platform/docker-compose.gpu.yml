@@ -24,6 +24,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+    mem_limit: ${RUSTFS_MEM_LIMIT:-1g}
     restart: unless-stopped
 
   postgres:
@@ -42,6 +43,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+    mem_limit: ${PG_MEM_LIMIT:-512m}
     restart: unless-stopped
 
   server:
@@ -74,13 +76,30 @@ services:
       LOCAL_MEDIA_DIR: /var/rsface-media
       RSFACE_USE_GPU: ${RSFACE_USE_GPU:-1}
       MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-4}
+      # 背压 + 超时(与 CPU 版对齐)
+      MAX_QUEUE_DEPTH: ${MAX_QUEUE_DEPTH:-64}
+      JOB_TIMEOUT_SECS: ${JOB_TIMEOUT_SECS:-600}
+      JOB_TIMEOUT_VIDEO_SECS: ${JOB_TIMEOUT_VIDEO_SECS:-3600}
+      JOB_TIMEOUT_STREAM_SECS: ${JOB_TIMEOUT_STREAM_SECS:-0}
+      SHUTDOWN_GRACE_SECS: ${SHUTDOWN_GRACE_SECS:-120}
+      CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-}
     deploy:
       resources:
+        # 资源限制:GPU 容器跑 4 并发,给 4G;OOM 重启而非拖垮宿主。
+        limits:
+          memory: ${SERVER_MEM_LIMIT:-4g}
         reservations:
           devices:
             - driver: nvidia
               count: all
               capabilities: [gpu, utility, compute]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/api/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: ${SERVER_STOP_GRACE:-2m30s}
     ports:
       - "20080:8080"
     volumes:

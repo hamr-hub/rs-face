@@ -1,8 +1,13 @@
-/* rs-face Platform · 零依赖 vanilla JS · 模块:api / utils / theme / toast / sidebar / preview / upload / sse / keys / batch / dashboard
- * 优化:虚拟滚动(±6 overscan) · 缩略图 IntersectionObserver 懒加载 · SSE 帧事件 throttleRaf 批渲染
- *     · <img> 全部 loading="lazy" decoding="async" · 无 setInterval 长轮询
+/* rs-face Platform · 零依赖 vanilla JS · 主模块:api / utils / theme / sidebar / preview / upload / sse / keys / batch
+ * 拆分模块(经典 script,共享全局词法作用域,须在 app.js 之前加载):
+ *   toast.js(多级 toast) · modal.js(confirmModal / modalKit / ctxMenu) · dashboard.js(仪表板) · visibility.js(可见性治理)
+ * 优化:虚拟滚动(key 复用 + 签名跳过重建 + 元素缓存) · 缩略图 IntersectionObserver 懒加载 · SSE 帧事件 throttleRaf 批渲染
+ *     · <img> 全部 loading="lazy" decoding="async" · 无 setInterval 长轮询(除 KPI 2s,受 visibility 治理)
  * 增强(v0.2):批量选 + 批量删/归档/导出 · 主题切换(暗/亮/自动) · 智能搜索(正则 + 时间范围)
- *            · 仪表板 · 多级 toast · 确认 modal · a11y + 键盘导航 */
+ *            · 仪表板 · 多级 toast · 确认 modal · a11y + 键盘导航
+ * 增强(v0.3):任务置顶 · 右键上下文菜单 · j/k 键盘导航 · 全屏拖放遮罩 · 粘贴 URL 建任务
+ *            · 页面不可见暂停轮询/SSE · 引导式空状态 · 移动端适配(抽屉侧栏 + KPI 横滚)
+ */
 'use strict';
 
 const api = {
@@ -64,6 +69,7 @@ const state = {
   batchMode: false, selectedIds: new Set(),
   themePref: 'auto',
   deletedIds: new Set(),
+  pinIds: new Set(),   // 置顶任务 id 集(持久化到 localStorage)
   config: null,
   // 人脸筛选
   faceScoreMin: 0,
@@ -85,6 +91,7 @@ const prefStore = (() => {
     annoVisible: 'rsface.annoVisible',
     searchMode: 'rsface.search.mode',
     searchRange: 'rsface.search.range',
+    pinIds: 'rsface.pinIds',
   };
   function read(key, fallback) {
     try { const v = localStorage.getItem(key); return v == null ? fallback : v; } catch { return fallback; }
@@ -101,6 +108,13 @@ const prefStore = (() => {
     if (mode && ['plain', 'regex'].indexOf(mode) >= 0) state.searchMode = mode;
     const range = read(KEYS.searchRange, null);
     if (range && ['all', '1h', '24h', '7d', '30d'].indexOf(range) >= 0) state.searchRange = range;
+    const pins = read(KEYS.pinIds, null);
+    if (pins) {
+      try {
+        const arr = JSON.parse(pins);
+        if (Array.isArray(arr)) state.pinIds = new Set(arr.filter(x => typeof x === 'string'));
+      } catch {}
+    }
   }
   return { KEYS, read, write, applyAll };
 })();
@@ -158,99 +172,7 @@ const theme = (() => {
   return { init, applyPref, cycle };
 })();
 
-const toast = (() => {
-  const MAX_VISIBLE = 4; // 超过则折叠成 "+N more"
-  const host = () => utils.$('#toast-host');
-  const queue = []; // {msg, kind, expireAt}
-  const livingEls = new Set(); // 当前显示的 DOM
-
-  function ensurePill() {
-    const h = host(); if (!h) return null;
-    let pill = h.querySelector('.toast-pill');
-    if (!pill) {
-      pill = document.createElement('div');
-      pill.className = 'toast-item toast-pill';
-      pill.setAttribute('role', 'status');
-      const msgEl = document.createElement('span'); msgEl.className = 'toast-msg pill-msg';
-      const closeEl = document.createElement('button'); closeEl.className = 'toast-x'; closeEl.setAttribute('aria-label', '展开'); closeEl.textContent = '↗';
-      pill.appendChild(msgEl); pill.appendChild(closeEl);
-      // 默认隐藏
-      pill.style.display = 'none';
-      h.appendChild(pill);
-      closeEl.addEventListener('click', () => {
-        // 点击展开:把所有 queue 中未过期项立即显示
-        const now = Date.now();
-        const next = queue.filter(q => q.expireAt > now);
-        queue.length = 0;
-        next.forEach(q => show(q.msg, q.kind, q.expireAt - now));
-        pill.style.display = 'none';
-      });
-    }
-    return pill;
-  }
-
-  function refreshPill() {
-    const pill = ensurePill(); if (!pill) return;
-    const msgEl = pill.querySelector('.pill-msg');
-    if (queue.length > 0) {
-      msgEl.textContent = `⊕ ${queue.length} 条已折叠`;
-      pill.style.display = '';
-    } else {
-      pill.style.display = 'none';
-    }
-  }
-
-  function show(msg, kind = 'info', ms = 3500) {
-    const h = host(); if (!h) return;
-    // 超过可见上限 → 入队列 + 维护 pill
-    if (livingEls.size >= MAX_VISIBLE) {
-      queue.push({ msg, kind, expireAt: Date.now() + ms });
-      refreshPill();
-      return;
-    }
-    const el = document.createElement('div');
-    el.className = 'toast-item ' + kind;
-    el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
-    const msgEl = document.createElement('span'); msgEl.className = 'toast-msg'; msgEl.textContent = msg;
-    const closeEl = document.createElement('button'); closeEl.className = 'toast-x'; closeEl.setAttribute('aria-label', '关闭'); closeEl.textContent = '×';
-    el.appendChild(msgEl); el.appendChild(closeEl);
-    h.appendChild(el);
-    livingEls.add(el);
-    const close = () => {
-      el.classList.add('leaving');
-      setTimeout(() => { el.remove(); livingEls.delete(el); refreshPill(); }, 200);
-    };
-    closeEl.addEventListener('click', close);
-    setTimeout(close, ms);
-  }
-  return {
-    info:    (m, ms) => show(m, 'info', ms || 3000),
-    success: (m, ms) => show(m, 'success', ms || 3000),
-    warn:    (m, ms) => show(m, 'warn', ms || 8000),
-    error:   (m, ms) => show(m, 'error', ms || 5000),
-  };
-})();
-
-const confirmModal = (() => {
-  let _resolve = null;
-  function open(title, msg) {
-    const m = utils.$('#modal-confirm'); if (!m) return Promise.resolve(false);
-    utils.$('#modal-confirm-title').textContent = title || '确认';
-    utils.$('#modal-confirm-msg').textContent = msg || '确定?';
-    m.classList.remove('hidden');
-    if (_resolve) _resolve(false);
-    return new Promise(res => { _resolve = res; });
-  }
-  function close(result) {
-    const m = utils.$('#modal-confirm'); if (m) m.classList.add('hidden');
-    if (_resolve) { const r = _resolve; _resolve = null; r(result); }
-  }
-  function init() {
-    utils.$('#confirm-ok').addEventListener('click', () => close(true));
-    utils.$('#confirm-cancel').addEventListener('click', () => close(false));
-  }
-  return { open, close, init };
-})();
+// toast 模块已拆分至 toast.js(本文件之前加载)
 
 const batch = (() => {
   function isActive() { return state.batchMode; }
@@ -397,7 +319,12 @@ const kpi = (() => {
 
   function init() {
     refresh();
-    setInterval(refresh, 2000);
+    // timer 交给 visibilityCtl 管理:页面不可见时暂停,恢复时立即刷新一次
+    const timer = setInterval(() => {
+      if (visibilityCtl.isHidden()) return; // 双保险(visibilitychange 兜底)
+      refresh();
+    }, 2000);
+    visibilityCtl.bindKpiTimer(timer);
   }
 
   return { init, refresh };
@@ -486,6 +413,14 @@ const sidebar = (() => {
         jobs = jobs.filter(j => (j.display_name || '').toLowerCase().includes(ql) || (j.id || '').toLowerCase().includes(ql));
       }
     }
+    // 置顶优先(pin 状态来自 prefStore.pinIds),其余保持原相对顺序
+    if (state.pinIds && state.pinIds.size) {
+      jobs = jobs.slice().sort((a, b) => {
+        const pa = state.pinIds.has(a.id) ? 0 : 1;
+        const pb = state.pinIds.has(b.id) ? 0 : 1;
+        return pa - pb; // 稳定排序:相等时保持原顺序
+      });
+    }
     return jobs;
   }
 
@@ -533,6 +468,13 @@ const sidebar = (() => {
     }
   }
 
+  /**
+   * 虚拟滚动渲染路径(v0.3 性能修复):
+   *  - 元素按 id(key)复用,只在缺失时新建
+   *  - updateItem 不再全量 innerHTML 重建:签名(itemSig)相同直接跳过,
+   *    变化时仅 patch 文本/类名/src,滚动中零重排
+   *  - 可见区外的元素从 DOM 移除(与之前一致)
+   */
   function renderVp() {
     const list = filtered(), total = list.length;
     const vp = state.listVpEl, scrollTop = state.listScrollEl.scrollTop, vpH = state.listScrollEl.clientHeight;
@@ -544,7 +486,8 @@ const sidebar = (() => {
       const j = list[i], id = 'sb-' + j.id;
       keep.add(id);
       let el = vp.querySelector('#' + id);
-      if (!el) { el = makeItem(j); vp.appendChild(el); } else updateItem(el, j);
+      if (!el) { el = makeItem(j); vp.appendChild(el); }
+      updateItem(el, j);
       el.style.transform = `translateY(${i * ROW_H}px)`;
     }
     Array.from(vp.children).forEach(c => { if (!keep.has(c.id)) c.remove(); });
@@ -565,39 +508,155 @@ const sidebar = (() => {
     if (j.id === state.currentJobId) el.classList.add('active');
     if (state.selectedIds.has(j.id)) el.classList.add('selected');
     el.tabIndex = -1;
+    const id = j.id; // 元素按 id 复用,job 数据以 id 实时查
+    // 事件只绑一次(元素被复用,不再随 updateItem 重建而丢失)
     el.addEventListener('click', (e) => {
-      if (batch.isActive() || e.shiftKey) { batch.toggle(j.id); return; }
-      preview.open(j.id);
+      // 移动端抽屉:点选任务后自动收起
+      const sb = utils.$('#sidebar');
+      if (sb && sb.classList.contains('drawer-open')) {
+        sb.classList.remove('drawer-open');
+        const back = utils.$('#drawer-backdrop');
+        if (back) back.classList.add('hidden');
+        const btn = utils.$('#tb-drawer');
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+      }
+      if (batch.isActive() || e.shiftKey) { batch.toggle(id); return; }
+      preview.open(id);
     });
-    updateItem(el, j);
+    // 右键上下文菜单(打开/置顶/重试/复制ID/删除)
+    el.addEventListener('contextmenu', (e) => {
+      if (ctxMenuHidden()) return;
+      showJobCtxMenu(e, id);
+    });
+    // 结构一次搭好,后续 updateItem 只 patch 内容
+    el.innerHTML = `
+      <div class="sb-check" aria-hidden="true"><input type="checkbox" tabindex="-1"></div>
+      <div class="sb-thumb"></div>
+      <div class="sb-info">
+        <div class="sb-name"></div>
+        <div class="sb-meta">
+          <span class="sb-dot"></span>
+          <span class="sb-status"></span><span>·</span>
+          <span class="sb-frames"></span><span>·</span>
+          <span class="sb-faces"></span>
+        </div>
+      </div>
+      <button class="sb-pin-btn" type="button" tabindex="-1" aria-label="置顶/取消置顶" title="置顶/取消置顶">📌</button>`;
+    el.querySelector('.sb-pin-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePin(id);
+    });
+    el._jobId = id;
     return el;
   }
 
+  /** 计算卡片内容的轻量签名:这些字段变化才需要 patch DOM。 */
+  function itemSig(j) {
+    const st = j.stats || {};
+    return [
+      j.id, j.status, j.display_name || '',
+      st.frames_processed || 0,
+      j.face_count || 0,
+      state.selectedIds.has(j.id) ? 1 : 0,
+      j.id === state.currentJobId ? 1 : 0,
+      state.pinIds.has(j.id) ? 1 : 0,
+      (j.cover_key || j.original_key || ''),
+      state.search,
+    ].join('|');
+  }
+
   function updateItem(el, j) {
+    const sig = itemSig(j);
+    if (el._sig === sig) return; // 内容未变:滚动中零 DOM 操作
+    el._sig = sig;
     const st = j.stats || {}, fp = st.frames_processed || 0, fc = j.face_count || 0;
-    // For video/stream jobs prefer `cover_key` (first annotated frame as PNG)
-    // over `original_key` which points to the raw .mp4 and would render as
-    // a broken <img>. For image jobs both fields are the same.
+    // 缩略图:运行中显示占位符;视频/流优先 cover_key(首帧标注 PNG)
     const thumbSrc = (j.cover_key || j.original_key) ? utils.mediaUrl(j.cover_key || j.original_key) : null;
-    let thumbHtml;
-    if (j.status === 'running' || j.status === 'queued') thumbHtml = `<div class="sb-thumb"><div style="opacity:.6">⏳</div></div>`;
-    else if (thumbSrc) thumbHtml = `<div class="sb-thumb"><img data-src="${utils.escapeHtml(thumbSrc)}" alt=""></div>`;
-    else thumbHtml = `<div class="sb-thumb"><div>·</div></div>`;
-    el.innerHTML = `
-      <div class="sb-check" aria-hidden="true"><input type="checkbox" ${state.selectedIds.has(j.id) ? 'checked' : ''} tabindex="-1"></div>
-      ${thumbHtml}
-      <div class="sb-info">
-        <div class="sb-name" title="${utils.escapeHtml(j.display_name || j.id)}">${utils.highlight(j.display_name || j.id, state.search)}</div>
-        <div class="sb-meta">
-          <span class="sb-dot ${j.status || ''}"></span>
-          <span>${j.status || '·'}</span><span>·</span>
-          <span>${fp} 帧</span><span>·</span>
-          <span>${fc} 脸</span>
-        </div>
-      </div>`;
+    const thumb = el.querySelector('.sb-thumb');
+    if (thumb) {
+      let inner;
+      if (j.status === 'running' || j.status === 'queued') inner = '<div style="opacity:.6">⏳</div>';
+      else if (thumbSrc) inner = `<img data-src="${utils.escapeHtml(thumbSrc)}" alt="">`;
+      else inner = '<div>·</div>';
+      if (thumb._inner !== inner) {
+        thumb._inner = inner;
+        thumb.innerHTML = inner;
+        const img = thumb.querySelector('img[data-src]');
+        if (img) {
+          // 骨架屏保持到图片真正 load(而非 observer 刚赋 src 时)
+          img.addEventListener('load', () => img.classList.add('is-loaded'), { once: true });
+          img.addEventListener('error', () => img.classList.add('is-loaded'), { once: true });
+          state.faceCardObserver.observe(img);
+        }
+      }
+    }
+    const nameEl = el.querySelector('.sb-name');
+    if (nameEl) {
+      const html = utils.highlight(j.display_name || j.id, state.search);
+      if (nameEl._html !== html) { nameEl._html = html; nameEl.innerHTML = html; nameEl.title = j.display_name || j.id; }
+    }
+    const statusEl = el.querySelector('.sb-status');
+    if (statusEl && statusEl.textContent !== (j.status || '·')) statusEl.textContent = j.status || '·';
+    const framesEl = el.querySelector('.sb-frames');
+    if (framesEl && framesEl.textContent !== fp + ' 帧') framesEl.textContent = fp + ' 帧';
+    const facesEl = el.querySelector('.sb-faces');
+    if (facesEl && facesEl.textContent !== fc + ' 脸') facesEl.textContent = fc + ' 脸';
+    const dot = el.querySelector('.sb-dot');
+    if (dot) dot.className = 'sb-dot ' + (j.status || '');
     el.classList.toggle('selected', state.selectedIds.has(j.id));
-    const img = el.querySelector('img[data-src]');
-    if (img) state.faceCardObserver.observe(img);
+    const check = el.querySelector('.sb-check input');
+    if (check) check.checked = state.selectedIds.has(j.id);
+    const pinned = state.pinIds.has(j.id);
+    el.classList.toggle('pinned', pinned);
+    const pinBtn = el.querySelector('.sb-pin-btn');
+    if (pinBtn) {
+      pinBtn.textContent = pinned ? '📍' : '📌';
+      pinBtn.title = pinned ? '取消置顶' : '置顶此任务';
+      pinBtn.setAttribute('aria-label', pinned ? '取消置顶' : '置顶此任务');
+      pinBtn.setAttribute('aria-pressed', pinned ? 'true' : 'false');
+    }
+  }
+
+  /** 置顶状态持久化(pinIds 存 localStorage)。 */
+  function togglePin(id) {
+    if (!id) return;
+    if (state.pinIds.has(id)) { state.pinIds.delete(id); toast.info('已取消置顶'); }
+    else { state.pinIds.add(id); toast.success('已置顶'); }
+    try {
+      localStorage.setItem(prefStore.KEYS.pinIds, JSON.stringify(Array.from(state.pinIds)));
+    } catch {}
+    // 让所有已渲染卡片签名失效,强制一次 patch
+    utils.$$('.sb-item', state.listVpEl).forEach(el => { el._sig = null; });
+    render();
+  }
+
+  /** 右键菜单是否被禁用(例如 modal 打开时)。 */
+  function ctxMenuHidden() {
+    return modalKit.anyOpen();
+  }
+
+  /** 任务卡片右键菜单:打开/置顶/重试/复制ID/删除。 */
+  function showJobCtxMenu(e, jobId) {
+    const job = (state.jobs || []).find(x => x.id === jobId);
+    if (!job) return;
+    const pinned = state.pinIds.has(jobId);
+    // 服务端限制:image 任务 retry 会 400,只在可重试时提供该菜单项
+    const canRetry = !!(job.original_input && job.kind !== 'image');
+    const items = [
+      { label: '打开任务', hint: 'Enter', onPick: () => preview.open(jobId) },
+      { label: pinned ? '取消置顶' : '置顶任务', hint: pinned ? '📍' : '📌', onPick: () => togglePin(jobId) },
+      { label: '复制任务 ID', hint: job.id.slice(0, 10) + '…', onPick: () => {
+          navigator.clipboard.writeText(job.id).then(
+            () => toast.success('已复制任务 ID'),
+            () => toast.error('复制失败'),
+          );
+        } },
+    ];
+    if (canRetry) {
+      items.push({ label: '重跑任务', hint: '↻', onPick: () => retryJobById(jobId) });
+    }
+    items.push({ label: '删除任务', hint: 'Delete', danger: true, onPick: () => deleteJobById(jobId) });
+    ctxMenu.show(e, items);
   }
 
   function setActive(id) {
@@ -648,7 +707,7 @@ const sidebar = (() => {
     preview.open(list[i].id);
   }
 
-  return { init, setJobs, upsertJob, render, setActive, nextItem, gotoOffset, filtered };
+  return { init, setJobs, upsertJob, render, setActive, nextItem, gotoOffset, filtered, togglePin };
 })();
 
 const preview = (() => {
@@ -660,9 +719,10 @@ const preview = (() => {
   const hideHint = () => utils.$('#pv-stage-hint').classList.add('hidden');
 
   function resetMedia() {
-    const img = utils.$('#pv-img'); if (img) { img.removeAttribute('src'); img.classList.add('hidden'); }
+    const img = utils.$('#pv-img'); if (img) { img.removeAttribute('src'); img.classList.add('hidden'); img.classList.remove('is-loaded', 'is-blur'); }
     const vid = utils.$('#pv-vid'); if (vid) { vid.removeAttribute('src'); vid.classList.add('hidden'); }
     const db = utils.$('#pv-double'); if (db) db.classList.add('hidden');
+    const skel = utils.$('#pv-stage-skel'); if (skel) skel.classList.add('hidden');
     const banner = utils.$('#pv-error-banner'); if (banner) { banner.classList.add('hidden'); banner.textContent = ''; }
     clearOverlay();
   }
@@ -916,8 +976,23 @@ const preview = (() => {
     // 优先用 frame.original_key;没有时降级到 job.original_key(error 时只有这个)
     const src = (first && first.original_key) || job.original_key;
     if (src) {
-      img.onload = () => { hideHint(); if (first && first.annotated_key) drawOverlay(job, first, img); };
-      img.onerror = () => { showHint('原图加载失败'); clearOverlay(); };
+      img.onload = () => {
+        hideHint();
+        img.classList.add('is-loaded');       // blur-up:清晰后淡入
+        const skel = utils.$('#pv-stage-skel');
+        if (skel) skel.classList.add('hidden');
+        if (first && first.annotated_key) drawOverlay(job, first, img);
+      };
+      img.onerror = () => {
+        showHint('原图加载失败'); clearOverlay();
+        const skel = utils.$('#pv-stage-skel');
+        if (skel) skel.classList.add('hidden');
+      };
+      // blur-up:先骨架屏,src 变化时重置加载态
+      const skel = utils.$('#pv-stage-skel');
+      if (skel) skel.classList.remove('hidden');
+      img.classList.remove('is-loaded');
+      img.classList.add('is-blur');
       img.src = utils.mediaUrl(src);
     } else { img.classList.add('hidden'); showHint('无原图'); clearOverlay(); }
   }
@@ -1119,8 +1194,16 @@ const preview = (() => {
     }
     if (last.index === lastFrameIdx) return;
     lastFrameIdx = last.index;
-    img.onload = () => { hideHint(); drawOverlay(job, last, img); };
+    img.onload = () => {
+      hideHint();
+      img.classList.add('is-loaded');
+      const skel = utils.$('#pv-stage-skel');
+      if (skel) skel.classList.add('hidden');
+      drawOverlay(job, last, img);
+    };
     img.onerror = () => { showHint('原图加载失败'); };
+    img.classList.remove('is-loaded');
+    img.classList.add('is-blur');
     img.src = utils.mediaUrl(last.original_key) + (last.original_key && last.original_key.includes('?') ? '&' : '?') + 'v=' + last.index;
   }
 
@@ -1261,12 +1344,19 @@ const preview = (() => {
     card.innerHTML = `
       <div class="fc-img-wrap">
         <div class="fc-skel"></div>
-        <img loading="lazy" decoding="async" data-src="${utils.escapeHtml(utils.mediaUrl(rep.key))}" alt="face">
+        <img loading="lazy" decoding="async" data-src="${utils.escapeHtml(utils.mediaUrl(rep.key))}" alt="人脸缩略图">
         ${idxText ? `<div class="fc-idx">${idxText}</div>` : ''}
         <div class="fc-time">⏱ ${utils.fmtTime(rep.ts)}</div>
         ${members > 1 ? `<div class="fc-badge">×${members}</div>` : ''}
       </div>
       <div class="fc-score">score <span>${rep.score.toFixed(2)}</span></div>`;
+    // blur-up:img 加载完成后淡入 + 隐藏骨架屏
+    const img = card.querySelector('img');
+    if (img) img.addEventListener('load', () => {
+      img.classList.add('is-loaded');
+      const skel = card.querySelector('.fc-skel');
+      if (skel) skel.classList.add('is-done');
+    });
     return card;
   }
 
@@ -1336,7 +1426,7 @@ const upload = (() => {
     utils.$('#tb-settings').addEventListener('click', openSettings);
     utils.$('#tb-help').addEventListener('click', () => utils.$('#modal-help').classList.remove('hidden'));
     utils.$$('.new-type').forEach(b => b.addEventListener('click', () => selectType(b.dataset.type)));
-    utils.$$('[data-close]').forEach(el => el.addEventListener('click', closeAllModals));
+    // data-close 点击委托已由 modalKit.init() 统一处理
     setupDropzone('#dz-image', '#file-image', files => {
       if (files.length > 1) for (const f of files) submitImage(f); else submitImage(files[0]);
       closeAllModals();
@@ -1347,10 +1437,16 @@ const upload = (() => {
       if (!url) return toast.warn('请输入视频 URL');
       submitStream(url); closeAllModals();
     });
+    utils.$('#video-url').addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); utils.$('#video-url-go').click(); }
+    });
     utils.$('#stream-go').addEventListener('click', () => {
       const url = utils.$('#stream-url').value.trim();
       if (!url) return toast.warn('请输入流地址');
       submitStream(url); closeAllModals();
+    });
+    utils.$('#stream-url').addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); utils.$('#stream-go').click(); }
     });
     utils.$('#tb-search-opts').addEventListener('click', () => {
       utils.$('#modal-search-opts').classList.remove('hidden');
@@ -1383,7 +1479,7 @@ const upload = (() => {
 
   const openModal = () => { utils.$('#modal-new').classList.remove('hidden'); selectType('image'); };
   const openSettings = () => { utils.$('#modal-settings').classList.remove('hidden'); loadSettings(); };
-  const closeAllModals = () => utils.$$('.modal').forEach(m => m.classList.add('hidden'));
+  const closeAllModals = () => modalKit.closeAll();
   function selectType(t) {
     utils.$$('.new-type').forEach(b => {
       const on = b.dataset.type === t; b.classList.toggle('active', on);
@@ -1407,28 +1503,85 @@ const upload = (() => {
     input.addEventListener('change', () => { if (input.files.length) handler(Array.from(input.files)); input.value = ''; });
     zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
     zone.addEventListener('dragleave', e => { if (!zone.contains(e.relatedTarget)) zone.classList.remove('dragover'); });
-    zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('dragover'); });
-  }
-  function setupGlobalDrop() {
-    document.addEventListener('dragover', e => { if (e.dataTransfer) e.preventDefault(); });
-    document.addEventListener('drop', async e => {
+    // 修复(历史 bug):drop 到 modal 内 dropzone 也要真正上传(原来只 preventDefault)
+    zone.addEventListener('drop', e => {
       e.preventDefault();
-      if (!utils.$('#modal-new').classList.contains('hidden')) return;
-      if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
-      const files = Array.from(e.dataTransfer.files), t = files[0].type || '';
-      if (t.startsWith('image/')) for (const f of files) submitImage(f);
-      else if (t.startsWith('video/')) submitVideo(files[0]);
-      else toast.warn('不支持的文件类型: ' + t);
+      e.stopPropagation();
+      zone.classList.remove('dragover');
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+        handler(Array.from(e.dataTransfer.files));
+      }
     });
   }
+  /** 全屏拖放:dragenter 显示遮罩(#dropzone-overlay),drop 时按类型分发。 */
+  function setupGlobalDrop() {
+    let dragDepth = 0; // dragenter/leave 会成对触发,用计数避免闪烁
+    let hideTimer = null;
+    const overlay = () => utils.$('#dropzone-overlay');
+    const showOverlay = () => {
+      const o = overlay(); if (!o) return;
+      clearTimeout(hideTimer);
+      o.classList.remove('hidden');
+      o.setAttribute('aria-hidden', 'false');
+    };
+    const hideOverlay = () => {
+      const o = overlay(); if (!o) return;
+      hideTimer = setTimeout(() => { o.classList.add('hidden'); o.setAttribute('aria-hidden', 'true'); }, 60);
+    };
+    document.addEventListener('dragenter', e => {
+      if (!e.dataTransfer || Array.from(e.dataTransfer.types || []).indexOf('Files') < 0) return;
+      e.preventDefault();
+      dragDepth++;
+      // 新建 modal 已打开时,遮罩让位于 modal 内部的 dropzone
+      if (!utils.$('#modal-new').classList.contains('hidden')) return;
+      showOverlay();
+    });
+    document.addEventListener('dragover', e => {
+      if (e.dataTransfer) { e.preventDefault(); if (e.dataTransfer.dropEffect) e.dataTransfer.dropEffect = 'copy'; }
+    });
+    document.addEventListener('dragleave', e => {
+      if (!e.dataTransfer) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) hideOverlay();
+    });
+    document.addEventListener('drop', async e => {
+      e.preventDefault();
+      dragDepth = 0;
+      hideOverlay();
+      if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+      const files = Array.from(e.dataTransfer.files);
+      // modal 内的 dropzone 自己处理(z-index 更高,事件先到 modal)
+      if (!utils.$('#modal-new').classList.contains('hidden')) return;
+      const t = files[0].type || '';
+      if (t.startsWith('image/')) for (const f of files) submitImage(f);
+      else if (t.startsWith('video/')) submitVideo(files[0]);
+      else toast.warn('不支持的文件类型: ' + (t || '未知'));
+    });
+  }
+  /** 全局粘贴:图片文件 → 图片任务;http(s)/rtsp URL 文本 → 流任务。 */
   function setupGlobalPaste() {
     document.addEventListener('paste', async e => {
-      if (e.target && e.target.matches && e.target.matches('input, textarea')) return;
+      if (e.target && e.target.matches && e.target.matches('input, textarea, [contenteditable]')) return;
       const cd = e.clipboardData; if (!cd) return;
+      // 1) 剪贴板图片 → 直接建图片任务
       for (const it of cd.items || []) {
         if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
           const f = it.getAsFile(); if (f) { e.preventDefault(); submitImage(f); return; }
         }
+      }
+      // 2) 剪贴板文本是媒体 URL → 建流/视频任务
+      const text = (cd.getData && cd.getData('text')) || '';
+      const url = text.trim();
+      if (url && /^https?:\/\/\S+$/i.test(url) || (url && /^rtsp:\/\/\S+$/i.test(url))) {
+        // 图片扩展名 → 图片 URL 不支持直接建图(服务端只收文件),按流任务处理
+        e.preventDefault();
+        const isRtsp = url.startsWith('rtsp://');
+        if (!await confirmModal.open(
+          isRtsp ? '粘贴检测流地址' : '粘贴视频 URL',
+          `检测剪贴板中的地址:\n${url.slice(0, 120)}${url.length > 120 ? '…' : ''}\n\n是否创建${isRtsp ? '直播流' : '视频'}检测任务?`,
+          { okText: '创建任务' },
+        )) return;
+        submitStream(url);
       }
     });
   }
@@ -1463,7 +1616,7 @@ const upload = (() => {
       sidebar.upsertJob(job); preview.open(job.id);
     } catch (e) { toast.error('启动失败: ' + e.message); }
   }
-  return { init, openModal, openSettings };
+  return { init, openModal, openSettings, submitImage: f => submitImage(f), submitStream: u => submitStream(u) };
 })();
 
 const sse = (() => {
@@ -1516,6 +1669,16 @@ const sse = (() => {
       let msg; try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.type === 'frame') scheduleRefresh();
       else if (msg.type === 'heartbeat') applyHeartbeat(msg);
+      else if (msg.type === 'detector') {
+        // 后端在任务启动时推 detector 事件:把 algo 记进 job.stats,
+        // 侧栏算法过滤 chips(stats.algo)依赖它。
+        if (state.currentJob) {
+          if (!state.currentJob.stats) state.currentJob.stats = {};
+          state.currentJob.stats.algo = msg.algo || msg.mode || state.currentJob.stats.algo;
+          sidebar.upsertJob({ id: state.currentJob.id, stats: { ...state.currentJob.stats } });
+          preview.renderDispatch(state.currentJob);
+        }
+      }
       else if (msg.type === 'done' || msg.type === 'cancelled' || msg.type === 'error') {
         detach(); scheduleRefresh();
         if (msg.type === 'done') toast.success('任务完成');
@@ -1767,92 +1930,7 @@ const lightbox = (() => {
   return { init, open, close };
 })();
 
-const dashboard = (() => {
-  async function compute() {
-    const jobs = await api.listJobs();
-    const total = jobs.length;
-    let running = 0, done = 0, err = 0, faces = 0, ms = 0;
-    const algoCount = {};
-    const buckets = new Array(24).fill(0);
-    const now = Date.now();
-    for (const j of jobs) {
-      if (j.status === 'running' || j.status === 'queued') running++;
-      else if (j.status === 'done') done++;
-      else if (j.status === 'error' || j.status === 'cancelled') err++;
-      faces += j.face_count || 0;
-      ms += (j.stats && j.stats.elapsed_ms) || 0;
-      const algo = (j.kind || 'image');
-      algoCount[algo] = (algoCount[algo] || 0) + (j.face_count || 1);
-      if (j.created_ms) {
-        const hoursAgo = Math.floor((now - j.created_ms) / (60 * 60 * 1000));
-        if (hoursAgo >= 0 && hoursAgo < 24) buckets[23 - hoursAgo] += 1;
-      }
-    }
-    if (state.config && Array.isArray(state.config.available_algos)) {
-      for (const a of state.config.available_algos) {
-        if (!(a in algoCount)) algoCount[a] = 0;
-      }
-    }
-    return { total, running, done, err, faces, ms, algoCount, buckets };
-  }
-
-  function renderStats(d) {
-    const fmt = ms => ms < 1000 ? `${ms} ms` : ms < 60000 ? `${(ms/1000).toFixed(1)} s` : `${(ms/60000).toFixed(1)} m`;
-    const tiles = [
-      { k: '总任务', v: d.total, c: 'accent' },
-      { k: '进行中', v: d.running, c: 'warn' },
-      { k: '已完成', v: d.done, c: 'success' },
-      { k: '错误', v: d.err, c: 'danger' },
-      { k: '人脸总数', v: d.faces, c: 'accent' },
-      { k: '总检测时长', v: fmt(d.ms), c: 'fg' },
-    ];
-    utils.$('#dash-stats').innerHTML = tiles.map(t =>
-      `<div class="dash-tile ${t.c}"><div class="dash-tile-v">${t.v}</div><div class="dash-tile-k">${t.k}</div></div>`
-    ).join('');
-  }
-  function renderAlgos(d) {
-    const entries = Object.entries(d.algoCount).sort((a,b) => b[1]-a[1]);
-    const max = Math.max(1, ...entries.map(e => e[1]));
-    const el = utils.$('#dash-algos');
-    if (!entries.length) { el.innerHTML = '<div class="hint">暂无数据</div>'; return; }
-    el.innerHTML = entries.map(([k,v]) => {
-      const pct = (v / max * 100).toFixed(1);
-      return `<div class="dash-bar-row">
-        <div class="dash-bar-label">${utils.escapeHtml(k)}</div>
-        <div class="dash-bar"><div class="dash-bar-fill" style="width:${pct}%"></div><span class="dash-bar-val">${v}</span></div>
-      </div>`;
-    }).join('');
-  }
-  function renderTimeline(d) {
-    const max = Math.max(1, ...d.buckets);
-    const W = 460, H = 80, bw = W / d.buckets.length;
-    let bars = '', labels = '';
-    d.buckets.forEach((v, i) => {
-      const h = (v / max) * (H - 14);
-      const x = i * bw + 1, y = H - h - 10, w = bw - 2;
-      bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="1.5"><title>${i}:00 — ${v} jobs</title></rect>`;
-    });
-    const lblHrs = ['现在', '-12h', '-24h'];
-    const lblX = [W - 28, W/2 - 12, 0];
-    lblHrs.forEach((t, i) => { labels += `<text x="${lblX[i].toFixed(0)}" y="${H + 2}">${t}</text>`; });
-    utils.$('#dash-timeline').innerHTML =
-      `<svg viewBox="0 0 ${W} ${H + 6}" class="dash-svg" preserveAspectRatio="none">${bars}${labels}</svg>`;
-  }
-
-  async function open() {
-    utils.$('#modal-dashboard').classList.remove('hidden');
-    utils.$('#dash-stats').innerHTML = '<div class="hint">加载中…</div>';
-    try {
-      const d = await compute();
-      renderStats(d); renderAlgos(d); renderTimeline(d);
-      utils.$('#dash-meta').textContent = `数据源:内存中的 /api/jobs · 任务总数 ${d.total} · 刷新于 ${new Date().toLocaleTimeString()}`;
-    } catch (e) {
-      utils.$('#dash-stats').innerHTML = '<div class="hint">加载失败: ' + utils.escapeHtml(e.message) + '</div>';
-    }
-  }
-
-  return { open };
-})();
+// dashboard 模块已拆分至 dashboard.js(本文件之前加载)
 
 function downloadBlob(content, filename, mime) {
   const blob = new Blob([content], { type: mime });
@@ -1943,8 +2021,15 @@ async function deleteCurrent() {
 
 async function retryCurrent() {
   if (!state.currentJobId) return;
-  const id = state.currentJobId;
-  if (!await confirmModal.open('重跑任务', '将用原 URL/输入重新创建一个任务。继续?')) return;
+  await retryJobById(state.currentJobId, true);
+}
+
+/** 按 id 重跑任务(侧栏右键菜单 / pv 重跑按钮共用)。confirm 控制是否弹确认。 */
+async function retryJobById(id, confirmFirst) {
+  if (!id) return;
+  if (confirmFirst !== false) {
+    if (!await confirmModal.open('重跑任务', '将用原 URL/输入重新创建一个任务。继续?')) return;
+  }
   try {
     const r = await api.retryJob(id);
     toast.success('已重跑,新任务 #' + (r.job_id || '').slice(0, 8));
@@ -1953,6 +2038,23 @@ async function retryCurrent() {
       sidebar.upsertJob(job); preview.open(job.id);
     }
   } catch (e) { toast.error('重跑失败: ' + e.message); }
+}
+
+/** 按 id 删除任务(侧栏右键菜单 / Delete 键共用),带确认。 */
+async function deleteJobById(id) {
+  if (!id) return;
+  const job = (state.jobs || []).find(x => x.id === id);
+  const name = job ? (job.display_name || id) : id;
+  if (!await confirmModal.open('删除任务', `确认删除 "${name}"?此操作不可恢复。`)) return;
+  try {
+    await api.deleteJob(id);
+    state.deletedIds.add(id);
+    state.pinIds.delete(id);
+    try { localStorage.setItem(prefStore.KEYS.pinIds, JSON.stringify(Array.from(state.pinIds))); } catch {}
+    if (state.currentJobId === id) preview.close();
+    sidebar.render();
+    toast.success('任务已删除');
+  } catch (e) { toast.error('删除失败: ' + e.message); }
 }
 
 function initKeys() {
@@ -1974,6 +2076,15 @@ function initKeys() {
     if (e.key === 'n' || e.key === 'N') { upload.openModal(); e.preventDefault(); return; }
     if (e.key === 'ArrowDown') { sidebar.nextItem(1); e.preventDefault(); return; }
     if (e.key === 'ArrowUp')   { sidebar.nextItem(-1); e.preventDefault(); return; }
+    // vim 风格 j/k 上下选择(与 ↑/↓ 等价)
+    if (e.key === 'j' || e.key === 'J') { sidebar.nextItem(1); e.preventDefault(); return; }
+    if (e.key === 'k' || e.key === 'K') { sidebar.nextItem(-1); e.preventDefault(); return; }
+    // Enter 打开当前任务(已打开时无操作)
+    if (e.key === 'Enter' && state.currentJobId) {
+      // 当前焦点在按钮上时不劫持(保留原生按钮激活)
+      if (e.target && e.target.matches && e.target.matches('button, a[href], select')) return;
+      e.preventDefault(); return;
+    }
     // Home / End / PageUp / PageDown:整段跳
     if (e.key === 'Home') {
       sidebar.gotoOffset(0); e.preventDefault(); return;
@@ -1982,8 +2093,10 @@ function initKeys() {
       sidebar.gotoOffset(-1); e.preventDefault(); return;
     }
     if (e.key === 'PageDown' || e.key === 'PageUp') {
+      // 修复(历史 bug):ROW_H 是 sidebar IIFE 内的局部 const,这里用 state 直接算
+      const rowH = state.itemHeight + state.itemGap;
       const step = Math.max(1, Math.floor(
-        (state.listScrollEl ? state.listScrollEl.clientHeight : 400) / ROW_H) - 1);
+        (state.listScrollEl ? state.listScrollEl.clientHeight : 400) / rowH) - 1);
       const list = sidebar.filtered();
       const cur = list.findIndex(j => j.id === state.currentJobId);
       if (cur < 0) { sidebar.gotoOffset(0); }
@@ -1992,15 +2105,22 @@ function initKeys() {
       e.preventDefault(); return;
     }
     if (e.key === 'a' || e.key === 'A') { preview.toggleAnno(); e.preventDefault(); return; }
-    if (e.key === 'Delete' && state.currentJobId) { deleteCurrent(); e.preventDefault(); return; }
+    // Delete / Backspace(macOS 无 Delete 键)删除当前任务,带确认
+    if ((e.key === 'Delete' || e.key === 'Backspace') && state.currentJobId) { deleteCurrent(); e.preventDefault(); return; }
     if (e.key === '?') { utils.$('#modal-help').classList.remove('hidden'); e.preventDefault(); return; }
     if (e.key === 'b' || e.key === 'B') { if (!batch.isActive()) batch.enter(); else batch.exit(); e.preventDefault(); return; }
+    // p:置顶/取消置顶当前任务
+    if (e.key === 'p' || e.key === 'P') {
+      if (state.currentJobId) { sidebar.togglePin(state.currentJobId); e.preventDefault(); }
+      return;
+    }
   });
 }
 
 async function init() {
-  theme.init();
+  theme.init(); modalKit.init();
   sidebar.init(); upload.init(); batch.init(); confirmModal.init(); initKeys();
+  visibilityCtl.init();
   // 平台 KPI 实时拉取
   if (typeof kpi !== 'undefined' && kpi && typeof kpi.init === 'function') kpi.init();
   // 视频双画面播放器:共享控制 + 拖动分隔条 + 人脸筛选 + 人脸 lightbox
@@ -2019,6 +2139,46 @@ async function init() {
   utils.$('#pv-export-json').addEventListener('click', exportJSON);
   utils.$('#pv-export-csv').addEventListener('click', exportCSV);
   utils.$('#pv-export-zip').addEventListener('click', exportZip);
+  // 空状态 CTA
+  const emptyNew = utils.$('#pv-empty-new');
+  if (emptyNew) emptyNew.addEventListener('click', () => upload.openModal());
+  const emptyPaste = utils.$('#pv-empty-paste');
+  if (emptyPaste) emptyPaste.addEventListener('click', async () => {
+    // 尝试读剪贴板图片;没有图片时提示支持 URL 粘贴
+    try {
+      if (navigator.clipboard && navigator.clipboard.read) {
+        const items = await navigator.clipboard.read();
+        for (const it of items) {
+          const imgType = (it.types || []).find(t => t.startsWith('image/'));
+          if (imgType) {
+            const blob = await it.getType(imgType);
+            const f = new File([blob], `paste-${Date.now()}.png`, { type: imgType });
+            upload.submitImage(f);
+            return;
+          }
+        }
+        toast.warn('剪贴板中没有图片;可直接按 Ctrl+V,或粘贴 http(s)/rtsp 链接');
+      } else {
+        toast.info('请直接按 Ctrl+V 粘贴图片或媒体 URL');
+      }
+    } catch { toast.info('请直接按 Ctrl+V 粘贴图片或媒体 URL'); }
+  });
+  // 移动端抽屉侧栏
+  const drawerBtn = utils.$('#tb-drawer');
+  const drawerBack = utils.$('#drawer-backdrop');
+  if (drawerBtn && drawerBack) {
+    const setDrawer = open => {
+      utils.$('#sidebar').classList.toggle('drawer-open', open);
+      drawerBack.classList.toggle('hidden', !open);
+      drawerBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+    drawerBtn.addEventListener('click', () => setDrawer(!utils.$('#sidebar').classList.contains('drawer-open')));
+    drawerBack.addEventListener('click', () => setDrawer(false));
+    // 抽屉打开时选任务自动收起(≤768px 布局下侧栏覆盖主区)
+    window.addEventListener('resize', () => {
+      if (window.innerWidth > 768) setDrawer(false);
+    });
+  }
   // URL hash 深链:刷新 / 分享链接可定位到指定 job
   hashRouter.bind();
   try {
@@ -2071,4 +2231,7 @@ const hashRouter = (() => {
 })();
 
 document.addEventListener('DOMContentLoaded', init);
-window.__rsface = { state, api, sidebar, preview, sse, batch, theme, toast, dashboard, lightbox, hashRouter };
+window.__rsface = {
+  state, api, sidebar, preview, sse, batch, theme, toast, dashboard, lightbox, hashRouter,
+  kpi, visibilityCtl, modalKit, ctxMenu, confirmModal,
+};

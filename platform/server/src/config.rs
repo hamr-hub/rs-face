@@ -56,14 +56,32 @@ pub struct Config {
     /// 级联检测器最终 score 阈值(0=不过滤,1=必须通过所有 stage)。
     /// OpenCV Haar 级联在 ~0.5 附近给出合理 F1;0.0=关闭,会接受所有通过 NMS 的框。
     pub min_score: f32,
+    /// 流任务超时(秒)。默认 0(不限,由 cancel 停止);>0 时挂死流会被 watchdog 收掉。
+    pub job_timeout_stream_secs: u64,
+    /// 排队深度上限(queued 任务数,不含 running)。超过则拒绝新任务(429),
+    /// 防止无限排队占内存。默认 64;0 = 不限。
+    pub max_queue_depth: usize,
+    /// 图片上传大小上限(字节)。默认 50 MB。
+    pub upload_limit_image: usize,
+    /// 视频上传大小上限(字节)。默认 2 GB。
+    pub upload_limit_video: usize,
+    /// CORS 允许来源(如 `https://fe.example.com`)。空 = 关闭 CORS(默认,
+    /// 同源部署)。设置后为跨域前端放开 `/api/*` + `/media/*`。
+    pub cors_allow_origin: String,
+    /// 优雅停机等待运行中任务排空的超时(秒)。默认 180(3 分钟);
+    /// 超时后强制退出。0 = 不等待(立即退出)。
+    pub shutdown_grace_secs: u64,
 }
 
 impl Config {
     pub fn from_env() -> Self {
         // 物理并行度:仅供日志参考;运行时并发由 max_concurrent_jobs 控。
-        let ap = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let ap = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
         let pool_hint = env_or("RSFACE_THREAD_POOL", "0")
-            .parse::<usize>().unwrap_or(0);
+            .parse::<usize>()
+            .unwrap_or(0);
         Self {
             bind_addr: env_or("BIND_ADDR", "0.0.0.0:8080"),
             s3_endpoint: env_or("S3_ENDPOINT", "http://127.0.0.1:9000"),
@@ -78,27 +96,45 @@ impl Config {
             tmp_dir: PathBuf::from(env_or("TMP_DIR", "/tmp/rsface-jobs")),
             max_frames_video: env_or("MAX_FRAMES_VIDEO", "3600").parse().unwrap_or(3600),
             max_frames_stream: env_or("MAX_FRAMES_STREAM", "0").parse().unwrap_or(0),
-            stream_keepalive_period: env_or("STREAM_KEEPALIVE_PERIOD", "30").parse().unwrap_or(30),
+            stream_keepalive_period: env_or("STREAM_KEEPALIVE_PERIOD", "30")
+                .parse()
+                .unwrap_or(30),
             max_face_crops: env_or("MAX_FACE_CROPS", "2000").parse().unwrap_or(2000),
             min_face_size: env_or("MIN_FACE_SIZE", "24").parse().unwrap_or(24),
             local_media_dir: PathBuf::from(env_or("LOCAL_MEDIA_DIR", "/tmp/rsface-media")),
             database_url: env_or("DATABASE_URL", ""),
             max_concurrent_jobs: env_or("MAX_CONCURRENT_JOBS", "2")
-                .parse().unwrap_or(2).max(1),
-            job_timeout_secs: env_or("JOB_TIMEOUT_SECS", "0")
-                .parse().unwrap_or(0),
-            job_timeout_video_secs: env_or("JOB_TIMEOUT_VIDEO_SECS", "0")
-                .parse().unwrap_or(0),
-            sse_keepalive_secs: env_or("SSE_KEEPALIVE_SECS", "15")
-                .parse().unwrap_or(15),
+                .parse()
+                .unwrap_or(2)
+                .max(1),
+            job_timeout_secs: env_or("JOB_TIMEOUT_SECS", "0").parse().unwrap_or(0),
+            job_timeout_video_secs: env_or("JOB_TIMEOUT_VIDEO_SECS", "0").parse().unwrap_or(0),
+            sse_keepalive_secs: env_or("SSE_KEEPALIVE_SECS", "15").parse().unwrap_or(15),
             use_gpu: env_or("RSFACE_USE_GPU", "1") == "1",
             // 默认 0.0(不过滤)— OpenCV Haar 训练已包含 stage 级阈值;
             // 想严格压低 FP 可设 0.5。生产 drama 类素材通常 0.3 较平衡。
             min_score: env_or("RSFACE_MIN_SCORE", "0.0")
-                .parse::<f32>().unwrap_or(0.0),
+                .parse::<f32>()
+                .unwrap_or(0.0),
+            job_timeout_stream_secs: env_or("JOB_TIMEOUT_STREAM_SECS", "0").parse().unwrap_or(0),
+            max_queue_depth: env_or("MAX_QUEUE_DEPTH", "64").parse().unwrap_or(64),
+            upload_limit_image: env_or("UPLOAD_LIMIT_IMAGE_MB", "50")
+                .parse::<usize>()
+                .unwrap_or(50)
+                .saturating_mul(1024 * 1024),
+            upload_limit_video: env_or("UPLOAD_LIMIT_VIDEO_GB", "2")
+                .parse::<usize>()
+                .unwrap_or(2)
+                .saturating_mul(1024 * 1024 * 1024),
+            cors_allow_origin: env_or("CORS_ALLOW_ORIGIN", ""),
+            shutdown_grace_secs: env_or("SHUTDOWN_GRACE_SECS", "180").parse().unwrap_or(180),
             // RSFACE_THREAD_POOL=0 时,自动用物理并行度(并降 1 给主线程 / tokio);
             // 显式设置时尊重 env。
-            thread_pool_hint: if pool_hint == 0 { ap.saturating_sub(1).max(1) } else { pool_hint },
+            thread_pool_hint: if pool_hint == 0 {
+                ap.saturating_sub(1).max(1)
+            } else {
+                pool_hint
+            },
             available_parallelism: ap,
         }
     }
