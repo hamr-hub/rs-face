@@ -84,7 +84,14 @@ impl FaceDetector for MtcnnDetector {
         "mtcnn"
     }
     fn description(&self) -> &'static str {
-        "MTCNN 3-stage cascade: P-Net(12x12) -> R-Net(24x24) -> O-Net(48x48) + NMS."
+        "[SCAFFOLD — detects nothing] MTCNN 3-stage cascade shape with random weights."
+    }
+
+    /// Random placeholder weights: the sigmoid never crosses 0.5, so this returns an
+    /// empty list for every input. Declared [`Maturity::Scaffold`] so no caller mistakes
+    /// that silence for "no faces present".
+    fn maturity(&self) -> crate::face_detector::Maturity {
+        crate::face_detector::Maturity::Scaffold
     }
 
     fn detect(&self, img: &GrayImage) -> Vec<Detection> {

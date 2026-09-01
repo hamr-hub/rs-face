@@ -205,7 +205,14 @@ impl FaceDetector for HogFaceDetector {
         "hog"
     }
     fn description(&self) -> &'static str {
-        "HOG (8x8 cell, 2x2 block, 9 bins) + Linear SVM, 64x128 window, dense multi-scale."
+        "[SCAFFOLD — detects nothing] HOG+SVM shape (8x8 cell, 9 bins) with random weights."
+    }
+
+    /// `weights/hog_face.bin` is 3 KB of random bytes, so the linear SVM score never
+    /// clears the threshold and this returns an empty list for every input. See
+    /// [`Maturity::Scaffold`].
+    fn maturity(&self) -> crate::face_detector::Maturity {
+        crate::face_detector::Maturity::Scaffold
     }
 
     fn detect(&self, img: &GrayImage) -> Vec<Detection> {

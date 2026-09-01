@@ -40,8 +40,11 @@
 #![allow(dead_code)] // Dummy CNN/HoG/YuNet/MTCNN scaffolds ship with all primitives even if a few are unreferenced.
 #![allow(unused_variables)] // Same reason as dead_code; placeholder code paths.
 
+pub mod align;
 pub mod cnn;
 pub mod detector;
+pub mod embedding;
+pub mod face;
 pub mod face_detector;
 pub mod gpu;
 pub mod haar;
