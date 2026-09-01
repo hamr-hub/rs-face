@@ -52,3 +52,4 @@ noah-lever-drama-trans-download/
 # the large mp4/HLS fixtures are not.
 platform/testdata/*.mp4
 platform/testdata/hls-loop/
+models/

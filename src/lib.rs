@@ -54,10 +54,12 @@ pub mod image;
 pub mod integral;
 pub mod models;
 pub mod mtcnn;
+pub mod onnx;
 pub mod output;
 pub mod pipeline;
 pub mod pool;
 pub mod scrfd;
+pub mod scrfd_detector;
 pub mod source;
 pub mod yunet;
 
