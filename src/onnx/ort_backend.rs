@@ -19,11 +19,20 @@
 use super::{read_verified, Backend, Device, Inference, OnnxError, SessionConfig, Tensor};
 use crate::models::ModelSpec;
 use ort::session::{builder::GraphOptimizationLevel, Session};
+use std::cell::RefCell;
 use std::path::Path;
 
 /// A loaded ONNX Runtime session.
+///
+/// The session sits behind a `RefCell` because ONNX Runtime's `run` requires `&mut`
+/// (it mutates internal allocator arenas) while our [`Inference`] trait exposes `&self`,
+/// so that a session can be shared behind an `Arc` for read-only *configuration* queries.
+/// `RefCell` rather than `Mutex` is correct here precisely because [`Inference`] is `Send`
+/// but deliberately **not** `Sync`: each pipeline worker owns its own session, so there is
+/// no cross-thread contention to lock against, and paying for a mutex on every frame would
+/// be pure overhead. The borrow is confined to the body of `run`, so it can never overlap.
 pub struct OrtSession {
-    session: Session,
+    session: RefCell<Session>,
     num_outputs: usize,
     device: Device,
 }
@@ -57,16 +66,16 @@ impl OrtSession {
                 .map_err(|e| OnnxError::Backend(format!("setting intra threads: {e}")))?;
         }
 
-        let (builder, device) = Self::register_providers(builder, cfg.device)?;
+        let (mut builder, device) = Self::register_providers(builder, cfg.device)?;
 
         let session = builder
             .commit_from_memory(&bytes)
             .map_err(|e| OnnxError::Backend(format!("loading graph: {e}")))?;
 
-        let num_outputs = session.outputs.len();
+        let num_outputs = session.outputs().len();
 
         Ok(Self {
-            session,
+            session: RefCell::new(session),
             num_outputs,
             device,
         })
@@ -176,8 +185,8 @@ impl Inference for OrtSession {
         let value = ort::value::Tensor::from_array((dims, input.to_vec()))
             .map_err(|e| OnnxError::Backend(format!("building input tensor: {e}")))?;
 
-        let outputs = self
-            .session
+        let mut session = self.session.borrow_mut();
+        let outputs = session
             .run(ort::inputs![value])
             .map_err(|e| OnnxError::Backend(format!("running inference: {e}")))?;
 
@@ -218,7 +227,8 @@ mod tests {
             None,
             &SessionConfig::default(),
         )
-        .unwrap_err();
+        .err()
+        .expect("must fail");
         assert!(matches!(err, OnnxError::ModelNotFound(_)));
     }
 
@@ -226,7 +236,8 @@ mod tests {
     fn opening_a_non_onnx_file_fails_at_the_backend_not_by_panicking() {
         let path = std::env::temp_dir().join("rsface_ort_garbage.onnx");
         std::fs::write(&path, b"this is definitely not a protobuf graph").unwrap();
-        let err = OrtSession::open(&path, None, &SessionConfig::default()).unwrap_err();
+        let err = OrtSession::open(&path, None, &SessionConfig::default()).err()
+        .expect("must fail");
         assert!(
             matches!(err, OnnxError::Backend(_)),
             "expected a backend error, got {err:?}"

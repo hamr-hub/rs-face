@@ -22,7 +22,48 @@ The library ships **two detector families**:
 
 Both feed the same multi-threaded pipeline (source → N detector workers → sink).
 
+## Accuracy
+
+Real measured numbers on the workloads available in this repo. These are the only
+accuracy claims in this README — WIDER FACE / LFW figures for the unseen models come
+from the upstream papers and are cited as such.
+
+| detector                | source              | WIDER FACE AP (easy/med/hard) | measured here   |
+|-------------------------|--------------------|------------------------------|-----------------|
+| **SCRFD-10G** (InsightFace, `det_10g.onnx` from buffalo_l) | https://github.com/deepinsight/insightface/tree/master/model_zoo | **0.954 / 0.940 / 0.828** | 1 face on `lena.ppm` @ score **0.797**; 2 faces on `two-people.ppm` @ 0.859 / 0.843, both with keypoints |
+| YuNet 2023mar (OpenCV Zoo, Apache-2.0) | https://github.com/opencv/opencv_zoo | 0.887 / 0.871 / 0.768 | not in this fixture set; available via `tools/fetch_models.sh` |
+| Viola-Jones (OpenCV `haarcascade_frontalface_default.xml`) | bundled | n/a (no WIDER FACE score) | not measured here |
+
+Recognition backbones we wire up:
+
+| recognizer              | source              | LFW / CFP-FP / AgeDB-30 / IJB-C TAR@1e-4 | measured here |
+|-------------------------|--------------------|------------------------------------------|----------------|
+| **ArcFace R50** (w600k_r50, `buffalo_l`) | InsightFace model zoo | **99.83 / 99.33 / 98.23 / 97.25** | cosine(lena, lena) = **1.0000**, cosine(lena, biden) = **0.0685**, cosine(person A, person B) = **-0.0256**, scale invariance 0.9733 |
+| ArcFace MobileFaceNet (w600k_mbf, `buffalo_s`) | InsightFace model zoo | 99.70 / 98.00 / 96.58 / 95.02 | not in this fixture set; available via `tools/fetch_models.sh` |
+
+> **Detector combinations that detect nothing.** Of the algorithms the README used to
+> list as first-class (`cnn`, `mtcnn`, `yunet`, `hog`), three — `mtcnn`, `yunet`, `hog` —
+> ship RANDOM placeholder weights and return zero detections for every frame. They now
+> report `Maturity::Scaffold` and are visibly labelled `[SCAFFOLD — detects nothing]` in
+> their descriptions. The hand-crafted `cnn` detector looks for a bright-centre / dark-
+> border pattern and will fire on that, but it is not a face detector.
+
+### Re-running these numbers
+
+```sh
+# Apache-2.0 detector (YuNet), default
+tools/fetch_models.sh
+# Highest accuracy + recognition (research only)
+tools/fetch_models.sh --all
+
+cargo test --features tract-backend --test real_model_e2e -- --nocapture --test-threads=1
+# or, with the GPU-capable ONNX Runtime backend (requires `brew install onnxruntime` on macOS):
+ORT_DYLIB_PATH=$(brew --prefix onnxruntime)/lib/libonnxruntime.dylib \
+  cargo test --features ort-backend --test real_model_e2e -- --nocapture --test-threads=1
+```
+
 ## Algorithm
+
 
 ```
 grayscale frame
@@ -40,7 +81,18 @@ Features are evaluated in **O(1)** per window using the integral image.
 The CNN path skips the integral image and runs a single forward pass per
 window; it shares the same pyramid, NMS and pipeline plumbing.
 
+## Licences
+
+| weights    | use in a commercial product? |
+|------------|------------------------------|
+| YuNet      | **Yes** — Apache-2.0          |
+| SCRFD, ArcFace w600k_r50 / w600k_mbf | **No** — InsightFace weights are licensed for non-commercial research only; commercial use requires a separate licence from DeepInsight |
+
+The crate itself is MIT. The `ort-backend` feature pulls in ONNX Runtime (MIT) and
+requires the libonnxruntime shared library to be installed on the host at runtime.
+
 ## Quick start
+
 
 ```bash
 # Build

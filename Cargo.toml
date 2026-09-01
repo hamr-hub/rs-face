@@ -55,8 +55,7 @@ cudarc = { version = "0.12", optional = true }
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = [
     "std",
     "ndarray",
-    "download-binaries",
-    "copy-dylibs",
+    "load-dynamic",
 ] }
 tract-onnx = { version = "0.23", optional = true }
 

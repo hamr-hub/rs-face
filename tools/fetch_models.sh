@@ -189,3 +189,31 @@ else
   echo "      cargo build --release --features tract-backend   # pure Rust, CPU"
   echo "      cargo build --release --features ort-backend     # ONNX Runtime, GPU-capable"
 fi
+
+# --- onnx runtime ------------------------------------------------------------
+
+ORT_PATH=""
+if [[ -n "${ORT_DYLIB_PATH:-}" && -f "$ORT_DYLIB_PATH" ]]; then
+  ORT_PATH="$ORT_DYLIB_PATH"
+elif command -v brew >/dev/null 2>&1 && brew list onnxruntime >/dev/null 2>&1; then
+  ORT_PATH="$(brew --prefix onnxruntime 2>/dev/null)/lib/libonnxruntime.dylib"
+fi
+
+if [[ -n "$ORT_PATH" && -f "$ORT_PATH" ]]; then
+  echo "==> Found ONNX Runtime at $ORT_PATH"
+  echo "    export ORT_DYLIB_PATH=\"$ORT_PATH\" before running binaries that use --features ort-backend"
+else
+  cat <<'ORT'
+
+==> ONNX Runtime (libonnxruntime) was NOT found on this machine.
+
+    The `ort-backend` feature requires the C++ runtime at runtime. Install it via:
+      brew install onnxruntime                    # macOS
+      apt-get install libonnxruntime-dev          # Debian/Ubuntu
+      pip install onnxruntime                     # cross-distro
+
+    Then either export ORT_DYLIB_PATH, or put libonnxruntime.so / .dylib somewhere on
+    the OS loader's default search path (e.g. /usr/local/lib on Linux).
+
+ORT
+fi

@@ -14,13 +14,30 @@
 //! synthetic tensors; only these verify that our understanding of the real graph — its
 //! output count, head layout, tensor shapes and embedding dimension — is correct.
 
-#![cfg(feature = "tract-backend")]
+//! The integration tests run under any real inference backend feature. A default
+//! zero-dep build still compiles because the test file gates its run-time work behind
+//! the same condition: the tests compile and exit with `0 passed` (skipping), rather
+//! than failing, so `cargo test` on a fresh clone stays green.
+#![cfg(any(feature = "tract-backend", feature = "ort-backend"))]
 
 use rsface::embedding::{Gallery, MatchConfig, MatchOutcome};
 use rsface::face::Landmarks;
 use rsface::image::RgbImage;
 use rsface::models::{self, verify_bytes, Integrity};
 use rsface::onnx::{Backend, SessionConfig};
+
+/// Pick the first backend enabled in this build, in the documented preference order
+/// (ort first, tract second). Falls back to `None` on a zero-dep build, in which case
+/// the integration tests are skipped by their `cfg` gate anyway.
+fn preferred_backend() -> Backend {
+    let avail = Backend::available();
+    for b in [Backend::Ort, Backend::Tract] {
+        if avail.contains(&b) {
+            return b;
+        }
+    }
+    panic!("no inference backend enabled; enable --features ort-backend or --features tract-backend")
+}
 use std::path::{Path, PathBuf};
 
 fn model_dir() -> PathBuf {
@@ -79,7 +96,7 @@ fn face_fixture(name: &str) -> Option<RgbImage> {
 /// Detector configured for the fixtures, with both real models loaded.
 fn load_detector() -> Option<rsface::scrfd_detector::ScrfdDetector> {
     let path = require("det_10g.onnx")?;
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
     Some(
         rsface::scrfd_detector::ScrfdDetector::open(
             &path,
@@ -93,7 +110,7 @@ fn load_detector() -> Option<rsface::scrfd_detector::ScrfdDetector> {
 
 fn load_recognizer() -> Option<rsface::arcface_recognizer::ArcFaceRecognizer> {
     let path = require("w600k_r50.onnx")?;
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
     Some(
         rsface::arcface_recognizer::ArcFaceRecognizer::open(
             &path,
@@ -146,7 +163,7 @@ fn real_scrfd_graph_loads_and_reports_its_heads() {
         return;
     };
     let spec = models::find("scrfd_10g_kps").unwrap();
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
 
     let det = rsface::scrfd_detector::ScrfdDetector::open(
         &path,
@@ -186,7 +203,7 @@ fn real_scrfd_inference_produces_valid_geometry() {
         return;
     };
     let spec = models::find("scrfd_10g_kps").unwrap();
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
     let det = rsface::scrfd_detector::ScrfdDetector::open(
         &path,
         Some(spec),
@@ -243,7 +260,7 @@ fn real_scrfd_low_threshold_output_is_all_finite() {
         return;
     };
     let spec = models::find("scrfd_10g_kps").unwrap();
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
     let det = rsface::scrfd_detector::ScrfdDetector::open(
         &path,
         Some(spec),
@@ -271,7 +288,7 @@ fn real_scrfd_on_a_blank_frame_is_quiet() {
         return;
     };
     let spec = models::find("scrfd_10g_kps").unwrap();
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
     let det =
         rsface::scrfd_detector::ScrfdDetector::open(&path, Some(spec), &cfg, Default::default())
             .expect("load");
@@ -297,7 +314,7 @@ fn real_arcface_graph_loads_with_512_dims() {
         return;
     };
     let spec = models::find("arcface_w600k_r50").unwrap();
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
 
     let rec = rsface::arcface_recognizer::ArcFaceRecognizer::open(&path, Some(spec), &cfg)
         .expect("the real ArcFace graph must load");
@@ -495,7 +512,7 @@ fn real_arcface_handles_a_blank_crop() {
         return;
     };
     let spec = models::find("arcface_w600k_r50").unwrap();
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
     let rec =
         rsface::arcface_recognizer::ArcFaceRecognizer::open(&path, Some(spec), &cfg).expect("load");
 
@@ -518,7 +535,7 @@ fn real_arcface_rejects_a_misaligned_crop_size() {
         return;
     };
     let spec = models::find("arcface_w600k_r50").unwrap();
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
     let rec =
         rsface::arcface_recognizer::ArcFaceRecognizer::open(&path, Some(spec), &cfg).expect("load");
 
@@ -539,7 +556,7 @@ fn real_gallery_enroll_and_identify_round_trip() {
         return;
     };
     let spec = models::find("arcface_w600k_r50").unwrap();
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
     let rec =
         rsface::arcface_recognizer::ArcFaceRecognizer::open(&path, Some(spec), &cfg).expect("load");
 
@@ -600,7 +617,7 @@ fn real_detection_to_recognition_pipeline_is_consistent() {
     let (Some(dpath), Some(rpath)) = (require("det_10g.onnx"), require("w600k_r50.onnx")) else {
         return;
     };
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
 
     let det = rsface::scrfd_detector::ScrfdDetector::open(
         &dpath,
@@ -657,7 +674,7 @@ fn both_real_models_coexist_in_one_process() {
     let (Some(d), Some(r)) = (require("det_10g.onnx"), require("w600k_r50.onnx")) else {
         return;
     };
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
     let _det = rsface::scrfd_detector::ScrfdDetector::open(
         &d,
         Some(models::find("scrfd_10g_kps").unwrap()),
@@ -688,7 +705,7 @@ fn a_truncated_real_model_is_refused_by_the_integrity_gate() {
     std::fs::write(&tmp, &bytes).expect("write");
 
     let spec = models::find("scrfd_10g_kps").unwrap();
-    let cfg = SessionConfig::default().with_backend(Backend::Tract);
+    let cfg = SessionConfig::default().with_backend(preferred_backend());
     let err =
         rsface::scrfd_detector::ScrfdDetector::open(&tmp, Some(spec), &cfg, Default::default())
             .err()
