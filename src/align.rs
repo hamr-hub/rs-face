@@ -25,11 +25,25 @@ pub const ARCFACE_CROP_SIZE: usize = 112;
 /// The canonical 5-point landmark layout ArcFace was trained against, for a
 /// 112x112 crop, in `(x, y)` pixel coordinates and [`crate::face::landmark`] order.
 ///
-/// These exact constants come from InsightFace's `arcface_src` reference
-/// (`recognition/arcface_torch`, also `insightface/utils/face_align.py`) and must not be
-/// "tidied" — they are asymmetric by design (the eyes sit at y=51.70 and y=51.50, not a
-/// shared y), because they are the empirical mean landmark configuration of the
-/// training set rather than a hand-drawn ideal.
+/// These exact constants come from InsightFace's `arcface_dst` reference
+/// (`insightface/utils/face_align.py`) and must not be "tidied" — they are asymmetric by
+/// design (the eyes sit at y=51.70 and y=51.50, not a shared y), because they are the
+/// empirical mean landmark configuration of the training set rather than a hand-drawn
+/// ideal.
+///
+/// # The 96-vs-112 trap
+///
+/// Older InsightFace code and much third-party documentation quote a *different* array
+/// whose x values are exactly 8.0 smaller: `[30.2946, 65.5318, 48.0252, 33.5493,
+/// 62.7299]`. That is the legacy **96x112** template. `face_align.py` historically
+/// applied `src[:, 0] += 8.0` when `mode == 'arcface'` to recentre it for a 112-wide
+/// crop, and modern versions bake the result in as `arcface_dst` — the values below.
+///
+/// Using the 96-wide numbers with a 112x112 output shifts every aligned face 8 px left.
+/// Nothing errors: crops still look like faces and embeddings still normalise, but every
+/// one is computed off-centre relative to the backbone's training distribution, quietly
+/// costing accuracy. The sanity check is that mean x must equal `112/2`, which
+/// `reference_landmarks_are_centred_for_112` asserts.
 pub const ARCFACE_REFERENCE_LANDMARKS: [(f32, f32); NUM_LANDMARKS] = [
     (38.2946, 51.6963), // left eye
     (73.5318, 51.5014), // right eye
@@ -248,6 +262,59 @@ mod tests {
             worst = worst.max(((x - dst[i].0).powi(2) + (y - dst[i].1).powi(2)).sqrt());
         }
         worst
+    }
+
+    /// Guards the 96-vs-112 template trap documented on
+    /// [`ARCFACE_REFERENCE_LANDMARKS`]. The canonical 112x112 template is horizontally
+    /// centred, so mean x must be 56.0. The legacy 96x112 array (every x smaller by 8.0)
+    /// would centre at 48.0 and silently misalign every crop by 8 px without erroring.
+    #[test]
+    fn reference_landmarks_are_centred_for_112() {
+        let mean_x: f32 = REF.iter().map(|p| p.0).sum::<f32>() / NUM_LANDMARKS as f32;
+        assert!(
+            (mean_x - ARCFACE_CROP_SIZE as f32 / 2.0).abs() < 0.05,
+            "reference template mean x = {mean_x}, expected 56.0 for a 112-wide crop. \
+             If this is ~48.0 the legacy 96x112 array was pasted in without the +8.0 \
+             arcface recentring."
+        );
+
+        // The legacy array must NOT be what we shipped.
+        const LEGACY_96: [f32; NUM_LANDMARKS] = [30.2946, 65.5318, 48.0252, 33.5493, 62.7299];
+        for (i, legacy_x) in LEGACY_96.iter().enumerate() {
+            assert!(
+                (REF[i].0 - legacy_x).abs() > 7.0,
+                "landmark {i} matches the legacy 96x112 template"
+            );
+        }
+    }
+
+    /// All five points must lie inside the crop; a template point outside [0,112] would
+    /// mean landmarks are being warped off-canvas.
+    #[test]
+    fn reference_landmarks_lie_inside_the_crop() {
+        let size = ARCFACE_CROP_SIZE as f32;
+        for (i, (x, y)) in REF.iter().enumerate() {
+            assert!(*x > 0.0 && *x < size, "landmark {i} x={x} outside crop");
+            assert!(*y > 0.0 && *y < size, "landmark {i} y={y} outside crop");
+        }
+    }
+
+    /// Basic anatomy sanity: eyes above nose above mouth, right eye right of left eye.
+    /// Catches a transposed or permuted template, which would otherwise produce
+    /// confidently-wrong alignments.
+    #[test]
+    fn reference_landmarks_are_anatomically_ordered() {
+        use crate::face::landmark::*;
+        assert!(
+            REF[LEFT_EYE].0 < REF[RIGHT_EYE].0,
+            "right eye must be right of left"
+        );
+        assert!(REF[LEFT_EYE].1 < REF[NOSE].1, "eyes must be above nose");
+        assert!(REF[NOSE].1 < REF[LEFT_MOUTH].1, "nose must be above mouth");
+        assert!(
+            REF[LEFT_MOUTH].0 < REF[RIGHT_MOUTH].0,
+            "right mouth corner must be right of left"
+        );
     }
 
     #[test]

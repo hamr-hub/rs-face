@@ -41,6 +41,7 @@
 #![allow(unused_variables)] // Same reason as dead_code; placeholder code paths.
 
 pub mod align;
+pub mod arcface;
 pub mod cnn;
 pub mod detector;
 pub mod embedding;
@@ -51,10 +52,12 @@ pub mod haar;
 pub mod hog_face;
 pub mod image;
 pub mod integral;
+pub mod models;
 pub mod mtcnn;
 pub mod output;
 pub mod pipeline;
 pub mod pool;
+pub mod scrfd;
 pub mod source;
 pub mod yunet;
 
