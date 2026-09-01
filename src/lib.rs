@@ -42,6 +42,7 @@
 
 pub mod align;
 pub mod arcface;
+pub mod arcface_recognizer;
 pub mod cnn;
 pub mod detector;
 pub mod embedding;

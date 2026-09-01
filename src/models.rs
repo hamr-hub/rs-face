@@ -393,8 +393,10 @@ pub const SCRFD_10G_KPS: ModelSpec = ModelSpec {
     kind: ModelKind::Detector,
     url: "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
     file_name: "det_10g.onnx",
-    sha256: None,
-    size_bytes: None,
+    // Pinned from buffalo_l.zip @ the v0.7 release tag, verified 2026-09-01 by
+    // downloading the pack and hashing the extracted file on this machine.
+    sha256: Some("5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"),
+    size_bytes: Some(16_923_827),
     license: License::ResearchOnly("InsightFace model weights"),
     input_size: 640,
     accuracy: "WIDER FACE AP easy/medium/hard = 0.954 / 0.940 / 0.828",
@@ -406,7 +408,8 @@ pub const ARCFACE_W600K_R50: ModelSpec = ModelSpec {
     kind: ModelKind::Recognizer,
     url: "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
     file_name: "w600k_r50.onnx",
-    sha256: None,
+    // Pinned from buffalo_l.zip @ v0.7, verified 2026-09-01.
+    sha256: Some("4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"),
     size_bytes: Some(174_383_860),
     license: License::ResearchOnly("InsightFace model weights"),
     input_size: 112,
