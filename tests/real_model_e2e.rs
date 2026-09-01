@@ -36,7 +36,9 @@ fn preferred_backend() -> Backend {
             return b;
         }
     }
-    panic!("no inference backend enabled; enable --features ort-backend or --features tract-backend")
+    panic!(
+        "no inference backend enabled; enable --features ort-backend or --features tract-backend"
+    )
 }
 use std::path::{Path, PathBuf};
 

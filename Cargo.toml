@@ -18,6 +18,11 @@ name = "perf_compare"
 path = "benches/perf_compare.rs"
 harness = false
 
+[[bin]]
+name = "bench-accuracy"
+path = "benches/accuracy.rs"
+required-features = ["ort-backend"]
+
 [dependencies]
 
 # We intentionally keep ZERO runtime dependencies for the core library.

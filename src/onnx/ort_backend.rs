@@ -236,8 +236,9 @@ mod tests {
     fn opening_a_non_onnx_file_fails_at_the_backend_not_by_panicking() {
         let path = std::env::temp_dir().join("rsface_ort_garbage.onnx");
         std::fs::write(&path, b"this is definitely not a protobuf graph").unwrap();
-        let err = OrtSession::open(&path, None, &SessionConfig::default()).err()
-        .expect("must fail");
+        let err = OrtSession::open(&path, None, &SessionConfig::default())
+            .err()
+            .expect("must fail");
         assert!(
             matches!(err, OnnxError::Backend(_)),
             "expected a backend error, got {err:?}"
