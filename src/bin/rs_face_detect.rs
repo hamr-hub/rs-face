@@ -241,6 +241,7 @@ fn main() {
         variance_threshold: 200,
         use_gpu: false,
         equalize_hist: false,
+        gpu_min_pixels: 250 * 250,
     };
     let nms_iou = det_cfg.nms_iou_threshold;
     let detector = Detector::new(cascade.clone(), det_cfg);

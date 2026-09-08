@@ -647,10 +647,8 @@ impl JobRegistry {
         if let Some(override_name) = job.algo_override.lock().unwrap().clone() {
             *job.algo.lock().unwrap() = Some(override_name);
         }
-        let detector = match build_detector(
-            &self.cfg,
-            job.algo_override.lock().unwrap().as_deref(),
-        ) {
+        let detector = match build_detector(&self.cfg, job.algo_override.lock().unwrap().as_deref())
+        {
             Ok(d) => d,
             Err(e) => {
                 // 把 attempted algo 写进 stats,前端 chip 仍能过滤
@@ -1818,7 +1816,10 @@ mod tests {
             "expected local:// fallback when S3 unreachable, got: {storage_key}"
         );
         // 验证 local 文件确实落盘了
-        let local_path = reg.cfg.local_media_dir.join(key.trim_start_matches("jobs/"));
+        let local_path = reg
+            .cfg
+            .local_media_dir
+            .join(key.trim_start_matches("jobs/"));
         // put_with_fallback 直接 join key 到 local_media_dir,不做 trim。
         let local_path_alt = reg.cfg.local_media_dir.join(key);
         let on_disk = local_path.is_file() || local_path_alt.is_file();
@@ -1851,7 +1852,11 @@ mod tests {
             "blocking fallback must always return local:// (no S3 dependency), got: {result}"
         );
         let on_disk = dir.join(key).is_file();
-        assert!(on_disk, "blocking fallback did not create file at {:?}", dir.join(key));
+        assert!(
+            on_disk,
+            "blocking fallback did not create file at {:?}",
+            dir.join(key)
+        );
         let read_back = std::fs::read(dir.join(key)).unwrap();
         assert_eq!(read_back, body);
     }

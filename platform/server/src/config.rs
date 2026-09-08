@@ -224,7 +224,8 @@ pub fn validate(cfg: &Config) -> Result<Vec<String>, String> {
     // streaming through reverse proxies with idle timeouts).
     if cfg.sse_keepalive_secs == 0 {
         warnings.push(
-            "SSE_KEEPALIVE_SECS=0 — disable may cause reverse-proxy idle drops for live streams".into()
+            "SSE_KEEPALIVE_SECS=0 — disable may cause reverse-proxy idle drops for live streams"
+                .into(),
         );
     }
 

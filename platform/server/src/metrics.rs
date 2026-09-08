@@ -107,7 +107,10 @@ impl PlatformMetrics {
             match j.status() {
                 JobStatus::Running => running += 1,
                 JobStatus::Queued => queued += 1,
-                JobStatus::Done => { done += 1; done_count += 1; }
+                JobStatus::Done => {
+                    done += 1;
+                    done_count += 1;
+                }
                 JobStatus::Error => err += 1,
                 JobStatus::Cancelled => cancelled += 1,
             }
@@ -129,16 +132,22 @@ impl PlatformMetrics {
         let total_levels = total_gpu + total_cpu;
         let gpu_pct = if total_levels > 0 {
             (total_gpu as f32) * 100.0 / (total_levels as f32)
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         // 没有 fps_window 字段就保持 0,前端对 0 有降级显示。
         let live_fps_max = 0.0f32;
         let live_fps_avg = 0.0f32;
         let cascade_pass_rate = if total_evals > 0 {
             total_passes as f32 / total_evals as f32
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let avg_job_ms = if done_count > 0 {
             elapsed_sum as f64 / done_count as f64
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let max_conc = reg.cfg.max_concurrent_jobs as u32;
         // 近似并发:running 数(<=max_conc),semaphore permit 是 owned 资源,这里不查它。
         let concurrency = running.min(max_conc as u64) as u32;
@@ -182,30 +191,149 @@ impl PlatformMetrics {
 /// 只输出当前最有用的部分(平台 KPI)。per-job 序列留给上层打点。
 pub fn to_prometheus(m: &PlatformMetrics) -> String {
     let mut out = String::with_capacity(2048);
-    let push_g = |out: &mut String, name: &str, help: &str, m: &PlatformMetrics, f: &dyn Fn(&PlatformMetrics) -> f64| {
-        out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} gauge\n{name} {}\n", f(m)));
+    let push_g = |out: &mut String,
+                  name: &str,
+                  help: &str,
+                  m: &PlatformMetrics,
+                  f: &dyn Fn(&PlatformMetrics) -> f64| {
+        out.push_str(&format!(
+            "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {}\n",
+            f(m)
+        ));
     };
-    push_g(&mut out, "rsface_jobs_total", "Total jobs ever seen in memory", m, &|m| m.total_jobs as f64);
-    push_g(&mut out, "rsface_jobs_running", "Currently running jobs", m, &|m| m.running as f64);
-    push_g(&mut out, "rsface_jobs_queued", "Queued jobs waiting for a permit", m, &|m| m.queued as f64);
-    push_g(&mut out, "rsface_jobs_done", "Completed jobs", m, &|m| m.done as f64);
-    push_g(&mut out, "rsface_jobs_error", "Failed jobs", m, &|m| m.errored as f64);
-    push_g(&mut out, "rsface_jobs_cancelled", "Cancelled jobs", m, &|m| m.cancelled as f64);
-    push_g(&mut out, "rsface_frames_processed_total", "Total frames processed (all jobs)", m, &|m| m.total_frames_processed as f64);
-    push_g(&mut out, "rsface_frames_with_face_total", "Total frames containing ≥1 face", m, &|m| m.total_frames_with_face as f64);
-    push_g(&mut out, "rsface_detections_total", "Total face detections", m, &|m| m.total_detections as f64);
-    push_g(&mut out, "rsface_gpu_levels_total", "Cumulative pyramid levels dispatched to GPU", m, &|m| m.total_gpu_levels as f64);
-    push_g(&mut out, "rsface_cpu_levels_total", "Cumulative pyramid levels dispatched to CPU", m, &|m| m.total_cpu_levels as f64);
+    push_g(
+        &mut out,
+        "rsface_jobs_total",
+        "Total jobs ever seen in memory",
+        m,
+        &|m| m.total_jobs as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_jobs_running",
+        "Currently running jobs",
+        m,
+        &|m| m.running as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_jobs_queued",
+        "Queued jobs waiting for a permit",
+        m,
+        &|m| m.queued as f64,
+    );
+    push_g(&mut out, "rsface_jobs_done", "Completed jobs", m, &|m| {
+        m.done as f64
+    });
+    push_g(&mut out, "rsface_jobs_error", "Failed jobs", m, &|m| {
+        m.errored as f64
+    });
+    push_g(
+        &mut out,
+        "rsface_jobs_cancelled",
+        "Cancelled jobs",
+        m,
+        &|m| m.cancelled as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_frames_processed_total",
+        "Total frames processed (all jobs)",
+        m,
+        &|m| m.total_frames_processed as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_frames_with_face_total",
+        "Total frames containing ≥1 face",
+        m,
+        &|m| m.total_frames_with_face as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_detections_total",
+        "Total face detections",
+        m,
+        &|m| m.total_detections as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_gpu_levels_total",
+        "Cumulative pyramid levels dispatched to GPU",
+        m,
+        &|m| m.total_gpu_levels as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_cpu_levels_total",
+        "Cumulative pyramid levels dispatched to CPU",
+        m,
+        &|m| m.total_cpu_levels as f64,
+    );
     push_g(&mut out, "rsface_gpu_skipped_levels_total", "Cumulative pyramid levels skipped (GPU available but image too small for GPU to be worthwhile)", m, &|m| m.total_gpu_skipped_levels as f64);
-    push_g(&mut out, "rsface_gpu_pct", "Fraction of pyramid levels handled by GPU (0..100)", m, &|m| m.gpu_pct as f64);
-    push_g(&mut out, "rsface_live_fps_max", "Max instantaneous fps across running jobs", m, &|m| m.live_fps_max as f64);
-    push_g(&mut out, "rsface_live_fps_avg", "Mean instantaneous fps across running jobs", m, &|m| m.live_fps_avg as f64);
-    push_g(&mut out, "rsface_cascade_evals_total", "Cumulative cascade window evaluations", m, &|m| m.total_cascade_evals as f64);
-    push_g(&mut out, "rsface_cascade_passes_total", "Cumulative cascade windows passing min_score", m, &|m| m.total_cascade_passes as f64);
-    push_g(&mut out, "rsface_cascade_pass_rate", "cascade_passes / cascade_evals", m, &|m| m.cascade_pass_rate as f64);
-    push_g(&mut out, "rsface_avg_job_ms", "Average wall-time of done jobs in ms", m, &|m| m.avg_job_ms);
-    push_g(&mut out, "rsface_concurrency", "Active concurrent jobs", m, &|m| m.concurrency as f64);
-    push_g(&mut out, "rsface_max_concurrency", "Configured max concurrent jobs", m, &|m| m.max_concurrency as f64);
+    push_g(
+        &mut out,
+        "rsface_gpu_pct",
+        "Fraction of pyramid levels handled by GPU (0..100)",
+        m,
+        &|m| m.gpu_pct as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_live_fps_max",
+        "Max instantaneous fps across running jobs",
+        m,
+        &|m| m.live_fps_max as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_live_fps_avg",
+        "Mean instantaneous fps across running jobs",
+        m,
+        &|m| m.live_fps_avg as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_cascade_evals_total",
+        "Cumulative cascade window evaluations",
+        m,
+        &|m| m.total_cascade_evals as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_cascade_passes_total",
+        "Cumulative cascade windows passing min_score",
+        m,
+        &|m| m.total_cascade_passes as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_cascade_pass_rate",
+        "cascade_passes / cascade_evals",
+        m,
+        &|m| m.cascade_pass_rate as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_avg_job_ms",
+        "Average wall-time of done jobs in ms",
+        m,
+        &|m| m.avg_job_ms,
+    );
+    push_g(
+        &mut out,
+        "rsface_concurrency",
+        "Active concurrent jobs",
+        m,
+        &|m| m.concurrency as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_max_concurrency",
+        "Configured max concurrent jobs",
+        m,
+        &|m| m.max_concurrency as f64,
+    );
     out
 }
 

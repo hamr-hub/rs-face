@@ -468,6 +468,7 @@ mod tests {
             variance_threshold: u64::MAX, // disable pre-filter for uniform image
             use_gpu: false,
             equalize_hist: false,
+            gpu_min_pixels: 250 * 250,
         };
         let det = Detector::new(cascade, cfg);
         let img = GrayImage::new(64, 64); // uniform 0-luminance image

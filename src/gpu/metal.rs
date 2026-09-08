@@ -491,6 +491,7 @@ mod imp {
                     variance_threshold: 200,
                     use_gpu: false,
                     equalize_hist: false,
+                    gpu_min_pixels: 250 * 250,
                 },
             );
             let mut dets = detector.detect(img);

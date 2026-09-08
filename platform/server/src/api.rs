@@ -123,11 +123,17 @@ async fn health() -> Json<serde_json::Value> {
 /// impossible here because `to_prometheus` is allocation-only.
 async fn prometheus_metrics(
     State(state): State<Arc<JobRegistry>>,
-) -> ([(axum::http::HeaderName, axum::http::HeaderValue); 1], String) {
+) -> (
+    [(axum::http::HeaderName, axum::http::HeaderValue); 1],
+    String,
+) {
     let body = crate::metrics::render_prometheus(&state);
     let ct: axum::http::HeaderValue =
         axum::http::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8");
-    ([(axum::http::HeaderName::from_static("content-type"), ct)], body)
+    (
+        [(axum::http::HeaderName::from_static("content-type"), ct)],
+        body,
+    )
 }
 
 /// 报告当前检测器模式 + 权重/级联文件状态 + 可用算法列表。
