@@ -52,3 +52,9 @@ noah-lever-drama-trans-download/
 # the large mp4/HLS fixtures are not.
 platform/testdata/*.mp4
 platform/testdata/hls-loop/
+
+# ---- node_modules ----
+# The web/app.js uses no npm deps at runtime — the platform/web folder
+# never runs `npm install`. node_modules/ here is leftover from a one-off
+# docs build and is intentionally not tracked.
+node_modules/
