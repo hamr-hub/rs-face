@@ -17,9 +17,19 @@ const api = {
   deleteJob:   id => fetch('/api/jobs/' + encodeURIComponent(id), { method: 'DELETE' }).then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
   retryJob:    id => fetch('/api/jobs/' + encodeURIComponent(id) + '/retry', { method: 'POST' }).then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
   batch:       (ids, op) => fetch('/api/jobs/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, op }) }).then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
-  postImage:   file => { const fd = new FormData(); fd.append('file', file); return fetch('/api/jobs/image', { method: 'POST', body: fd }).then(r => r.json()); },
-  postVideo:   file => { const fd = new FormData(); fd.append('file', file); return fetch('/api/jobs/video', { method: 'POST', body: fd }).then(r => r.json()); },
-  postStream:  url => fetch('/api/jobs/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) }).then(r => r.json()),
+  postImage:   (file, algo) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (algo) fd.append('algo', algo); // 空 / undefined = 不发送,后端走 env/默认
+    return fetch('/api/jobs/image', { method: 'POST', body: fd }).then(r => r.json());
+  },
+  postVideo:   (file, algo) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (algo) fd.append('algo', algo);
+    return fetch('/api/jobs/video', { method: 'POST', body: fd }).then(r => r.json());
+  },
+  postStream:  (url, algo) => fetch('/api/jobs/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, algo: algo || undefined }) }).then(r => r.json()),
   getConfig:   () => fetch('/api/config').then(r => r.ok ? r.json() : null).catch(() => null),
   metrics:     () => fetch('/api/metrics').then(r => r.ok ? r.json() : null).catch(() => null),
 };
@@ -1495,6 +1505,18 @@ const upload = (() => {
       setVal('#set-mode', cfg.mode);
       setVal('#set-cnn', cfg.cnn_weights_status || cfg.cnn_weights_path || 'n/a');
       setVal('#set-cascade', cfg.cascade_status || 'n/a');
+      // 用后端 available_algos 填充分享给图片/视频/流的上传算法下拉框。
+      // 注意:不要清掉"默认 (env / 配置)"选项(它在 HTML 里 hardcoded 为首项)。
+      const sel = utils.$('#new-algo-select');
+      if (sel && Array.isArray(cfg.available_algos)) {
+        // 防止重复添加:每次调用前 wipe 除第一个外的所有 options
+        while (sel.options.length > 1) sel.remove(1);
+        for (const a of cfg.available_algos) {
+          const opt = document.createElement('option');
+          opt.value = a; opt.textContent = a;
+          sel.appendChild(opt);
+        }
+      }
     } else { setVal('#set-mode', 'n/a (404)'); setVal('#set-cnn', 'n/a'); setVal('#set-cascade', 'n/a'); }
   }
   function setupDropzone(zoneSel, inputSel, handler) {
@@ -1585,10 +1607,18 @@ const upload = (() => {
       }
     });
   }
+  // 从 modal 里的 #new-algo-select 读取用户当前选择的算法。空字符串
+  // 表示不覆盖 — 后端走 env / 默认。返回 undefined 时也不发送字段。
+  function getAlgoChoice() {
+    const sel = utils.$('#new-algo-select');
+    if (!sel) return undefined;
+    const v = (sel.value || '').trim();
+    return v ? v : undefined;
+  }
   async function submitImage(file) {
     try {
       toast.info(`上传 ${file.name}…`);
-      const data = await api.postImage(file);
+      const data = await api.postImage(file, getAlgoChoice());
       if (data.error) return toast.error('上传失败: ' + data.error);
       toast.success('已提交 #' + (data.job_id || '').slice(0, 8));
       try {
@@ -1600,7 +1630,7 @@ const upload = (() => {
   async function submitVideo(file) {
     try {
       toast.info(`上传 ${file.name}…`);
-      const data = await api.postVideo(file);
+      const data = await api.postVideo(file, getAlgoChoice());
       if (data.error) return toast.error('上传失败: ' + data.error);
       toast.success('已提交 #' + (data.job_id || '').slice(0, 8));
       const job = await api.getJob(data.job_id);
@@ -1609,7 +1639,7 @@ const upload = (() => {
   }
   async function submitStream(url) {
     try {
-      const data = await api.postStream(url);
+      const data = await api.postStream(url, getAlgoChoice());
       if (data.error) return toast.error('启动失败: ' + data.error);
       toast.success('已启动流 #' + (data.job_id || '').slice(0, 8));
       const job = await api.getJob(data.job_id);

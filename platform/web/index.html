@@ -268,6 +268,16 @@
       <div class="url-row"><input id="stream-url" type="text" placeholder="rtsp:// 或 http(s):// 流地址"><button id="stream-go" class="pv-btn primary">开始</button></div>
       <p class="hint">实时识别流中每帧;任务会自动加入左侧列表。</p>
     </div>
+    <!-- 算法选择:适用于本 modal 提交的所有任务(图片/视频/流)。
+         留空 = 走环境变量 / 默认。生产里通常想固定 algo 时改这里。-->
+    <div class="new-pane-shared" id="pane-algo-shared">
+      <label class="algo-label" for="new-algo-select">检测算法</label>
+      <select id="new-algo-select" class="pv-btn" aria-label="选择检测算法" title="覆盖本任务的算法选择;留空走环境变量 / 默认">
+        <option value="" selected>默认 (env / 配置)</option>
+        <!-- options 由 app.js 根据 /api/config.available_algos 动态填充 -->
+      </select>
+      <span class="hint">空=走默认;可选:haar / cnn / yunet / mtcnn / hog / luminance</span>
+    </div>
   </div>
 </div>
 

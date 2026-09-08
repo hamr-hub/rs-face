@@ -733,6 +733,23 @@ body {
 }
 .url-row input:focus { outline: none; border-color: var(--accent); }
 
+/* 新建任务 modal 底部"算法"覆盖选项。始终可见(不依赖 pane)。 */
+.new-pane-shared {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin-top: 14px; padding: 8px 10px;
+  border: 1px dashed var(--border); border-radius: var(--radius);
+  background: var(--bg-2);
+}
+.new-pane-shared .algo-label {
+  color: var(--fg-dim); font-size: 12px; font-weight: 500;
+}
+.new-pane-shared select {
+  background: var(--bg-3); border: 1px solid var(--border);
+  color: var(--fg); border-radius: var(--radius);
+  padding: 5px 10px; font: inherit; font-size: 13px;
+}
+.new-pane-shared .hint { margin-left: auto; }
+
 .settings-list { display: flex; flex-direction: column; gap: 6px; }
 .setting-row {
   display: flex; justify-content: space-between; align-items: center;
