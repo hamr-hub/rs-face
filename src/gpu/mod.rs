@@ -669,8 +669,9 @@ mod opencl {
             }
             let src = CString::new(CL_KERNEL_SRC).unwrap();
             let src_len = CL_KERNEL_SRC.len() as ClSize;
-            let src_ptr = src.as_ptr() as *const i8;
-            let program = (lib.create_program_with_source)(ctx, 1, &src_ptr, &src_len, &mut errc);
+            let src_ptr: *const c_char = src.as_ptr();
+            let program =
+                (lib.create_program_with_source)(ctx, 1, &src_ptr as *const *const c_char, &src_len, &mut errc);
             if errc != CL_SUCCESS {
                 (lib.release_command_queue)(queue);
                 (lib.release_context)(ctx);
@@ -693,7 +694,7 @@ mod opencl {
             let mk = |name: &str| -> Result<ClKernel, &'static str> {
                 let cs = CString::new(name).unwrap();
                 let mut errk: ClInt = 0;
-                let name_ptr = cs.as_ptr() as *const i8;
+                let name_ptr: *const c_char = cs.as_ptr();
                 let k = (lib.create_kernel)(program, name_ptr, &mut errk);
                 if errk != CL_SUCCESS {
                     Err("create_kernel failed")

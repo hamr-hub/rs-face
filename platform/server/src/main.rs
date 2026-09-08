@@ -5,6 +5,7 @@
 mod api;
 mod config;
 mod jobs;
+mod metrics;
 mod persist;
 mod s3;
 
@@ -14,6 +15,16 @@ use std::sync::{Arc, Mutex};
 #[tokio::main]
 async fn main() {
     let cfg = config::Config::from_env();
+    // 启动期配置校验 — 把"端口格式错/上传 0 字节/并发 0"这种会让进程
+    // 跑起来但一接请求就 500 的硬错误挡在 listener bind 之前。
+    if let Err(e) = config::validate(&cfg) {
+        eprintln!("[rsface-platform] FATAL config error: {e}");
+        eprintln!("[rsface-platform] refusing to start — fix the env vars above and retry");
+        std::process::exit(2);
+    }
+    for w in config::validate(&cfg).unwrap_or_default() {
+        eprintln!("[rsface-platform] WARN: {w}");
+    }
     let mode = if cfg.use_cnn || cfg.cnn_weights.is_some() {
         "cnn"
     } else {
@@ -75,6 +86,7 @@ async fn main() {
         job_slots,
         running_jobs: std::sync::atomic::AtomicU64::new(0),
         queued_jobs: std::sync::atomic::AtomicU64::new(0),
+        started_at: std::time::Instant::now(),
         shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 

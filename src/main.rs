@@ -7,6 +7,7 @@ use rsface::face_detector::FaceDetector;
 use rsface::haar::Cascade;
 use rsface::hog_face::{HogConfig, HogFaceDetector};
 use rsface::image::GrayImage;
+use rsface::luminance_face::{LuminanceConfig, LuminanceFaceDetector};
 use rsface::mtcnn::{MtcnnConfig, MtcnnDetector};
 use rsface::pipeline::{Pipeline, PipelineConfig};
 use rsface::source;
@@ -16,7 +17,7 @@ fn print_help() {
     println!(
         "rs-face — zero-dep multi-algorithm face detector\n\n\
          USAGE:\n  \
-         rs-face <INPUT> --out <DIR> --algo <haar|cnn|yunet|mtcnn|hog> [options]\n\n\
+         rs-face <INPUT> --out <DIR> --algo <haar|cnn|yunet|mtcnn|hog|luminance> [options]\n\n\
          INPUT forms:\n  \
            test://N            synthetic test pattern (N frames)\n  \
            /path/to/dir        image sequence (PNG/PPM/JPG files)\n  \
@@ -24,11 +25,12 @@ fn print_help() {
            http(s)://host/p    single image or PNG sequence base URL\n  \
            *.mp4|*.mov|*.avi|*.mkv|*.webm | rtsp://...\n                           (requires `ffmpeg` on PATH)\n\n\
          ALGORITHMS:\n  \
-           haar     Viola-Jones Haar cascade (default; core::Detector)\n  \
-           cnn      small CNN (24x24, Conv+ReLU+Pool+FC, core::CnnDetector)\n  \
-           yunet    YuNet-style anchor-based, 5 scales (core::YunetDetector)\n  \
-           mtcnn    MTCNN 3-stage cascade (P-Net -> R-Net -> O-Net)\n  \
-           hog      HOG + Linear SVM, 64x128 window, dense multi-scale\n\n\
+           haar       Viola-Jones Haar cascade (default; core::Detector)\n  \
+           cnn        small CNN (24x24, Conv+ReLU+Pool+FC, core::CnnDetector)\n  \
+           yunet      YuNet-style anchor-based, 5 scales (core::YunetDetector)\n  \
+           mtcnn      MTCNN 3-stage cascade (P-Net -> R-Net -> O-Net)\n  \
+           hog        HOG + Linear SVM, 64x128 window, dense multi-scale\n  \
+           luminance  band-pattern + mirror symmetry (no weights, classical CV)\n\n\
          OPTIONS:\n  \
            --out <DIR>           output directory (required)\n  \
            --algo <NAME>         detection algorithm (default: haar)\n  \
@@ -319,8 +321,19 @@ fn main() {
                 }
             }
         }
+        "luminance" => {
+            match run_algo_pipeline(&mut *src, &out, &cfg, |img: &GrayImage| {
+                LuminanceFaceDetector::new(LuminanceConfig::default()).detect(img)
+            }) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("luminance pipeline error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         other => {
-            eprintln!("unknown --algo: {} (use haar|cnn|yunet|mtcnn|hog)", other);
+            eprintln!("unknown --algo: {} (use haar|cnn|yunet|mtcnn|hog|luminance)", other);
             std::process::exit(2);
         }
     };

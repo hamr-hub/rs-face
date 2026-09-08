@@ -30,6 +30,7 @@ use rsface::detector::{Detection, Detector, DetectorConfig};
 use rsface::face_detector::FaceDetector;
 use rsface::haar::Cascade;
 use rsface::image::{png::write_png_rgb, GrayImage, RgbImage};
+use rsface::luminance_face::{LuminanceConfig, LuminanceFaceDetector};
 use rsface::source::{open as open_source, Frame};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -105,6 +106,11 @@ pub struct Job {
     /// 检测算法名(haar/cnn/yunet/mtcnn/hog),由 run_job 在 detector 构建后写入,
     /// 摘要里暴露给前端做算法过滤 chip。
     pub algo: Mutex<Option<String>>,
+    /// 用户在 upload 时指定的算法(haar/cnn/yunet/mtcnn/hog/luminance);
+    /// 优先于 `RSFACE_ALGO` 环境变量。`None` = 走环境变量 / 默认。
+    /// 在 `Job::create` 之前由 `api::handle_upload` 写入(基于 multipart
+    /// `algo` 字段),`run_job` 在构建 detector 时读取。
+    pub algo_override: Mutex<Option<String>>,
     /// 原始媒体 S3 key(图片/视频任务)。
     pub original_media_key: Mutex<Option<String>>,
     pub error: Mutex<Option<String>>,
@@ -196,6 +202,8 @@ pub struct JobRegistry {
     /// 排队中(已创建未拿到 permit)任务数,背压用。
     /// `max_queue_depth > 0` 时超过即拒绝新任务(HTTP 429)。
     pub queued_jobs: AtomicU64,
+    /// 平台进程启动时刻,用于 `/api/metrics` 上报 uptime。
+    pub started_at: std::time::Instant,
     /// 停机信号:true 后 spawn_run 不再接收新任务,运行中的收到 cancel。
     pub shutdown: Arc<AtomicBool>,
 }
@@ -209,6 +217,7 @@ pub fn is_terminal(status: JobStatus) -> bool {
 }
 
 /// 队列背压:排队深度达到 `MAX_QUEUE_DEPTH` 时 create 返回该错误。
+#[derive(Debug)]
 pub struct QueueFull {
     pub depth: usize,
     pub max: usize,
@@ -269,6 +278,7 @@ impl JobRegistry {
             frames: Mutex::new(Vec::new()),
             stats: Mutex::new(JobStats::default()),
             algo: Mutex::new(None),
+            algo_override: Mutex::new(None),
             original_media_key: Mutex::new(None),
             error: Mutex::new(None),
             archived: Mutex::new(false),
@@ -335,6 +345,17 @@ impl JobRegistry {
     pub fn set_original_input(&self, id: &str, input: String) {
         if let Some(j) = self.jobs.lock().unwrap().get(id).cloned() {
             *j.original_input.lock().unwrap() = Some(input);
+        }
+    }
+
+    /// 设置 job 的算法覆盖(来自 upload 表单的 `algo` 字段)。
+    /// 仅在名字属于 `available_algos()` 时生效;否则忽略(回退到 env/默认)。
+    pub fn set_algo_override(&self, id: &str, algo: String) {
+        if let Some(j) = self.jobs.lock().unwrap().get(id).cloned() {
+            let lower = algo.trim().to_ascii_lowercase();
+            if available_algos().contains(&lower.as_str()) {
+                *j.algo_override.lock().unwrap() = Some(lower);
+            }
         }
     }
 
@@ -618,7 +639,10 @@ impl JobRegistry {
         //    全部对外暴露同一份 `detect(gray) -> Vec<Detection>` 接口,后续
         //    frame 循环无需分支。SSE 事件同时带 `mode` (旧) 和 `algo` (新)
         //    字段,前端新老代码都能识别。
-        let detector = build_detector(&self.cfg)?;
+        let detector = build_detector(
+            &self.cfg,
+            job.algo_override.lock().unwrap().as_deref(),
+        )?;
         // 记录实际使用的算法,供 /api/jobs 摘要里的 algo 字段(算法过滤 chip 用)
         let algo_name = detector.kind_name().to_string();
         *job.algo.lock().unwrap() = Some(algo_name.clone());
@@ -1177,6 +1201,7 @@ impl Drop for StreamGuard {
 /// - `Yunet`: core `YunetDetector`(5 个 anchor scale + 15-dim 输出 + NMS)。
 /// - `MtCnn`: core `MtcnnDetector`(P-Net → R-Net → O-Net 三段级联)。
 /// - `HogSvm`: core `HogFaceDetector`(HOG 8x8 cell + Linear SVM 64x128 窗口)。
+/// - `Luminance`: core `LuminanceFaceDetector`(带状亮度 + 镜像对称 + 边缘密度)。
 ///
 /// 内部使用一次构建、每次 run_job 独立持有一个实例(CnnDetector/Yunet 的
 /// scratch 是 !Sync,需独占单线程使用,正好匹配 run_job 的单 std::thread 模型)。
@@ -1187,12 +1212,13 @@ pub enum DetectorKind {
     Yunet(rsface::yunet::YunetDetector),
     MtCnn(rsface::mtcnn::MtcnnDetector),
     HogSvm(rsface::hog_face::HogFaceDetector),
+    Luminance(LuminanceFaceDetector),
 }
 
 impl DetectorKind {
-    /// 统一 `detect` 接口:Haar/Cnn/Yunet/MtCnn/HogSvm 各自调 core 的 detect,
+    /// 统一 `detect` 接口:Haar/Cnn/Yunet/MtCnn/HogSvm/Luminance 各自调 core 的 detect,
     /// Cnn 先把 GrayImage → f32 [0,1] 缓冲,其它直接用 GrayImage。
-    /// 5 个 detector 都返回 `Vec<Detection>`,run_job 不需要任何分支。
+    /// 6 个 detector 都返回 `Vec<Detection>`,run_job 不需要任何分支。
     pub fn detect(&self, gray: &GrayImage) -> Vec<Detection> {
         match self {
             DetectorKind::Haar(d) => d.detect(gray),
@@ -1217,6 +1243,7 @@ impl DetectorKind {
             DetectorKind::Yunet(d) => d.detect(gray),
             DetectorKind::MtCnn(d) => d.detect(gray),
             DetectorKind::HogSvm(d) => d.detect(gray),
+            DetectorKind::Luminance(d) => d.detect(gray),
         }
     }
 
@@ -1228,6 +1255,7 @@ impl DetectorKind {
             DetectorKind::Yunet(_) => "yunet",
             DetectorKind::MtCnn(_) => "mtcnn",
             DetectorKind::HogSvm(_) => "hog",
+            DetectorKind::Luminance(_) => "luminance",
         }
     }
 }
@@ -1240,9 +1268,8 @@ fn select_algo_name(cfg: &Config) -> String {
         .ok()
         .map(|s| s.trim().to_ascii_lowercase());
     match from_env.as_deref() {
-        Some("haar") | Some("cnn") | Some("yunet") | Some("mtcnn") | Some("hog") => {
-            from_env.unwrap()
-        }
+        Some("haar") | Some("cnn") | Some("yunet") | Some("mtcnn") | Some("hog")
+        | Some("luminance") => from_env.unwrap(),
         Some(other) => {
             eprintln!("[jobs] unknown RSFACE_ALGO='{other}', falling back to haar/cnn logic");
             if cfg.use_cnn || cfg.cnn_weights.is_some() {
@@ -1264,9 +1291,15 @@ fn select_algo_name(cfg: &Config) -> String {
 /// 根据 Config + `RSFACE_ALGO` 环境变量选择并构建检测器。
 /// 默认行为兼容老配置:`use_cnn=true` 或 `cnn_weights` 路径已设置时走 CNN,
 /// 否则走 Haar。新的 `RSFACE_ALGO` 显式覆盖以上规则,接受
-/// `haar` / `cnn` / `yunet` / `mtcnn` / `hog`。
-pub fn build_detector(cfg: &Config) -> std::io::Result<DetectorKind> {
-    let algo = select_algo_name(cfg);
+/// `haar` / `cnn` / `yunet` / `mtcnn` / `hog` / `luminance`。
+///
+/// `override_algo` 优先于 env 与默认(per-job 覆盖,来自 upload 表单)。
+/// 必须是 `available_algos()` 之一;否则忽略。
+pub fn build_detector(cfg: &Config, override_algo: Option<&str>) -> std::io::Result<DetectorKind> {
+    let algo = match override_algo {
+        Some(a) if available_algos().contains(&a) => a.to_string(),
+        _ => select_algo_name(cfg),
+    };
     match algo.as_str() {
         "haar" => {
             let cascade = Cascade::load(&cfg.cascade_path).map_err(|e| {
@@ -1313,6 +1346,9 @@ pub fn build_detector(cfg: &Config) -> std::io::Result<DetectorKind> {
         "hog" => Ok(DetectorKind::HogSvm(
             rsface::hog_face::HogFaceDetector::new(rsface::hog_face::HogConfig::default()),
         )),
+        "luminance" => Ok(DetectorKind::Luminance(LuminanceFaceDetector::new(
+            LuminanceConfig::default(),
+        ))),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unsupported algo '{other}'"),
@@ -1348,6 +1384,9 @@ pub fn build_detector_by_name(name: &str) -> std::io::Result<DetectorKind> {
         "hog" => Ok(DetectorKind::HogSvm(
             rsface::hog_face::HogFaceDetector::new(rsface::hog_face::HogConfig::default()),
         )),
+        "luminance" => Ok(DetectorKind::Luminance(LuminanceFaceDetector::new(
+            LuminanceConfig::default(),
+        ))),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unsupported algo '{other}'"),
@@ -1357,7 +1396,7 @@ pub fn build_detector_by_name(name: &str) -> std::io::Result<DetectorKind> {
 
 /// 列出所有可用的算法名(给 `/api/config` 和 `/compare` 用)。
 pub fn available_algos() -> &'static [&'static str] {
-    &["haar", "cnn", "yunet", "mtcnn", "hog"]
+    &["haar", "cnn", "yunet", "mtcnn", "hog", "luminance"]
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,6 +1589,7 @@ mod tests {
             job_slots: Arc::new(Semaphore::new(1)),
             running_jobs: AtomicU64::new(0),
             queued_jobs: AtomicU64::new(0),
+            started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
         // 3 个 queued(permit 不消费):前 2 个 OK,第 3 个 429。
@@ -1569,6 +1609,126 @@ mod tests {
         // running 扣减不死锁/不越界。
         reg.mark_finished();
         assert_eq!(reg.running_jobs.load(Ordering::SeqCst), 0);
+    }
+
+    /// 校验:`set_algo_override` 只接受 `available_algos()` 内的名字,
+    /// 其它(拼写错误、未知、大小写、空)全部静默忽略。
+    #[tokio::test]
+    async fn algo_override_validates_against_available_algos() {
+        let cfg = Config::from_env();
+        let reg = JobRegistry {
+            jobs: Mutex::new(HashMap::new()),
+            s3: Arc::new(crate::s3::S3Client::new(
+                "http://127.0.0.1:1".into(),
+                "us-east-1".into(),
+                "k".into(),
+                "s".into(),
+                "b".into(),
+            )),
+            cfg,
+            db: Arc::new(crate::persist::Db { pool: None }),
+            rt: tokio::runtime::Handle::current(),
+            job_slots: Arc::new(Semaphore::new(2)),
+            running_jobs: AtomicU64::new(0),
+            queued_jobs: AtomicU64::new(0),
+            started_at: std::time::Instant::now(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        let job = reg.create(JobKind::Stream, "t".into()).unwrap();
+        let id = job.id.clone();
+        for good in ["haar", "cnn", "yunet", "mtcnn", "hog", "luminance"] {
+            reg.set_algo_override(&id, good.to_string());
+            assert_eq!(
+                job.algo_override.lock().unwrap().as_deref(),
+                Some(good),
+                "{good} must be accepted"
+            );
+        }
+        for bad in ["", "HAAR", "yolo", "fast-rcnn", "transformer", ".."] {
+            reg.set_algo_override(&id, bad.to_string());
+            // 应当保持上次有效值不变(bad 不会覆盖 good)。
+            let cur = job.algo_override.lock().unwrap().clone();
+            let cur_str = cur.unwrap_or_default();
+            assert!(
+                available_algos().contains(&cur_str.as_str()),
+                "bad input {bad:?} should not have overwritten to a non-valid algo (now = {cur_str:?})"
+            );
+        }
+    }
+
+    /// 校验:per-job algo override 在 `build_detector` 中优先于 env 变量。
+    /// 注入 RSFACE_ALGO=haar(走 cascade)后,override=luminance 走 luminance。
+    /// 这条覆盖 2026-09-08 修的 bug:之前表单 `algo` 被忽略,默认 env 路径。
+    #[tokio::test]
+    async fn build_detector_override_beats_env_var() {
+        let cfg = Config::from_env();
+        // RSFACE_ALGO 显式设 haar(env 默认就是)。override 必须成功 — luminance
+        // 不需要 cascade 文件,这正是 per-job override 的核心价值。
+        std::env::set_var("RSFACE_ALGO", "haar");
+        let det = build_detector(&cfg, Some("luminance"))
+            .expect("luminance override must succeed without cascade");
+        assert_eq!(det.kind_name(), "luminance");
+        std::env::remove_var("RSFACE_ALGO");
+    }
+
+    /// 校验:未知 override 字符串回退到 env(此处就是 haar),不会 panic。
+    /// 这条覆盖 2026-09-08 之前用户传 `algo=foo` 时 build_detector 返回
+    /// "unsupported algo 'foo'" 然后 run_job 直接挂掉的回归。
+    #[tokio::test]
+    async fn build_detector_unknown_override_falls_back_to_env() {
+        let cfg = Config::from_env();
+        std::env::set_var("RSFACE_ALGO", "haar");
+        // 用 cascade.rfcf 不存在的 cfg(默认),让 fallback 也失败 → 拿到清晰错误
+        // 而不是 panic。
+        let res = build_detector(&cfg, Some("yolo-v8-not-supported"));
+        // 失败信息应来自 cascade load(因为 fallback 仍是 haar),而不是 panic。
+        let err = match res {
+            Ok(_) => panic!("expected build_detector to fail with cascade.rfcf missing"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("cascade") || err.contains("algo"),
+            "expected cascade or algo error, got: {err}"
+        );
+        std::env::remove_var("RSFACE_ALGO");
+    }
+
+    /// 校验:`begin_shutdown()` 对所有 running job 触发 cancel flag —
+    /// run_job 的 frame loop 必须立即响应(不等到 watchdog 超时)。
+    #[tokio::test]
+    async fn begin_shutdown_signals_running_jobs() {
+        let cfg = Config::from_env();
+        let reg = JobRegistry {
+            jobs: Mutex::new(HashMap::new()),
+            s3: Arc::new(crate::s3::S3Client::new(
+                "http://127.0.0.1:1".into(),
+                "us-east-1".into(),
+                "k".into(),
+                "s".into(),
+                "b".into(),
+            )),
+            cfg,
+            db: Arc::new(crate::persist::Db { pool: None }),
+            rt: tokio::runtime::Handle::current(),
+            job_slots: Arc::new(Semaphore::new(2)),
+            running_jobs: AtomicU64::new(0),
+            queued_jobs: AtomicU64::new(0),
+            started_at: std::time::Instant::now(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        let job = reg.create(JobKind::Stream, "long".into()).unwrap();
+        let id = job.id.clone();
+        reg.mark_started();
+        job.set_status(JobStatus::Running);
+        // cancel 还没设 → false
+        assert!(!job.cancel.load(Ordering::SeqCst));
+        reg.begin_shutdown();
+        // 触发后 cancel = true(同 run_job 主循环检查的同一个 AtomicBool)
+        assert!(
+            job.cancel.load(Ordering::SeqCst),
+            "begin_shutdown must flip cancel flag on every running job"
+        );
+        let _ = id;
     }
 
     #[test]

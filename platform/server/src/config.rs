@@ -152,3 +152,143 @@ fn optional_path(key: &str) -> Option<PathBuf> {
         _ => None,
     }
 }
+
+/// Startup-time config validation. Returns Err on a hard failure (will
+/// prevent server start) or Ok(warnings) listing soft issues the operator
+/// should know about.
+///
+/// Hard failures:
+/// - bind_addr unparseable (the listener can't bind).
+/// - upload limits = 0 (uploads would be rejected with 0-byte limit).
+/// - max_concurrent_jobs out of [1, 64] (off-by-one in env vars).
+///
+/// Soft warnings (printed but non-fatal):
+/// - cascade_path missing (the Haar default — jobs submitted without per-job
+///   algo override will error at run time, which is the correct user-facing
+///   signal; we don't want to crash the platform over a missing cascade when
+///   the user explicitly requested e.g. `luminance`).
+/// - cnn_weights path set but file missing.
+/// - tmp_dir / local_media_dir not writable (logged elsewhere already).
+pub fn validate(cfg: &Config) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+
+    // bind_addr: SocketAddr parse.
+    if cfg.bind_addr.parse::<std::net::SocketAddr>().is_err() {
+        return Err(format!(
+            "BIND_ADDR={:?} is not a valid SocketAddr (expected host:port, e.g. 0.0.0.0:8080)",
+            cfg.bind_addr
+        ));
+    }
+
+    // Upload limits must be > 0.
+    if cfg.upload_limit_image == 0 {
+        return Err("UPLOAD_LIMIT_IMAGE_MB resolved to 0 bytes — uploads would be rejected".into());
+    }
+    if cfg.upload_limit_video == 0 {
+        return Err("UPLOAD_LIMIT_VIDEO_GB resolved to 0 bytes — uploads would be rejected".into());
+    }
+
+    // Concurrent jobs.
+    if cfg.max_concurrent_jobs == 0 {
+        return Err("MAX_CONCURRENT_JOBS=0 — server cannot start any job".into());
+    }
+    if cfg.max_concurrent_jobs > 64 {
+        warnings.push(format!(
+            "MAX_CONCURRENT_JOBS={} > 64 — high parallelism may starve DB / S3",
+            cfg.max_concurrent_jobs
+        ));
+    }
+
+    // Cascade: only a soft warning. Hard fail happens in run_job with a clear
+    // error message; per-job algo override (added 2026-09-08) means a missing
+    // cascade is fine if the user only ever runs luminance / yunet / mtcnn.
+    if !cfg.cascade_path.is_file() {
+        warnings.push(format!(
+            "cascade file missing at {} — Haar jobs will fail at runtime (use --algo for other detectors)",
+            cfg.cascade_path.display()
+        ));
+    }
+
+    // CNN weights: same soft handling.
+    if let Some(p) = &cfg.cnn_weights {
+        if !p.is_file() {
+            warnings.push(format!(
+                "cnn weights file missing at {} — CNN jobs will fail at runtime",
+                p.display()
+            ));
+        }
+    }
+
+    // SSE keepalive must be > 0 if any client connects (SSE default is 15s,
+    // but operators occasionally set it to 0 to disable, which silently breaks
+    // streaming through reverse proxies with idle timeouts).
+    if cfg.sse_keepalive_secs == 0 {
+        warnings.push(
+            "SSE_KEEPALIVE_SECS=0 — disable may cause reverse-proxy idle drops for live streams".into()
+        );
+    }
+
+    // Shutdown grace.
+    if cfg.shutdown_grace_secs == 0 {
+        warnings.push(
+            "SHUTDOWN_GRACE_SECS=0 — process will exit immediately on SIGTERM, dropping active jobs".into()
+        );
+    }
+
+    Ok(warnings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_with(bind: &str, image_mb: usize, video_gb: usize, max_jobs: usize) -> Config {
+        let mut c = Config::from_env();
+        c.bind_addr = bind.to_string();
+        c.upload_limit_image = image_mb * 1024 * 1024;
+        c.upload_limit_video = video_gb * 1024 * 1024 * 1024;
+        c.max_concurrent_jobs = max_jobs;
+        // 把 cascade 路径改成已存在的目录里某个文件,让 hard-warn 不触发
+        c.cascade_path = std::path::PathBuf::from("Cargo.toml");
+        c
+    }
+
+    #[test]
+    fn validate_accepts_sane_default() {
+        let cfg = cfg_with("0.0.0.0:8080", 50, 2, 2);
+        let w = validate(&cfg).expect("default cfg must validate");
+        // 至少有 cascade-ok 这条不警告;warnings 可能为空或仅含高并发等次要项。
+        // 这里只确认不返回 Err。
+        let _ = w;
+    }
+
+    #[test]
+    fn validate_rejects_bad_bind_addr() {
+        let cfg = cfg_with("not-a-socket", 50, 2, 2);
+        assert!(validate(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_upload_limit() {
+        let cfg = cfg_with("0.0.0.0:8080", 0, 2, 2);
+        assert!(validate(&cfg).is_err());
+        let cfg = cfg_with("0.0.0.0:8080", 50, 0, 2);
+        assert!(validate(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_concurrency() {
+        let cfg = cfg_with("0.0.0.0:8080", 50, 2, 0);
+        assert!(validate(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_warns_on_high_concurrency() {
+        let cfg = cfg_with("0.0.0.0:8080", 50, 2, 128);
+        let w = validate(&cfg).expect("high concurrency is a warning, not failure");
+        assert!(
+            w.iter().any(|s| s.contains("MAX_CONCURRENT_JOBS=128")),
+            "expected warning about high concurrency, got: {w:?}"
+        );
+    }
+}

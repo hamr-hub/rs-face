@@ -44,6 +44,7 @@ pub fn router(state: Arc<JobRegistry>) -> Router {
         .route("/api/health", get(health))
         .route("/api/config", get(config_info))
         .route("/api/metrics", get(metrics))
+        .route("/metrics", get(prometheus_metrics))
         .route("/api/jobs", get(list_jobs))
         .route("/api/jobs/stats", get(job_stats))
         .route("/api/jobs/batch", post(batch_ops).delete(batch_ops))
@@ -114,6 +115,19 @@ fn apply_cors_headers(headers: &mut axum::http::HeaderMap, allow_origin: &str) {
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok", "service": "rsface-platform"}))
+}
+
+/// `GET /metrics` — Prometheus exposition format. Renders the same data as
+/// `/api/metrics` (JSON) but in Prometheus 0.0.4 text format so a scraper can
+/// ingest it without a JSON adapter. Always returns 200; failure modes are
+/// impossible here because `to_prometheus` is allocation-only.
+async fn prometheus_metrics(
+    State(state): State<Arc<JobRegistry>>,
+) -> ([(axum::http::HeaderName, axum::http::HeaderValue); 1], String) {
+    let body = crate::metrics::render_prometheus(&state);
+    let ct: axum::http::HeaderValue =
+        axum::http::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8");
+    ([(axum::http::HeaderName::from_static("content-type"), ct)], body)
 }
 
 /// 报告当前检测器模式 + 权重/级联文件状态 + 可用算法列表。
@@ -654,29 +668,47 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         _ => state.cfg.upload_limit_video,
     };
     // 取第一个 file 字段。
+    // 同时提取 `algo` 字段(可选)作为本 job 的算法覆盖。
     let mut filename = None;
     let mut bytes: Vec<u8> = Vec::new();
+    let mut algo_override: Option<String> = None;
     while let Ok(Some(field)) = mp.next_field().await {
-        if field.name() != Some("file") {
-            continue;
-        }
-        filename = field.file_name().map(|s| s.to_string());
-        match field.bytes().await {
-            Ok(b) => {
-                if b.len() > max_bytes {
-                    return error_response(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        &format!(
-                            "upload too large: {} bytes (max {} bytes)",
-                            b.len(),
-                            max_bytes
-                        ),
-                    );
+        match field.name() {
+            Some("file") => {
+                filename = field.file_name().map(|s| s.to_string());
+                match field.bytes().await {
+                    Ok(b) => {
+                        if b.len() > max_bytes {
+                            return error_response(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                &format!(
+                                    "upload too large: {} bytes (max {} bytes)",
+                                    b.len(),
+                                    max_bytes
+                                ),
+                            );
+                        }
+                        bytes = b.to_vec();
+                    }
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            &format!("read upload: {e}"),
+                        )
+                    }
                 }
-                bytes = b.to_vec();
-                break;
             }
-            Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("read upload: {e}")),
+            Some("algo") => {
+                // 读取文本字段值;长度上限 32 防滥用。`set_algo_override`
+                // 会再次校验是否属于 `available_algos()`。
+                if let Ok(s) = field.text().await {
+                    let trimmed = s.trim().to_string();
+                    if !trimmed.is_empty() && trimmed.len() <= 32 {
+                        algo_override = Some(trimmed);
+                    }
+                }
+            }
+            _ => {} // 忽略其它字段
         }
     }
     let Some(name) = filename else {
@@ -693,6 +725,9 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
     };
     let id = job.id.clone();
     state.set_original_input(&id, name.clone());
+    if let Some(a) = algo_override.take() {
+        state.set_algo_override(&id, a);
+    }
 
     // 落盘(阻塞 IO 放到 blocking 线程)。
     // Image kind:对 PNG / JPG 先 ffmpeg 转 PGM,平台层兜底,core 的 PNG
@@ -782,6 +817,9 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
 #[derive(serde::Deserialize)]
 struct StreamReq {
     url: String,
+    /// 可选 per-job 算法覆盖(`haar` / `cnn` / ... / `luminance`),
+    /// 无效值会被忽略并回退到 env/默认。
+    algo: Option<String>,
 }
 
 async fn start_stream(
@@ -807,6 +845,9 @@ async fn start_stream(
     };
     let id = job.id.clone();
     state.set_original_input(&id, url.clone());
+    if let Some(a) = req.algo {
+        state.set_algo_override(&id, a);
+    }
     state.spawn_run(job, url);
     Json(serde_json::json!({"job_id": id})).into_response()
 }
