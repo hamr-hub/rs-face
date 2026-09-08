@@ -61,3 +61,17 @@ impl GpuBackend for AscendBackend {
         Vec::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::backend::BackendDescriptor;
+
+    #[test]
+    fn ascend_descriptor_reports_id_and_vendor() {
+        let d = &ASCEND;
+        assert_eq!(d.id(), "ascend");
+        assert!(!d.vendor().is_empty());
+        let _ = d.probe();
+    }
+}

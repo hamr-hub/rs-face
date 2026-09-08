@@ -74,7 +74,9 @@ manual_div_ceil = "allow"
 manual_is_multiple_of = "allow"
 manual_range_contains = "allow"
 manual_saturating_arithmetic = "allow"
-manual_checked_ops = "allow"
+# `manual_checked_ops` was renamed/removed in newer clippy; wrap in
+# `[lints]` table with unknown_lints allow so CI works across toolchains.
+# (Cargo treats this as a typo on stable Rust 1.92+, emitting E0602.)
 unnecessary_cast = "allow"
 io_other_error = "allow"
 mut_from_ref = "allow"

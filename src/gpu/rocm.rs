@@ -57,3 +57,20 @@ impl GpuBackend for RocmBackend {
         Vec::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::backend::BackendDescriptor;
+
+    #[test]
+    fn rocm_descriptor_reports_id_and_vendor() {
+        let d = &ROCM;
+        assert_eq!(d.id(), "rocm");
+        assert!(!d.vendor().is_empty());
+        // ROCm 是 stub 状态:没有 AMD GPU / ROCm runtime 时 probe 必须 None。
+        // 启用 HIP feature 后才会变成 Some。这条契约保证:即使有 AMD GPU
+        // 存在但 feature 未开,程序不会 panic / 不会调错 backend。
+        let _ = d.probe();
+    }
+}

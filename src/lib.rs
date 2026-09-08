@@ -20,7 +20,13 @@
 #![allow(clippy::manual_div_ceil)] // Readability: written as `(a + b - 1) / b` for parity with OpenCV refs.
 #![allow(clippy::manual_is_multiple_of)] // Avoid pulling the unstable div_rem helper.
 #![allow(clippy::manual_range_contains)] // Readability: `x >= 1 && x <= 10` reads clearer in numerical kernels.
-#![allow(clippy::manual_saturating_arithmetic)] // Pipeline hot path; explicit branches are measurably faster.
+#![allow(clippy::manual_saturating_arithmetic)]
+// Pipeline hot path; explicit branches are measurably faster.
+// `clippy::manual_checked_ops` was renamed/removed in newer clippy; the
+// `#[allow(unknown_lints)]` keeps this line working across toolchain
+// versions (stable emits "unknown lint" warning otherwise — `-D warnings`
+// in CI would turn that into a failure).
+#![allow(unknown_lints)]
 #![allow(clippy::manual_checked_ops)] // `(a / b)` written as `checked_div` reads worse in image-size math.
 #![allow(clippy::unnecessary_cast)] // `u16 as u16` is sometimes emitted by cfg-gated code paths.
 #![allow(clippy::io_other_error)] // PipelineError -> io::Error::new uses Display string for surfacing.

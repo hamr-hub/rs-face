@@ -10,6 +10,7 @@
 #![allow(clippy::manual_is_multiple_of)]
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::manual_saturating_arithmetic)]
+#![allow(unknown_lints)]
 #![allow(clippy::manual_checked_ops)]
 #![allow(clippy::unnecessary_cast)]
 #![allow(clippy::io_other_error)]

@@ -809,3 +809,19 @@ mod imp {
 }
 
 pub use imp::METAL_DESCRIPTOR as METAL;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::backend::BackendDescriptor;
+
+    #[test]
+    fn metal_descriptor_reports_id_and_vendor() {
+        let d = &METAL;
+        assert_eq!(d.id(), "metal");
+        assert!(!d.vendor().is_empty());
+        // 不强求 None — host 是 Apple Silicon 时 probe() 会返回 Some。
+        // 只保证调用不 panic。
+        let _ = d.probe();
+    }
+}

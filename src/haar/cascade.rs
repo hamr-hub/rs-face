@@ -278,12 +278,10 @@ impl Cascade {
                 } else {
                     w.left_val
                 }
+            } else if r > w.threshold {
+                w.left_val
             } else {
-                if r > w.threshold {
-                    w.left_val
-                } else {
-                    w.right_val
-                }
+                w.right_val
             };
             sum += v;
             details.push((w.feature_index as usize, r, v));

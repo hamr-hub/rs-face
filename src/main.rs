@@ -333,7 +333,10 @@ fn main() {
             }
         }
         other => {
-            eprintln!("unknown --algo: {} (use haar|cnn|yunet|mtcnn|hog|luminance)", other);
+            eprintln!(
+                "unknown --algo: {} (use haar|cnn|yunet|mtcnn|hog|luminance)",
+                other
+            );
             std::process::exit(2);
         }
     };

@@ -763,3 +763,20 @@ mod imp {
 }
 
 pub use imp::CUDA_DESCRIPTOR as CUDA;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::backend::BackendDescriptor;
+
+    #[test]
+    fn cuda_descriptor_reports_id_and_vendor() {
+        let d = &CUDA;
+        assert_eq!(d.id(), "cuda");
+        assert!(!d.vendor().is_empty());
+        // 不强求 None — host 有 NVIDIA GPU + cuda backend feature 时
+        // probe() 会返回 Some。这条契约保证:即使没装 NVIDIA 驱动,
+        // 程序不会 panic,probe() 直接返回 None。
+        let _ = d.probe();
+    }
+}

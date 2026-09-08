@@ -444,8 +444,8 @@ mod tests {
     /// Expectation after the band-gate tuning (score_threshold=0.55 + band≥0.30):
     /// - at least 1 detection covering the central face region
     /// - at most 6 detections (no FP explosion on the face box)
-    /// Without the band gate, this image alone produced 10+ redundant
-    /// overlapping windows; with the gate + tighter NMS it collapses to ~2.
+    ///   Without the band gate, this image alone produced 10+ redundant
+    ///   overlapping windows; with the gate + tighter NMS it collapses to ~2.
     #[test]
     fn detects_synthetic_face() {
         let mut img = GrayImage::new(256, 256);
@@ -473,7 +473,8 @@ mod tests {
         // Chin (rows 176..256): mid
         for y in 176..256 {
             for x in 0..256 {
-                img[(x, y)] = (130 + (((x * 5 + y * 3) ^ (y >> 4)) & 0x7) as i32 - 3).clamp(0, 255) as u8;
+                img[(x, y)] =
+                    (130 + (((x * 5 + y * 3) ^ (y >> 4)) & 0x7) as i32 - 3).clamp(0, 255) as u8;
             }
         }
         let d = LuminanceFaceDetector::new(LuminanceConfig::default());
@@ -489,7 +490,7 @@ mod tests {
         );
         // The top-scoring detection should be roughly centred on the face
         // (image centre at (128, 128); allowed range widened to (60..200)
-// to accept both the 50×50 tight box and the 118×118 loose one).
+        // to accept both the 50×50 tight box and the 118×118 loose one).
         let top = &dets[0];
         let cx = top.x + top.w / 2;
         let cy = top.y + top.h / 2;
