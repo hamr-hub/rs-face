@@ -32,9 +32,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   select real faces on the drama frames — production zero-dep detection needs a
   trained `.rfcf` cascade (`--cascade`, `tools/convert_opencv_xml.py`).
 
+### Added — zero-dependency recognition (Eigenfaces / PCA)
+- **Eigenfaces recogniser in the default build** (`src/eigenface.rs`): the
+  Turk–Pentland (1991) PCA recogniser with no weights and no third-party crate —
+  64×64 vectorised crops, mean subtraction, the n×n Gram-matrix trick, and a
+  pure-`std` cyclic-Jacobi symmetric eigendecomposition; 98 % eigenvalue-energy
+  truncation (cap 255), Euclidean (default) and √λ-whitened Mahalanobis
+  metrics, multi-shot best-member matching, verification, and the same
+  `Match`/`BelowThreshold`/`Ambiguous`/`NoCandidates` policy as LBPH, with 7
+  unit tests (Jacobi correctness, degenerate galleries, boundary probes).
+- **Measured real-face accuracy** (`docs/recognition-eigenface.md`,
+  `docs/bench-results-eigenface.md`): on the same 35 ArcFace-labelled crops
+  (8 identities) under **strict leave-one-out with a full PCA retrain per
+  probe**, rank-1 is 33/33 for the shipped Euclidean/raw variant; pair accuracy
+  is 97.0 % at the calibrated EER-region default distance 6.3 (FAR 2.9 %, FRR
+  3.5 %). The same/different distributions overlap (closest impostor 3.90 vs
+  farthest genuine 7.40), so no usable zero-FAR point exists on this set —
+  stated honestly, and the threshold is documented as deployment-dependent.
+- `bench_eigenface` bin (default features): strict-LOO evaluation of all four
+  preprocessing/metric variants, pair distributions, EER / best-threshold /
+  crate-default operating points, and rank-1; writes the markdown report.
+- Shared bench helpers extracted to `src/bin/bench_common.rs` (crop loading,
+  EER/best-threshold sweeps, percentile stats), now used by both `bench_lbph`
+  and `bench_eigenface`; `tools/lbph_prep.sh` runs both benches.
+
 ### Changed — zero-dependency recognition (LBPH)
-- `Cargo.toml`: `autobins = false`; the six `src/bin` targets are registered
-  explicitly so the ort-gated prep bin stays out of the default build.
+- `Cargo.toml`: `autobins = false`; the `src/bin` targets are registered
+  explicitly (now seven, incl. `bench_eigenface`) so the ort-gated prep bin
+  stays out of the default build.
 
 ### Added — industrial recognition (SCRFD + ArcFace via ONNX)
 - **SCRFD-10G face detector** (`src/scrfd.rs`, `src/scrfd_detector.rs`):

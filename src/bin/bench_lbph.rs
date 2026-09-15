@@ -18,14 +18,14 @@
 //!
 //! The markdown report is written to docs/bench-results-lbph.md.
 
+#[path = "bench_common.rs"]
+mod bench_common;
+
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use rsface::image::codec;
-use rsface::image::png;
-use rsface::image::{GrayImage, RgbImage};
+use bench_common::{best_threshold, eer, label_counts, load_crops, pair_accuracy, Stats};
 use rsface::lbph::{extract, LbphConfig, LbphDescriptor};
 
 fn main() {
@@ -53,10 +53,7 @@ fn main() {
     }
 
     println!("loaded {} crops:", crops.len());
-    let mut by_label: BTreeMap<&str, usize> = BTreeMap::new();
-    for c in &crops {
-        *by_label.entry(c.label.as_str()).or_default() += 1;
-    }
+    let by_label = label_counts(&crops);
     for (label, n) in &by_label {
         println!("  {label:>12}: {n}");
     }
@@ -89,59 +86,6 @@ fn main() {
     println!("wrote docs/bench-results-lbph.md");
 }
 
-/// One loaded crop with its ground-truth label.
-struct Crop {
-    label: String,
-    img: GrayImage,
-}
-
-fn load_crops(root: &Path) -> Vec<Crop> {
-    let mut out = Vec::new();
-    walk(root, &mut out);
-    out
-}
-
-fn walk(dir: &Path, out: &mut Vec<Crop>) {
-    for entry in fs::read_dir(dir).expect("read crops dir") {
-        let path = entry.expect("dir entry").path();
-        if path.is_dir() {
-            walk(&path, out);
-            continue;
-        }
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-        let img: Option<GrayImage> = match ext.to_ascii_lowercase().as_str() {
-            "pgm" => {
-                let f = fs::File::open(&path).expect("open pgm");
-                codec::read_pgm(&mut BufReader::new(f)).ok()
-            }
-            "ppm" => codec::read_ppm(&mut BufReader::new(
-                fs::File::open(&path).expect("open ppm"),
-            ))
-            .ok()
-            .map(|rgb: RgbImage| rgb.to_gray()),
-            "png" => png::decode_to_gray(&mut BufReader::new(
-                fs::File::open(&path).expect("open png"),
-            ))
-            .ok(),
-            _ => None,
-        };
-        let Some(img) = img else { continue };
-        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-        // Filenames are `<identity>__<source>__<frame>`; fall back to the parent dir.
-        let label = match stem.split_once("__") {
-            Some((label, _)) => label.to_string(),
-            None => path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or(stem),
-        };
-        out.push(Crop { label, img });
-    }
-}
-
 /// Aggregated evaluation for one configuration.
 struct Evaluation {
     name: String,
@@ -151,7 +95,7 @@ struct Evaluation {
     best_threshold: f32,
     best_accuracy: f32,
     eer_threshold: f32,
-    /// Probes whose identity has another enrolled crop (a right answer exists).
+    /// Fraction of repeated-identity probes whose nearest crop shares their label.
     loo_rank1_repeated: f32,
     loo_repeated_n: usize,
     /// Singleton-identity probes — rank-1 can never succeed for these.
@@ -159,7 +103,7 @@ struct Evaluation {
 }
 
 impl Evaluation {
-    fn run(crops: &[Crop], cfg: &LbphConfig, name: &str) -> Self {
+    fn run(crops: &[bench_common::Crop], cfg: &LbphConfig, name: &str) -> Self {
         let descs: Vec<LbphDescriptor> = crops.iter().map(|c| extract(&c.img, cfg)).collect();
         let n = descs.len();
 
@@ -176,31 +120,14 @@ impl Evaluation {
             }
         }
 
-        // Threshold sweep over midpoints between observed distances: accept (call same)
-        // when d <= t. Maximise balanced accuracy over the two pair populations.
-        let mut candidates: Vec<f32> = same.iter().chain(different.iter()).copied().collect();
-        candidates.sort_by(f32::total_cmp);
-        candidates.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-        let mut best_threshold = 0.0;
-        let mut best_accuracy = -1.0;
-        for w in candidates.windows(2) {
-            let t = (w[0] + w[1]) / 2.0;
-            let acc = pair_accuracy(t, &same, &different);
-            if acc > best_accuracy {
-                best_accuracy = acc;
-                best_threshold = t;
-            }
-        }
+        let (best_threshold, best_accuracy) = best_threshold(&same, &different);
         let eer_threshold = eer(&same, &different);
 
         // Leave-one-out rank-1: every crop is a probe against all OTHER crops;
         // the single nearest descriptor decides the predicted identity. Probes whose
         // identity appears only once have no right answer in the gallery, so report
         // their count separately instead of counting them as identification errors.
-        let mut label_counts: BTreeMap<&str, usize> = BTreeMap::new();
-        for c in crops {
-            *label_counts.entry(c.label.as_str()).or_default() += 1;
-        }
+        let counts = label_counts(crops);
         let mut correct = 0usize;
         let mut repeated = 0usize;
         let mut singletons = 0usize;
@@ -211,11 +138,11 @@ impl Evaluation {
                     continue;
                 }
                 let d = descs[i].chi_square(&descs[j]).unwrap();
-                if best.map_or(true, |(bd, _)| d < bd) {
+                if best.is_none_or(|(bd, _)| d < bd) {
                     best = Some((d, crops[j].label.as_str()));
                 }
             }
-            if label_counts[crops[i].label.as_str()] == 1 {
+            if counts[&crops[i].label] == 1 {
                 singletons += 1;
             } else {
                 repeated += 1;
@@ -285,7 +212,7 @@ impl Evaluation {
         )
     }
 
-    fn markdown(&self, dir: &Path, labels: &BTreeMap<&str, usize>) -> String {
+    fn markdown(&self, dir: &std::path::Path, labels: &BTreeMap<String, usize>) -> String {
         let s = Stats::of(&self.same);
         let d = Stats::of(&self.different);
         let far_frr = |t: f32| -> (f32, f32) {
@@ -375,60 +302,5 @@ impl Evaluation {
         md.push_str("\n_Generated by `cargo run --release --bin bench_lbph`; crops prepared by ");
         md.push_str("`prep_lbph_crops` with ArcFace-verified identity labels._\n");
         md
-    }
-}
-
-/// Accuracy of the decision `same iff distance <= t` over both pair populations.
-fn pair_accuracy(t: f32, same: &[f32], different: &[f32]) -> f32 {
-    let tp = same.iter().filter(|&&d| d <= t).count();
-    let tn = different.iter().filter(|&&d| d > t).count();
-    (tp + tn) as f32 / (same.len() + different.len()) as f32
-}
-
-/// Threshold where FAR ≈ FRR (equal error rate operating point).
-fn eer(same: &[f32], different: &[f32]) -> f32 {
-    let mut candidates: Vec<f32> = same.iter().chain(different.iter()).copied().collect();
-    candidates.sort_by(f32::total_cmp);
-    candidates.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-    let mut best_t = 0.0;
-    let mut best_gap = f32::MAX;
-    for w in candidates.windows(2) {
-        let t = (w[0] + w[1]) / 2.0;
-        let frr = same.iter().filter(|&&x| x > t).count() as f32 / same.len() as f32;
-        let far = different.iter().filter(|&&x| x <= t).count() as f32 / different.len() as f32;
-        if (far - frr).abs() < best_gap {
-            best_gap = (far - frr).abs();
-            best_t = t;
-        }
-    }
-    best_t
-}
-
-#[derive(Debug)]
-struct Stats {
-    mean: f32,
-    p05: f32,
-    p50: f32,
-    p95: f32,
-    min: f32,
-    max: f32,
-}
-
-impl Stats {
-    fn of(values: &[f32]) -> Stats {
-        let mut v: Vec<f32> = values.to_vec();
-        v.sort_by(f32::total_cmp);
-        let pct = |p: f32| {
-            let idx = ((v.len() as f32 - 1.0) * p).round() as usize;
-            v[idx.min(v.len() - 1)]
-        };
-        Stats {
-            mean: v.iter().sum::<f32>() / v.len() as f32,
-            p05: pct(0.05),
-            p50: pct(0.50),
-            p95: pct(0.95),
-            min: v[0],
-            max: v[v.len() - 1],
-        }
     }
 }

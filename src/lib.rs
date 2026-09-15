@@ -5,6 +5,8 @@
 //! - [`integral`]: integral image (summed-area table).
 //! - [`lbph`]    : zero-dependency LBPH face recogniser (uniform LBP, spatial histograms,
 //!   chi-square); measured accuracy in docs/recognition-lbph.md.
+//! - [`eigenface`]: zero-dependency eigenfaces (PCA) recogniser, gallery-trained,
+//!   Jacobi eigendecomposition; measured accuracy in docs/recognition-eigenface.md.
 //! - [`haar`]    : Haar-like features, AdaBoost cascade classifier.
 //! - [`detector`]: multi-scale sliding window + non-maximum suppression.
 //! - [`pipeline`]: multi-threaded decode / detect / write pipeline.
@@ -47,6 +49,7 @@ pub mod arcface;
 pub mod arcface_recognizer;
 pub mod cnn;
 pub mod detector;
+pub mod eigenface;
 pub mod embedding;
 pub mod face;
 pub mod face_detector;

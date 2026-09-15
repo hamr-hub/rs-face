@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# lbph_prep.sh — build the real-face dataset for the zero-dep LBPH accuracy bench.
+# lbph_prep.sh — build the real-face dataset for the zero-dep recogniser accuracy benches.
 #
 # Pipeline:
 #   1. source drama frames (*.jpg) -> binary PPM via Pillow (lab-only; the shipped crate
@@ -9,6 +9,8 @@
 #      clustering + plain box crops labelled by ArcFace — OFFLINE ground truth only,
 #      never part of the evaluated zero-dep path
 #   3. bench_lbph (DEFAULT zero-dep build): LBPH pair distances, EER, rank-1
+#   4. bench_eigenface (DEFAULT zero-dep build): strict-LOO PCA variant comparison,
+#      pair distances, EER, rank-1
 #
 # The recogniser under test never sees an ONNX model: ArcFace only names the folders.
 #
@@ -35,7 +37,7 @@ python3 -c "import PIL" 2>/dev/null || {
     exit 2
 }
 
-echo "== 1/3 converting JPG frames to binary PPM ($FRAMES_DIR -> $FRAMES_PPM)"
+echo "== 1/4 converting JPG frames to binary PPM ($FRAMES_DIR -> $FRAMES_PPM)"
 python3 - "$FRAMES_DIR" "$FRAMES_PPM" <<'PY'
 import pathlib
 import sys
@@ -55,11 +57,14 @@ for jpg in sorted(src_root.rglob("*.jpg")):
 print(f"converted {n} frames")
 PY
 
-echo "== 2/3 offline ArcFace labelling + box crops (ort backend)"
+echo "== 2/4 offline ArcFace labelling + box crops (ort backend)"
 rm -rf "$CROPS_DIR"
 ORT_DYLIB_PATH="${ORT_DYLIB_PATH:-/opt/homebrew/lib/libonnxruntime.dylib}" \
     cargo run --release --features ort-backend --bin prep_lbph_crops -- \
     "$FRAMES_PPM" "$CROPS_DIR"
 
-echo "== 3/3 zero-dep LBPH accuracy evaluation"
+echo "== 3/4 zero-dep LBPH accuracy evaluation"
 cargo run --release --bin bench_lbph -- "$CROPS_DIR"
+
+echo "== 4/4 zero-dep eigenfaces accuracy evaluation (strict LOO)"
+cargo run --release --bin bench_eigenface -- "$CROPS_DIR"
