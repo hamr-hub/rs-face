@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — zero-dependency recognition (LBPH)
+- **LBPH face recogniser in the default build** (`src/lbph.rs`): radius-1 /
+  8-neighbour LBP codes, OpenCV-compatible 59-bin uniform-pattern mapping,
+  8×8 spatial L1-normalised histograms on 120 px crops, chi-square distance,
+  multi-shot enrolment with best-member scoring, verification, identification
+  with `max_distance`/`min_margin` policy (`LbphMatch`), and 9 unit tests. No
+  weights download and no third-party crate.
+- **Measured real-face accuracy** (`docs/recognition-lbph.md`,
+  `docs/bench-results-lbph.md`): on 35 ArcFace-labelled drama-frame crops (8
+  identities, 85 same / 510 different pairs) leave-one-out rank-1 is 33/33 over
+  repeated identities, pair accuracy is 97.6 % at the calibrated zero-FAR
+  default distance 30, EER ≈ 9.5 % near distance 48.
+- `bench_lbph` bin (default features): pair-distance distributions, best
+  threshold / EER / FAR-FRR, and rank-1 identification over a labelled crop
+  tree; writes the markdown report.
+- `prep_lbph_crops` bin (`required-features = ort-backend`, offline labelling
+  only): SCRFD detection + ArcFace embedding clusters real frames into
+  identities and writes plain box crops the zero-dep bench consumes.
+- `tools/lbph_prep.sh`: JPG→PPM conversion (Pillow, lab-only), offline
+  ArcFace labelling, zero-dep LBPH evaluation in one command.
+- Documented honestly: the recogniser is accurate given a correct box, but the
+  Haar cascade shipped in the default build is a demo cascade and does not
+  select real faces on the drama frames — production zero-dep detection needs a
+  trained `.rfcf` cascade (`--cascade`, `tools/convert_opencv_xml.py`).
+
+### Changed — zero-dependency recognition (LBPH)
+- `Cargo.toml`: `autobins = false`; the six `src/bin` targets are registered
+  explicitly so the ort-gated prep bin stays out of the default build.
+
 ### Added — industrial recognition (SCRFD + ArcFace via ONNX)
 - **SCRFD-10G face detector** (`src/scrfd.rs`, `src/scrfd_detector.rs`):
   letterbox preprocessing, anchor-free stride-8/16/32 decoding (no half-stride

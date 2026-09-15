@@ -40,6 +40,7 @@ Recognition backbones we wire up:
 |-------------------------|--------------------|------------------------------------------|----------------|
 | **ArcFace R50** (w600k_r50, `buffalo_l`) | InsightFace model zoo | **99.83 / 99.33 / 98.23 / 97.25** | cosine(lena, lena) = **1.0000**, cosine(lena, biden) = **0.0685**, cosine(person A, person B) = **-0.0256**, scale invariance 0.9733 |
 | ArcFace MobileFaceNet (w600k_mbf, `buffalo_s`) | InsightFace model zoo | 99.70 / 98.00 / 96.58 / 95.02 | not in this fixture set; available via `tools/fetch_models.sh` |
+| **LBPH (zero-dep, in the default build)** | `src/lbph.rs` — no weights | n/a | **33/33 rank-1** on 35 ArcFace-labelled drama crops (8 identities); 97.6 % pair accuracy at the zero-FAR distance 30; EER ≈ 9.5 % — given a correct detector box. Full methodology and the detector caveat: [`docs/recognition-lbph.md`](docs/recognition-lbph.md) |
 
 > **Detector combinations that detect nothing.** Of the algorithms the README used to
 > list as first-class (`cnn`, `mtcnn`, `yunet`, `hog`), three — `mtcnn`, `yunet`, `hog` —

@@ -3,6 +3,8 @@
 //! Modules:
 //! - [`image`]   : grayscale/RGB image types, PNG + PPM encode, JPEG decode (DCT-free baseline subset).
 //! - [`integral`]: integral image (summed-area table).
+//! - [`lbph`]    : zero-dependency LBPH face recogniser (uniform LBP, spatial histograms,
+//!   chi-square); measured accuracy in docs/recognition-lbph.md.
 //! - [`haar`]    : Haar-like features, AdaBoost cascade classifier.
 //! - [`detector`]: multi-scale sliding window + non-maximum suppression.
 //! - [`pipeline`]: multi-threaded decode / detect / write pipeline.
@@ -53,6 +55,7 @@ pub mod haar;
 pub mod hog_face;
 pub mod image;
 pub mod integral;
+pub mod lbph;
 pub mod models;
 pub mod mtcnn;
 pub mod onnx;
