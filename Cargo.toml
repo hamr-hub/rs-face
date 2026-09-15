@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Zero-dep Viola-Jones face detector in pure Rust, multi-threaded pipeline."
 license = "MIT"
+# benches/accuracy.rs is registered explicitly as a [[bin]] below; auto-discovery would
+# also pick it up as a bench and emit a "multiple build targets" warning.
+autobenches = false
 
 [lib]
 name = "rsface"

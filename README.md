@@ -64,7 +64,6 @@ ORT_DYLIB_PATH=$(brew --prefix onnxruntime)/lib/libonnxruntime.dylib \
 
 ## Algorithm
 
-
 ```
 grayscale frame
   └─▶ integral image (O(W·H), 4 bytes/pixel)
@@ -92,7 +91,6 @@ The crate itself is MIT. The `ort-backend` feature pulls in ONNX Runtime (MIT) a
 requires the libonnxruntime shared library to be installed on the host at runtime.
 
 ## Quick start
-
 
 ```bash
 # Build

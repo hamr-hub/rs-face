@@ -25,6 +25,8 @@
 //! which quietly costs both AP and landmark quality. See
 //! [`anchor_centers`] and the test `anchor_centers_have_no_half_stride_offset`.
 
+use std::cmp::Ordering;
+
 use crate::face::{FaceDetection, Landmarks, NUM_LANDMARKS};
 use crate::image::RgbImage;
 
@@ -134,8 +136,11 @@ impl Letterbox {
     }
 
     /// Map an x or y coordinate from input-tensor space back to the original image.
+    ///
+    /// Named `unscale` rather than `to_original` on purpose: [`Letterbox`] is `Copy`, so
+    /// clippy's `wrong_self_convention` reads a `to_*` method as converting `self`.
     #[inline]
-    pub fn to_original(&self, v: f32) -> f32 {
+    pub fn unscale(&self, v: f32) -> f32 {
         v / self.scale
     }
 }
@@ -229,8 +234,12 @@ pub fn decode_stride(
     let mut out = Vec::new();
     for i in 0..n {
         let score = scores[i];
-        if !(score >= score_threshold) {
-            // `!(>=)` rather than `<` so a NaN score is rejected rather than accepted.
+        // `partial_cmp` (not `<`) so a NaN score is rejected: with NaN, `score < threshold`
+        // is false, which would let garbage through the gate.
+        if !matches!(
+            score.partial_cmp(&score_threshold),
+            Some(Ordering::Greater | Ordering::Equal)
+        ) {
             continue;
         }
         let (cx, cy) = centers[i];
@@ -263,10 +272,10 @@ pub fn decode_stride(
 /// Map a detection from input-tensor coordinates back to the original image.
 pub fn to_original(det: FaceDetection, lb: &Letterbox) -> FaceDetection {
     FaceDetection {
-        x1: lb.to_original(det.x1),
-        y1: lb.to_original(det.y1),
-        x2: lb.to_original(det.x2),
-        y2: lb.to_original(det.y2),
+        x1: lb.unscale(det.x1),
+        y1: lb.unscale(det.y1),
+        x2: lb.unscale(det.x2),
+        y2: lb.unscale(det.y2),
         score: det.score,
         // Landmarks scale by the same factor. `scaled` is about the origin, which is
         // correct precisely because the letterbox pads bottom-right and keeps origin (0,0).
@@ -389,7 +398,7 @@ mod tests {
     fn letterbox_roundtrip_recovers_coordinates() {
         let lb = Letterbox::compute(1280, 720, 640);
         // A point at x=100 in the original maps to 50 in tensor space and back.
-        assert!((lb.to_original(100.0 * lb.scale) - 100.0).abs() < 1e-4);
+        assert!((lb.unscale(100.0 * lb.scale) - 100.0).abs() < 1e-4);
     }
 
     #[test]
@@ -545,9 +554,7 @@ mod tests {
     fn decode_uses_correct_center_for_later_cells() {
         // 2x1 grid at stride 16: anchor index 2 is cell (row0,col1) -> centre (16, 0).
         let scores = vec![0.0, 0.0, 0.9, 0.0];
-        let mut bboxes = vec![0.0; 8];
-        bboxes[8 - 8..].copy_from_slice(&[0.0; 8]);
-        // prediction index 2 occupies bboxes[8..12]; extend to hold it.
+        // Prediction index 2 occupies bboxes[8..12].
         let mut bboxes = vec![0.0f32; 16];
         bboxes[8] = 1.0;
         bboxes[9] = 1.0;

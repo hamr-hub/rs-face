@@ -125,12 +125,17 @@ impl Backend {
     /// build's real capability to users, which is the difference between a comprehensible
     /// "rebuild with --features ort-backend" and a baffling empty result set.
     pub fn available() -> Vec<Backend> {
-        let mut v = Vec::new();
-        #[cfg(feature = "ort-backend")]
-        v.push(Backend::Ort);
-        #[cfg(feature = "tract-backend")]
-        v.push(Backend::Tract);
-        v
+        // Each push is cfg-gated, so a single-backend build looks like init-then-push to
+        // clippy; the macro form can't express conditional elements.
+        #[allow(clippy::vec_init_then_push)]
+        {
+            let mut v = Vec::new();
+            #[cfg(feature = "ort-backend")]
+            v.push(Backend::Ort);
+            #[cfg(feature = "tract-backend")]
+            v.push(Backend::Tract);
+            v
+        }
     }
 
     /// The best available backend, or `None` in a zero-dep build.

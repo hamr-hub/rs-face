@@ -180,11 +180,7 @@ impl Sha256 {
             a = t1.wrapping_add(t2);
         }
 
-        for (s, v) in self
-            .state
-            .iter_mut()
-            .zip([a, b, c, d, e, f, g, h].into_iter())
-        {
+        for (s, v) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
             *s = s.wrapping_add(v);
         }
     }
