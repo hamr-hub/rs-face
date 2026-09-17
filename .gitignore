@@ -58,6 +58,11 @@ platform/testdata/hls-loop/
 # never runs `npm install`. node_modules/ here is leftover from a one-off
 # docs build and is intentionally not tracked.
 node_modules/
+
+# ---- Local model weights (fetch via tools/fetch_models.sh) ----
+models/
+
+# ---- Local tooling / OS junk ----
 .meta.yaml
 ._.DS_Store
 **/._.DS_Store

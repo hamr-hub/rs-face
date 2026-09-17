@@ -3,6 +3,10 @@
 //! Modules:
 //! - [`image`]   : grayscale/RGB image types, PNG + PPM encode, JPEG decode (DCT-free baseline subset).
 //! - [`integral`]: integral image (summed-area table).
+//! - [`lbph`]    : zero-dependency LBPH face recogniser (uniform LBP, spatial histograms,
+//!   chi-square); measured accuracy in docs/recognition-lbph.md.
+//! - [`eigenface`]: zero-dependency eigenfaces (PCA) recogniser, gallery-trained,
+//!   Jacobi eigendecomposition; measured accuracy in docs/recognition-eigenface.md.
 //! - [`haar`]    : Haar-like features, AdaBoost cascade classifier.
 //! - [`detector`]: multi-scale sliding window + non-maximum suppression.
 //! - [`pipeline`]: multi-threaded decode / detect / write pipeline.
@@ -46,8 +50,14 @@
 #![allow(dead_code)] // Dummy CNN/HoG/YuNet/MTCNN scaffolds ship with all primitives even if a few are unreferenced.
 #![allow(unused_variables)] // Same reason as dead_code; placeholder code paths.
 
+pub mod align;
+pub mod arcface;
+pub mod arcface_recognizer;
 pub mod cnn;
 pub mod detector;
+pub mod eigenface;
+pub mod embedding;
+pub mod face;
 pub mod face_detector;
 pub mod gpu;
 pub mod haar;
@@ -55,10 +65,15 @@ pub mod hog_face;
 pub mod image;
 pub mod integral;
 pub mod luminance_face;
+pub mod lbph;
+pub mod models;
 pub mod mtcnn;
+pub mod onnx;
 pub mod output;
 pub mod pipeline;
 pub mod pool;
+pub mod scrfd;
+pub mod scrfd_detector;
 pub mod source;
 pub mod yunet;
 

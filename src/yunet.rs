@@ -136,7 +136,14 @@ impl FaceDetector for YunetDetector {
         "yunet"
     }
     fn description(&self) -> &'static str {
-        "YuNet-style anchor-based: 5 scales (8/16/32/64/128), 15-dim per anchor, NMS."
+        "[SCAFFOLD — unreliable] YuNet-style anchor decode with random weights."
+    }
+
+    /// Random placeholder weights from `weights/yunet.bin`. Any boxes this emits are
+    /// noise, not faces — see [`Maturity::Scaffold`]. The real YuNet ONNX from OpenCV
+    /// Zoo is wired up via the `onnx` feature instead.
+    fn maturity(&self) -> crate::face_detector::Maturity {
+        crate::face_detector::Maturity::Scaffold
     }
 
     fn detect(&self, img: &GrayImage) -> Vec<Detection> {

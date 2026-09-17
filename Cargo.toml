@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "Zero-dep Viola-Jones face detector in pure Rust, multi-threaded pipeline."
 license = "MIT"
+# benches/accuracy.rs is registered explicitly as a [[bin]] below; auto-discovery would
+# also pick it up as a bench and emit a "multiple build targets" warning.
+autobenches = false
+# src/bin/prep_lbph_crops.rs needs ort-backend, so bins are listed explicitly below
+# with required-features instead of relying on auto-discovery.
+autobins = false
 
 [lib]
 name = "rsface"
@@ -13,10 +19,46 @@ path = "src/lib.rs"
 name = "rs-face"
 path = "src/main.rs"
 
+[[bin]]
+name = "bench_detect"
+path = "src/bin/bench_detect.rs"
+
+[[bin]]
+name = "bench_lbph"
+path = "src/bin/bench_lbph.rs"
+
+[[bin]]
+name = "bench_eigenface"
+path = "src/bin/bench_eigenface.rs"
+
+[[bin]]
+name = "cnn_train"
+path = "src/bin/cnn_train.rs"
+
+[[bin]]
+name = "debug_cascade"
+path = "src/bin/debug_cascade.rs"
+
+# Offline ArcFace labelling step for the LBPH accuracy bench — not part of the
+# zero-dependency default build.
+[[bin]]
+name = "prep_lbph_crops"
+path = "src/bin/prep_lbph_crops.rs"
+required-features = ["ort-backend"]
+
+[[bin]]
+name = "rs_face_detect"
+path = "src/bin/rs_face_detect.rs"
+
 [[bench]]
 name = "perf_compare"
 path = "benches/perf_compare.rs"
 harness = false
+
+[[bin]]
+name = "bench-accuracy"
+path = "benches/accuracy.rs"
+required-features = ["ort-backend"]
 
 [dependencies]
 
@@ -36,11 +78,50 @@ metal = { version = "0.33", optional = true }
 # zero-dep on hosts without an NVIDIA stack.
 cudarc = { version = "0.12", optional = true }
 
+# ---------------------------------------------------------------------------
+# ONNX inference backends (both optional; default build stays zero-dep).
+# ---------------------------------------------------------------------------
+#
+# Real industrial accuracy requires real trained CNN weights, which in practice
+# means consuming ONNX. Two backends are offered because the right answer is
+# genuinely deployment-dependent, and neither dominates:
+#
+#   ort   -- bindings to Microsoft ONNX Runtime. Best operator coverage and the
+#            only route to GPU (CoreML / CUDA / TensorRT / DirectML / ROCm).
+#            Costs a C++ runtime dependency and is currently a release candidate.
+#   tract -- pure-Rust inference. Keeps the no-C++ / single-static-binary story
+#            and cross-compiles cleanly. CPU-only and slower.
+#
+# The SCRFD/ArcFace pre- and post-processing in src/scrfd.rs and src/arcface.rs
+# is backend-agnostic, so choosing one only swaps the forward pass.
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = [
+    "std",
+    "ndarray",
+    "load-dynamic",
+] }
+tract-onnx = { version = "0.23", optional = true }
+
 [features]
 default = []
 metal-backend = ["dep:metal"]
 cuda-backend  = ["dep:cudarc"]
 opencv-backend = []  # placeholder for future opencv-rust binding
+
+# ONNX Runtime backend: fastest, GPU-capable, pulls in a C++ runtime.
+ort-backend = ["dep:ort"]
+# Pure-Rust backend: no C++ toolchain, CPU-only.
+tract-backend = ["dep:tract-onnx"]
+# Convenience: any real-CNN capability at all. Code that only needs "is some
+# ONNX backend present?" should gate on this rather than naming a backend.
+onnx = ["ort-backend"]
+
+# GPU execution providers for the ort backend. Kept separate from `ort-backend`
+# because each one adds a large platform-specific toolchain requirement, and a
+# user on a CPU-only server must not be forced to satisfy CUDA's.
+ort-coreml = ["ort-backend", "ort/coreml"]
+ort-cuda   = ["ort-backend", "ort/cuda"]
+ort-tensorrt = ["ort-backend", "ort/tensorrt"]
+ort-directml = ["ort-backend", "ort/directml"]
 
 [profile.release]
 opt-level = 3

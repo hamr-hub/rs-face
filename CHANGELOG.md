@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — zero-dependency recognition (LBPH)
+- **LBPH face recogniser in the default build** (`src/lbph.rs`): radius-1 /
+  8-neighbour LBP codes, OpenCV-compatible 59-bin uniform-pattern mapping,
+  8×8 spatial L1-normalised histograms on 120 px crops, chi-square distance,
+  multi-shot enrolment with best-member scoring, verification, identification
+  with `max_distance`/`min_margin` policy (`LbphMatch`), and 9 unit tests. No
+  weights download and no third-party crate.
+- **Measured real-face accuracy** (`docs/recognition-lbph.md`,
+  `docs/bench-results-lbph.md`): on 35 ArcFace-labelled drama-frame crops (8
+  identities, 85 same / 510 different pairs) leave-one-out rank-1 is 33/33 over
+  repeated identities, pair accuracy is 97.6 % at the calibrated zero-FAR
+  default distance 30, EER ≈ 9.5 % near distance 48.
+- `bench_lbph` bin (default features): pair-distance distributions, best
+  threshold / EER / FAR-FRR, and rank-1 identification over a labelled crop
+  tree; writes the markdown report.
+- `prep_lbph_crops` bin (`required-features = ort-backend`, offline labelling
+  only): SCRFD detection + ArcFace embedding clusters real frames into
+  identities and writes plain box crops the zero-dep bench consumes.
+- `tools/lbph_prep.sh`: JPG→PPM conversion (Pillow, lab-only), offline
+  ArcFace labelling, zero-dep LBPH evaluation in one command.
+- Documented honestly: the recogniser is accurate given a correct box, but the
+  Haar cascade shipped in the default build is a demo cascade and does not
+  select real faces on the drama frames — production zero-dep detection needs a
+  trained `.rfcf` cascade (`--cascade`, `tools/convert_opencv_xml.py`).
+
+### Added — zero-dependency recognition (Eigenfaces / PCA)
+- **Eigenfaces recogniser in the default build** (`src/eigenface.rs`): the
+  Turk–Pentland (1991) PCA recogniser with no weights and no third-party crate —
+  64×64 vectorised crops, mean subtraction, the n×n Gram-matrix trick, and a
+  pure-`std` cyclic-Jacobi symmetric eigendecomposition; 98 % eigenvalue-energy
+  truncation (cap 255), Euclidean (default) and √λ-whitened Mahalanobis
+  metrics, multi-shot best-member matching, verification, and the same
+  `Match`/`BelowThreshold`/`Ambiguous`/`NoCandidates` policy as LBPH, with 7
+  unit tests (Jacobi correctness, degenerate galleries, boundary probes).
+- **Measured real-face accuracy** (`docs/recognition-eigenface.md`,
+  `docs/bench-results-eigenface.md`): on the same 35 ArcFace-labelled crops
+  (8 identities) under **strict leave-one-out with a full PCA retrain per
+  probe**, rank-1 is 33/33 for the shipped Euclidean/raw variant; pair accuracy
+  is 97.0 % at the calibrated EER-region default distance 6.3 (FAR 2.9 %, FRR
+  3.5 %). The same/different distributions overlap (closest impostor 3.90 vs
+  farthest genuine 7.40), so no usable zero-FAR point exists on this set —
+  stated honestly, and the threshold is documented as deployment-dependent.
+- `bench_eigenface` bin (default features): strict-LOO evaluation of all four
+  preprocessing/metric variants, pair distributions, EER / best-threshold /
+  crate-default operating points, and rank-1; writes the markdown report.
+- Shared bench helpers extracted to `src/bin/bench_common.rs` (crop loading,
+  EER/best-threshold sweeps, percentile stats), now used by both `bench_lbph`
+  and `bench_eigenface`; `tools/lbph_prep.sh` runs both benches.
+
+### Changed — zero-dependency recognition (LBPH)
+- `Cargo.toml`: `autobins = false`; the `src/bin` targets are registered
+  explicitly (now seven, incl. `bench_eigenface`) so the ort-gated prep bin
+  stays out of the default build.
+
+### Added — industrial recognition (SCRFD + ArcFace via ONNX)
+- **SCRFD-10G face detector** (`src/scrfd.rs`, `src/scrfd_detector.rs`):
+  letterbox preprocessing, anchor-free stride-8/16/32 decoding (no half-stride
+  offset, matching InsightFace exactly), keypoint decoding, and post-processing.
+  0.954 / 0.940 / 0.828 WIDER FACE easy/medium/hard AP upstream.
+- **ArcFace R50 recognizer** (`src/arcface.rs`, `src/arcface_recognizer.rs`,
+  `src/align.rs`, `src/embedding.rs`, `src/face.rs`): 5-landmark similarity
+  transform alignment, 512-d embeddings, enrollment/identification gallery,
+  and cosine matching with a configurable threshold.
+- **Two real ONNX inference backends** (`src/onnx/`), both optional so the
+  default build stays zero-dependency:
+  - `ort-backend` — ONNX Runtime via dynamic loading (`ORT_DYLIB_PATH`), the
+    route to GPU (CoreML / CUDA / TensorRT / DirectML / ROCm behind separate
+    features).
+  - `tract-backend` — pure-Rust CPU inference for single-static-binary deploys.
+  - All 16 real-model integration tests pass under either backend.
+- **Model registry with pinned SHA-256 digests** (`src/models.rs`): weights are
+  verified before inference, with a zero-dependency SHA-256 implementation and
+  typed licence tiers (research-only vs Apache-2.0) queryable at runtime.
+- `tools/fetch_models.sh` to download YuNet (Apache-2.0) and the buffalo_l
+  bundle (SCRFD + ArcFace, research-only) with digest verification.
+- `bench-accuracy` bin (`benches/accuracy.rs`): end-to-end latency and
+  same/different-identity cosine distributions on real weights; writes
+  `docs/bench-results.md` and prints threshold guidance.
+- Real-face PPM fixtures (`lena`, `biden`, `two-people`) and
+  `tests/real_model_e2e.rs` — 16 integration tests covering integrity gates,
+  geometry, blank-frame quietness, gallery round trips, discrimination, and
+  scale invariance.
+- Placeholder-weight detectors (`mtcnn`, `yunet`, `hog`) now report
+  `Maturity::Scaffold` and are visibly labelled as detecting nothing.
+
+### Changed
+- README gains measured accuracy tables, a licences section (research-only vs
+  commercial), and instructions to reproduce the numbers.
+- `docs/benchmarks.md` documents both the InsightFace default threshold (0.36,
+  TAR@FAR=1e-4) and the measured distribution midpoint (≈0.53 on the repo
+  fixtures), with the formula for choosing your own.
+
 ### Added
 - End-to-end face detection run on a 1080×1920 / 24 fps drama clip (ReelShort
   `reelshort_65da5136e047484c61021f92_63lsksowyg`, ~2:14, HEVC). Result:
