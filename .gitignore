@@ -58,3 +58,7 @@ platform/testdata/hls-loop/
 # never runs `npm install`. node_modules/ here is leftover from a one-off
 # docs build and is intentionally not tracked.
 node_modules/
+.meta.yaml
+._.DS_Store
+**/._.DS_Store
+.DS_Store
