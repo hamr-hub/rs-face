@@ -1,7 +1,8 @@
-# rs-face — Zero-Dependency Face Detection in Pure Rust
+# rs-face — The face-library swiss army knife
 
-A from-scratch implementation of face detection in pure Rust with **zero runtime
-crate dependencies**. The detector links only against libc/libm.
+A from-scratch face detection **and recognition** library in pure Rust.
+**Zero runtime dependencies by default**; opt into Metal / CUDA / ONNX
+Runtime when you need industrial accuracy.
 
 ```
 $ ldd target/release/rs-face
@@ -11,16 +12,121 @@ libm.so.6
 libc.so.6
 ```
 
-The library ships **two detector families**:
+> One crate, six detectors, two zero-dep recognisers, one ONNX path to
+> industrial accuracy. Every algorithm implements the same `FaceDetector`
+> trait, so swapping implementations is a one-line change.
 
-1. **Viola-Jones** — classical AdaBoost cascade over 5 Haar-like feature
-   families. Loads OpenCV's `haarcascade_frontalface_default.xml` (or any
-   OpenCV-trained Haar cascade) via the included XML→`.rfcf` converter.
-2. **CNN** — small Conv→ReLU→Pool→FC→Sigmoid detector (24×24 input window,
-   fully-connected head). Hand-crafted weights bundled with the crate so the
-   pipeline runs out of the box without external downloads.
+## What's in the box
 
-Both feed the same multi-threaded pipeline (source → N detector workers → sink).
+| detector | what it is | zero-dep? | measured here |
+|---|---|:-:|---|
+| **haar** | Viola–Jones AdaBoost cascade, 5 Haar feature families, OpenCV XML → `.rfcf` | ✅ | real-face drama footage |
+| **luminance** | band-pattern + mirror-symmetry detector | ✅ | real-face drama footage |
+| **cnn** / **hog** / **yunet** / **mtcnn** | correct architectures + NMS, placeholder weights | ✅ (scaffold) | n/a — drop in real weights via `*_with_*` |
+| **scrfd** | SCRFD-10G via ONNX Runtime / tract | opt-in | measured, WIDER-FACE AP 0.95/0.94/0.83 |
+
+| recogniser | what it is | zero-dep? | measured here |
+|---|---|:-:|---|
+| **lbph** | uniform LBP histograms + chi-square, zero deps, no weights | ✅ | 33/33 rank-1 on labelled gallery |
+| **eigenface** | PCA / Turk-Pentland, Jacobi eigendecomp in pure `std` | ✅ | 33/33 rank-1 strict LOO |
+| **arcface** | ArcFace R50 / MobileFaceNet via ONNX Runtime / tract | opt-in | cosine margin measured on real faces |
+
+## 5-minute start
+
+```bash
+# 1. Build — zero deps by default
+cargo build --release
+
+# 2. Smoke-test (no external input, no ffmpeg needed)
+./target/release/rs-face test://60 --out ./out
+
+# 3. Run on a video / image sequence / URL
+./target/release/rs-face /path/to/video.mp4 --out ./out
+./target/release/rs-face https://example.com/stream/ --out ./out
+
+# 4. Pick a different algorithm — same flags, swap behind the scenes
+./target/release/rs-face video.mp4 --out ./out --algo luminance
+
+# 5. Discover what's compiled in
+./target/release/rs-face --list-algos
+./target/release/rs-face --list-features
+```
+
+If you need a real cascade (OpenCV's `haarcascade_frontalface_default.xml`):
+```bash
+python3 tools/convert_opencv_xml.py haarcascade_frontalface_default.xml haarcascade.rfcf
+./target/release/rs-face video.mp4 --out ./out --cascade haarcascade.rfcf
+```
+
+If you need industrial accuracy (SCRFD + ArcFace):
+```bash
+cargo build --release --features ort-backend      # needs libonnxruntime on host
+tools/fetch_models.sh                              # downloads pinned ONNX models
+./target/release/rs-face video.mp4 --out ./out --algo scrfd
+```
+
+## Pick the right algorithm — "what to use when"
+
+| situation | pick |
+|---|---|
+| No external input, smoke-test the pipeline | `--algo haar` (default) or `test://60` |
+| Frontal portrait, controlled lighting, no extra deps | `--algo haar` with an OpenXML-converted `.rfcf` cascade |
+| Variable face sizes in drama / Reels / vertical video | `--algo haar --scale 1.4 --stride 3 --only-with-face` |
+| Need a real accuracy on unconstrained faces | `--features ort-backend --algo scrfd` |
+| Recognise identities with no downloads | use `rsface::lbph::LbphRecognizer` or `rsface::eigenface::EigenfaceRecognizer` |
+| Need verification under pose / lighting drift | `--features ort-backend` + `rsface::arcface_recognizer::ArcFaceRecognizer` |
+
+## Cookbook — same `Box<dyn FaceDetector>` for every algorithm
+
+```rust
+use rsface::face_detector::{FaceDetector, HaarDetector};
+use rsface::hog_face::{HogConfig, HogFaceDetector};
+
+let haar: Box<dyn FaceDetector> = Box::new(HaarDetector::new(
+    rsface::haar::params::demo_face_cascade(),
+    Default::default(),
+));
+let hog: Box<dyn FaceDetector> =
+    Box::new(HogFaceDetector::new(HogConfig::default()));
+
+// Dispatch any number of algorithms through one trait.
+for det in &[haar, hog] {
+    let hits = det.detect(&gray_frame);
+    println!("[{}] {} hits", det.name(), hits.len());
+}
+```
+
+Full SDK examples: `cargo run --example` (see [Examples](#examples)).
+
+## Documentation
+
+Start with [`docs/INDEX.md`](docs/INDEX.md) — the entry point to every
+design / accuracy / operations document in the repo.
+
+- [Algorithm matrix](docs/algorithms.md) — per-algorithm details, weights requirements, known limits.
+- [Architecture](docs/architecture.md) — crate map + multi-threaded pipeline plumbing.
+- [Format reference](docs/format.md) — `.rfcf` cascade binary format, manifest JSON schema.
+- [GPU backends](docs/GPU_BACKENDS.md) — `cpu` / `metal` / `cuda` / `rocm` / `mlu` / `ascend`.
+- [Recognition LBPH](docs/recognition-lbph.md) / [Recognition Eigenface](docs/recognition-eigenface.md).
+- [Benchmarks](docs/benchmarks.md) — reproducible scripts.
+
+## Algorithm (Viola-Jones path)
+
+```
+grayscale frame
+  └─▶ integral image (O(W·H), 4 bytes/pixel)
+        └─▶ image pyramid (scale 1.0 → 1/1.2 → 1/1.44 …)
+              └─▶ sliding window with stride (per-scale)
+                    └─▶ 5-family Haar features (vertical / horizontal / diagonal / center)
+                          └─▶ AdaBoost cascade of weak decision stumps
+                                └─▶ NMS (greedy IoU)
+                                      └─▶ annotated PNG + JSON manifest
+```
+
+Features are evaluated in **O(1)** per window using the integral image.
+
+The CNN path skips the integral image and runs a single forward pass per
+window; it shares the same pyramid, NMS and pipeline plumbing.
 
 ## Accuracy
 
@@ -64,54 +170,10 @@ ORT_DYLIB_PATH=$(brew --prefix onnxruntime)/lib/libonnxruntime.dylib \
   cargo test --features ort-backend --test real_model_e2e -- --nocapture --test-threads=1
 ```
 
-## Algorithm
-
-```
-grayscale frame
-  └─▶ integral image (O(W·H), 4 bytes/pixel)
-        └─▶ image pyramid (scale 1.0 → 1/1.2 → 1/1.44 …)
-              └─▶ sliding window with stride (per-scale)
-                    └─▶ 5-family Haar features (vertical / horizontal / diagonal / center)
-                          └─▶ AdaBoost cascade of weak decision stumps
-                                └─▶ NMS (greedy IoU)
-                                      └─▶ annotated PNG + JSON manifest
-```
-
-Features are evaluated in **O(1)** per window using the integral image.
-
-The CNN path skips the integral image and runs a single forward pass per
-window; it shares the same pyramid, NMS and pipeline plumbing.
-
-## Licences
-
-| weights    | use in a commercial product? |
-|------------|------------------------------|
-| YuNet      | **Yes** — Apache-2.0          |
-| SCRFD, ArcFace w600k_r50 / w600k_mbf | **No** — InsightFace weights are licensed for non-commercial research only; commercial use requires a separate licence from DeepInsight |
-
-The crate itself is MIT. The `ort-backend` feature pulls in ONNX Runtime (MIT) and
-requires the libonnxruntime shared library to be installed on the host at runtime.
-
-## Quick start
-
-```bash
-# Build
-cargo build --release
-
-# Run on a video (requires ffmpeg on PATH for non-PNG-sequence containers)
-./target/release/rs-face /path/to/video.mp4 --out ./out
-
-# Run on a URL or image sequence
-./target/release/rs-face https://example.com/stream/ --out ./out
-
-# Run on a synthetic test pattern (no external input needed)
-./target/release/rs-face test://60 --out ./out
-
-# Use the bundled CNN detector instead of Viola-Jones
-./target/release/rs-face /path/to/video.mp4 --out ./out --cnn
-```
-
 ## CLI
+
+> **Run `./target/release/rs-face --help` for the live help, or use
+> `--list-algos` / `--list-features` for runtime introspection.**
 
 ```
 INPUTs
@@ -122,10 +184,15 @@ INPUTs
   *.mp4|*.mov|*.avi|*.mkv|*.webm | rtsp://...
                       (requires `ffmpeg` on PATH)
 
+ALGORITHMS  (pick with --algo <NAME>, default: haar)
+  haar, cnn, yunet, mtcnn, hog, luminance,
+  scrfd (requires --features ort-backend | tract-backend)
+
 OPTIONS
   --out <DIR>           output directory (required)
-  --cascade <PATH>      load cascade from .rfcf file (default: built-in demo)
-  --cnn                 use the bundled CNN detector instead of Viola-Jones
+  --algo <NAME>         detection algorithm (default: haar)
+  --cascade <PATH>      load cascade from .rfcf file (haar only, default: built-in demo)
+  --cnn-weights PATH    load CNN weights from a .cnn.bin file
   --threads N           worker thread count (default: # CPUs)
   --min-size PX         minimum detection size in pixels (default: 24)
   --max-size PX         maximum detection size in pixels (default: 1024)
@@ -135,7 +202,11 @@ OPTIONS
   --min-score F         drop detections with cascade score below this
   --only-with-face      skip writing frames with zero detections
   --queue-depth N       per-worker queue depth (default: 4)
-  --no-gpu              disable the (experimental) OpenCL variance pre-filter
+  --no-gpu              disable the (experimental) GPU variance pre-filter
+  --no-equalize         skip the cv::equalizeHist preprocessing
+  --list-algos          list every algorithm with its maturity and description
+  --list-features       list every Cargo feature this binary was compiled with
+  --version             print the crate version
   --help                print this help
 ```
 
@@ -155,7 +226,7 @@ out/
 {
   "version": "rs-face-0.1",
   "stats": { "frames_processed": 4039, "frames_with_face": 0,
-             "total_detections": 0, "elapsed_ms": 316532, "fps": 12.76 },
+             "total_detections": 0, "elapsed_ms": 316532, "detect_ms_avg": 12.4 },
   "frames": [
     { "frame_index": 0, "timestamp_ms": 0, "image": "frame_000000.png",
       "width": 480, "height": 854, "detections": [] }
@@ -163,22 +234,22 @@ out/
 }
 ```
 
-## Architecture
+## Examples
 
-| module                | purpose |
-|-----------------------|---------|
-| `image/`              | 8-bit Gray/RGB types, PNG codec (zero deps), PPM/PGM codec |
-| `integral`            | integral image + rotated integral + squared integral (variance norm) |
-| `haar/`               | 5 Haar-like feature families, AdaBoost cascade, `.rfcf` binary format |
-| `cnn/`                | 24×24 CNN detector (Conv→ReLU→Pool→FC→Sigmoid) |
-| `detector`            | multi-scale pyramid, sliding window, NMS, GPU variance gate |
-| `pool`                | small worker pool helper |
-| `source/`             | `FrameSource` trait: image sequence, HTTP, ffmpeg pipe, synthetic |
-| `pipeline`            | source → N detector workers → sink (PNG + manifest) |
-| `output`              | hand-rolled JSON writer, annotated PNG writer |
-| `gpu/`                | OpenCL squared-integral kernel (best-effort, optional) |
+Every example is `cargo run --example <name>` — no ffmpeg, no model download
+required:
 
-### Multi-threaded pipeline
+| example | what it shows |
+|---|---|
+| `detect_haar` | smallest end-to-end Haar run on a synthetic frame |
+| `detect_uniform` | the "swiss army knife" demo: dispatch Haar + HoG via `FaceDetector` trait |
+| `recognise_lbph` | enrol + identify with LBPH, no weights |
+| `recognise_eigenface` | train + identify with eigenfaces/PCA, no weights |
+| `cascade_dump` | parse a `.rfcf` cascade and print its structure |
+| `synthetic_smoke` | minimal pipeline smoke-test (no external data) |
+| `lena_classify_stages` | walk a real cascade stage by stage |
+
+## Architecture (multi-threaded pipeline)
 
 ```
               ┌─ worker 0 ─┐
@@ -193,6 +264,28 @@ source ──┬───►├─ worker 1 ─┤
 - Greedy dispatcher tries non-blocking `try_send` first; falls back to blocking
   when all queues are full.
 - Sink reorders results by `seq` so the manifest preserves source order.
+
+Crate map (25+ modules, see `src/lib.rs` for full descriptions):
+
+| ring | modules |
+|---|---|
+| core numerical | `integral`, `image`, `haar` |
+| detection (zero-dep) | `detector`, `cnn`, `hog_face`, `yunet`, `mtcnn`, `luminance_face` |
+| detection (ONNX) | `scrfd`, `scrfd_detector`, `onnx` |
+| recognition (zero-dep) | `eigenface`, `lbph` |
+| recognition (ONNX) | `arcface`, `arcface_recognizer` |
+| domain types | `face`, `face_detector`, `models`, `align`, `embedding` |
+| pipeline / I/O | `pipeline`, `source`, `output`, `gpu`, `pool` |
+
+## Licences
+
+| weights    | use in a commercial product? |
+|------------|------------------------------|
+| YuNet      | **Yes** — Apache-2.0          |
+| SCRFD, ArcFace w600k_r50 / w600k_mbf | **No** — InsightFace weights are licensed for non-commercial research only; commercial use requires a separate licence from DeepInsight |
+
+The crate itself is MIT. The `ort-backend` feature pulls in ONNX Runtime (MIT) and
+requires the libonnxruntime shared library to be installed on the host at runtime.
 
 ## Cascade format (`.rfcf`)
 

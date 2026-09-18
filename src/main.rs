@@ -48,7 +48,104 @@ fn print_help() {
            --cnn-weights PATH    load CNN weights from a .cnn.bin file (requires --cnn)\n  \
            --no-gpu              disable the GPU OpenCL backend\n  \
            --no-equalize         skip the cv::equalizeHist preprocessing\n  \
-           --help                print this help\n"
+           --list-algos          list every algorithm with its maturity and description\n  \
+           --list-features       list every Cargo feature this binary was compiled with\n  \
+           --version             print the crate version and exit\n  \
+           --help                print this help\n\n\
+         RECIPES:\n  \
+           # Smoke test (no external input):\n  \
+           rs-face test://60 --out ./out\n\n  \
+           # Real footage with the demo cascade:\n  \
+           rs-face video.mp4 --out ./out --threads 4\n\n  \
+           # Real footage with a converted OpenCV Haar cascade:\n  \
+           rs-face video.mp4 --out ./out --cascade haarcascade.rfcf\n\n  \
+           # Heavy drama footage (variable face sizes):\n  \
+           rs-face clip.mp4 --out ./out --scale 1.4 --stride 3 --only-with-face\n\n  \
+           # Try the zero-weight detector (band + symmetry):\n  \
+           rs-face video.mp4 --out ./out --algo luminance\n\n  \
+           # Industrial accuracy (requires `cargo build --features ort-backend`):\n  \
+           rs-face video.mp4 --out ./out --algo scrfd\n\n  \
+           # See also: `cargo run --example` for SDK recipes; docs/INDEX.md for the full doc map.\n"
+    );
+}
+
+fn print_algos() {
+    println!(
+        "rs-face algorithms (compiled-in):\n\n  \
+           name       maturity    description\n  \
+           ---------  ----------  ----------------------------------------"
+    );
+    // The list is the source of truth. Adding a new detector means adding a row here.
+    let rows: [(&str, &str, &str); 6] = [
+        (
+            "haar",
+            "Production",
+            "Viola-Jones AdaBoost cascade over 5 Haar-like feature families. Zero deps, real accuracy on frontal faces; load OpenCV XML via tools/convert_opencv_xml.py.",
+        ),
+        (
+            "cnn",
+            "Scaffold",
+            "24x24 Conv+ReLU+Pool+FC+Sigmoid CNN. Weights are a placeholder for smoke-testing; load real weights via --cnn-weights to get a real detector.",
+        ),
+        (
+            "yunet",
+            "Scaffold",
+            "YuNet-style anchor-based detector (5 scales, 15-d outputs). Correct shapes + NMS, placeholder weights — drop in real weights to enable.",
+        ),
+        (
+            "mtcnn",
+            "Scaffold",
+            "MTCNN 3-stage P-Net -> R-Net -> O-Net cascade. Correct shapes + NMS, placeholder weights.",
+        ),
+        (
+            "hog",
+            "Scaffold",
+            "HOG + linear SVM, 64x128 window, dense multi-scale. Correct shapes + NMS, placeholder weights.",
+        ),
+        (
+            "luminance",
+            "Production",
+            "Band-pattern + mirror-symmetry detector. No weights at all, fully classical CV; strongest on frontal portraits.",
+        ),
+    ];
+    for (name, mat, desc) in rows {
+        println!("  {:<9}  {:<10}  {}", name, mat, desc);
+    }
+    println!(
+        "\nAlgorithm tags consumed by --algo and the RSFACE_ALGO env var.\n\
+         Production: measured accuracy in this crate (see docs/algorithms.md).\n\
+         Scaffold:   correct architecture, placeholder weights; will detect nothing.\n\
+         Compile-time gate: the ort-backend / tract-backend features add an\n\
+         additional scrfd + arcface path for industrial accuracy (see --list-features)."
+    );
+}
+
+fn print_features() {
+    println!(
+        "rs-face Cargo features compiled into this binary:\n\n  \
+           (default)      Zero runtime deps. Pure-Rust CPU classical CV — haar, cnn,\n  \
+                          yunet/mtcnn/hog scaffolds, lbph/eigenface recognition.\n\n  \
+           metal-backend  Metal GPU on macOS / Apple Silicon (OpenCL path is deprecated on\n  \
+                          current macOS). Off by default.\n\n  \
+           cuda-backend   CUDA on Linux / Windows via cudarc 0.12. Needs CUDA toolkit +\n  \
+                          NVIDIA driver at runtime. Off by default.\n\n  \
+           ort-backend    ONNX Runtime (C++ runtime; GPU-capable: CoreML / CUDA / TensorRT /\n  \
+                          DirectML / ROCm). Adds SCRFD detector + ArcFace recogniser.\n  \
+                          Requires libonnxruntime.so on the host.\n\n  \
+           tract-backend  Pure-Rust ONNX inference. No C++ toolchain, CPU-only, slower.\n  \
+                          Same SCRFD + ArcFace model files as ort-backend.\n\n  \
+           onnx           Alias for `ort-backend` (kept for ergonomics).\n\n  \
+           ort-coreml / ort-cuda / ort-tensorrt / ort-directml\n  \
+                          ONNX Runtime execution-provider toggles. Pair with ort-backend.\n\n\
+         Examples:\n  \
+           # smallest possible build (default features):\n  \
+           cargo build --release\n\n  \
+           # add Metal GPU on macOS:\n  \
+           cargo build --release --features metal-backend\n\n  \
+           # add industrial accuracy (ONNX Runtime, GPU-capable):\n  \
+           cargo build --release --features ort-backend\n\n  \
+           # add industrial accuracy without C++ (pure Rust, CPU only):\n  \
+           cargo build --release --features tract-backend"
     );
 }
 
@@ -76,6 +173,18 @@ fn main() {
         match a.as_str() {
             "--help" | "-h" => {
                 print_help();
+                return;
+            }
+            "--version" | "-V" => {
+                println!("rs-face {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            "--list-algos" => {
+                print_algos();
+                return;
+            }
+            "--list-features" => {
+                print_features();
                 return;
             }
             "--out" => {

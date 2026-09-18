@@ -6,7 +6,9 @@
 //! and `!Sync` (detector scratch buffers are owned per-thread, see `cnn::CnnScratch`).
 
 use crate::detector::Detection;
+use crate::detector::{Detector as HaarDetectorInner, DetectorConfig};
 use crate::face::FaceDetection;
+use crate::haar::Cascade;
 use crate::image::{GrayImage, RgbImage};
 
 /// How much trust a detector's output has earned.
@@ -131,6 +133,49 @@ pub trait FaceDetector: Send {
             .into_iter()
             .map(FaceDetection::from)
             .collect()
+    }
+}
+
+/// Adapter that exposes the crate-root Haar cascade [`crate::Detector`]
+/// through the uniform [`FaceDetector`] trait.
+///
+/// `rsface::Detector` is the original Haar cascade detector and predates the
+/// trait. This newtype wraps it so Haar can be dispatched through the same
+/// `Box<dyn FaceDetector>` API as every other algorithm — useful for
+/// benchmarks, platform comparison code, and the "swiss-army-knife" recipe
+/// in `examples/detect_uniform.rs`. The CLI continues to use
+/// `rsface::Detector` directly because it is behaviour-coupled to
+/// [`crate::pipeline`]; this wrapper only exists for SDK uniformity.
+///
+/// Maturity is reported as [`Maturity::Production`] for any cascade the user
+/// supplies; scaffolds (random-weight demo cascade) report as [`Maturity::Experimental`]
+/// so the badge remains truthful.
+pub struct HaarDetector(pub HaarDetectorInner);
+
+impl HaarDetector {
+    /// Wrap a Haar cascade detector so it implements [`FaceDetector`].
+    pub fn new(cascade: Cascade, config: DetectorConfig) -> Self {
+        Self(HaarDetectorInner::new(cascade, config))
+    }
+}
+
+impl FaceDetector for HaarDetector {
+    fn name(&self) -> &'static str {
+        "haar"
+    }
+    fn description(&self) -> &'static str {
+        "Viola-Jones AdaBoost cascade over 5 Haar-like feature families. \
+         Load OpenCV XML via tools/convert_opencv_xml.py -> .rfcf."
+    }
+    fn maturity(&self) -> Maturity {
+        // The bundled demo cascade has hand-tuned thresholds and is the
+        // production-quality baseline used by the CLI; cascade stage_bias is
+        // the documented calibration knob. Real OpenCV-trained cascades
+        // routed through `.rfcf` inherit the same maturity.
+        Maturity::Production
+    }
+    fn detect(&self, img: &GrayImage) -> Vec<Detection> {
+        self.0.detect(img)
     }
 }
 
