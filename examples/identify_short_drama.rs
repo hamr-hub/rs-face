@@ -44,8 +44,8 @@ use rsface::image::{GrayImage, RgbImage};
 use rsface::lbph::{extract as lbph_extract, LbphConfig};
 use rsface::source;
 use rsface::video_id::{
-    identify_video, merge_across_videos, render_video_manifest_json, ClosureIdentify, Identify,
-    IdentifyError, Track, VideoIdConfig, VideoIdentification,
+    identify_video, merge_across_videos, render_video_manifest_json, Identify, Track,
+    VideoIdConfig, VideoIdentification,
 };
 
 fn main() {
@@ -414,8 +414,3 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         threshold: threshold.unwrap_or(0.36),
     })
 }
-
-// Silence "unused import" when only one of the imports is referenced in the
-// binary entrypoint above.
-#[allow(dead_code)]
-fn _anchor(_t: &Track) {}
