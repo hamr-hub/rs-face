@@ -198,7 +198,15 @@ match rec.identify_crop(&probe) {
     | LbphMatch::NoCandidates => println!("unknown"),
 }
 rec.verify("alice", &probe); // Option<f32>: chi-square distance if the label is enrolled
+
+// Persist descriptors (not crops) and rebuild later in a new process:
+rec.save("gallery.lbph")?;                 // atomic sibling-temp + rename
+let rec = LbphRecognizer::load("gallery.lbph")?; // bit-exact, fully validated
 ```
+
+The gallery file format (`RSLB` v1, zero-dependency little-endian, ~8.5 KB per
+crop at the 6×6 default) is specified in
+[`gallery-persistence.md`](gallery-persistence.md).
 
 All inputs are `GrayImage`; use `RgbImage::to_gray()` and the built-in resize if your
 detector returns colour or different crop sizes.

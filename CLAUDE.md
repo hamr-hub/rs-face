@@ -1,5 +1,8 @@
 # rs-face 项目规则
 
+> **目录结构 / 新增文件位置 / "Do NOT" 硬约束 → 先读 [`STRUCTURE.md`](STRUCTURE.md)。**
+> 本文件只列**操作层**规则（怎么部署、怎么开发、怎么集成测试）。
+
 ## 部署 / 启动 / 集成测试 → Docker 是唯一标准方式
 
 platform 服务(rustfs + postgres + rsface-server)**必须**通过 `docker compose` 启动,

@@ -51,7 +51,9 @@
 //!
 //! ### Recognition (zero-dep)
 //! - [`eigenface`]           : PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`.
+//! - [`fisherface`]          : Fisherfaces / LDA (Belhumeur–Hespanha–Kriegman): n−C PCA reduction then C−1 class-discriminant axes; best zero-dep pair EER.
 //! - [`lbph`]                : uniform Local Binary Patterns histograms + chi-square distance.
+//! - [`lbph_store`]          : zero-dep binary gallery persistence (save/load across restarts, no crops needed).
 //! - [`video_id`]            : video-level identification — IoU tracker + single-linkage clusterer + cross-video re-id. Plugs any (detector, recogniser) pair via the [`video_id::Identify`] trait; example wires the zero-dep haar + LBPH path.
 //!
 //! ### Recognition (ONNX, opt-in)
@@ -137,7 +139,7 @@
 //!
 //! | family            | default build | what extra you must do |
 //! |-------------------|---------------|------------------------|
-//! | `haar`, `luminance`, `lbph`, `eigenface` | ✅ Production-grade out of the box | nothing |
+//! | `haar`, `luminance`, `lbph`, `eigenface`, `fisherface` | ✅ Production-grade out of the box | nothing |
 //! | `cnn`, `hog`, `yunet`, `mtcnn`          | ⚠️ Scaffold (correct shapes, placeholder weights) | drop in real weights via `*_with_*` constructor or `--cnn-weights` |
 //! | `scrfd`, `arcface`                       | ⛔ Opt-in (`ort-backend` / `tract-backend`) | download ONNX models; `tools/fetch_models.sh` does this |
 //!
@@ -197,13 +199,16 @@ pub mod eigenface;
 pub mod embedding;
 pub mod face;
 pub mod face_detector;
+pub mod fisherface;
 pub mod gpu;
 pub mod haar;
 pub mod hog_face;
 pub mod image;
 pub mod integral;
-pub mod luminance_face;
 pub mod lbph;
+pub mod lbph_store;
+pub(crate) mod linalg;
+pub mod luminance_face;
 pub mod models;
 pub mod mtcnn;
 pub mod onnx;

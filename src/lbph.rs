@@ -147,6 +147,17 @@ impl LbphDescriptor {
         &self.values
     }
 
+    /// Number of spatial cells (`grid_y × grid_x`) this descriptor covers.
+    pub fn cells(&self) -> usize {
+        self.cells
+    }
+
+    /// Reconstruct a descriptor from stored parts (persistence codec only); the caller
+    /// is trusted to have validated `values.len() == cells * BINS`.
+    pub(crate) fn from_parts(cells: usize, values: Vec<f32>) -> Self {
+        Self { values, cells }
+    }
+
     /// Chi-square distance: 0 for identical descriptors, larger for more different ones.
     ///
     /// Returns `None` on dimension mismatch (descriptors from different grid shapes)
@@ -205,10 +216,12 @@ pub enum LbphMatch {
 
 /// In-memory nearest-neighbour LBPH recogniser.
 ///
-/// Brute force by design: a descriptor is 64 cells × 59 bins ≈ 3.8 KB and a chi-square
-/// comparison is cheap, so linear scan is fine into the low thousands of identities.
-/// Persistence is deliberately out of scope for now (same as
-/// [`crate::embedding::Gallery`]); reconstruct by re-enrolling crops.
+/// Brute force by design: a default-grid descriptor is 36 cells × 59 bins = 2 124
+/// `f32`s (≈ 8.3 KiB) and a chi-square comparison is cheap, so linear scan is fine
+/// into the low thousands of identities.
+/// The gallery can be persisted without the original crops via
+/// [`LbphRecognizer::to_bytes`] / [`LbphRecognizer::save`] (format documented in
+/// `docs/gallery-persistence.md`).
 #[derive(Clone, Debug)]
 pub struct LbphRecognizer {
     config: LbphConfig,
@@ -225,6 +238,61 @@ impl LbphRecognizer {
             identities: Vec::new(),
             by_label: HashMap::new(),
         }
+    }
+
+    /// Rebuild from persisted parts; the caller (the codec in [`crate::lbph_store`])
+    /// has already validated shape and rejected duplicate labels.
+    pub(crate) fn from_identities(config: LbphConfig, identities: Vec<LbphIdentity>) -> Self {
+        let mut by_label = HashMap::with_capacity(identities.len());
+        for (i, id) in identities.iter().enumerate() {
+            by_label.insert(id.label.clone(), i);
+        }
+        Self {
+            config,
+            identities,
+            by_label,
+        }
+    }
+
+    /// Serialize config + every enrolled descriptor to the compact binary gallery
+    /// format (exact `f32` round-trip; see `docs/gallery-persistence.md`).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        crate::lbph_store::encode(self)
+    }
+
+    /// Rebuild a recogniser from [`LbphRecognizer::to_bytes`] output, validating the
+    /// whole blob before returning.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::lbph_store::LbphStoreError`] for a truncated, corrupt,
+    /// wrong-version, or internally inconsistent blob.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::lbph_store::LbphStoreError> {
+        crate::lbph_store::decode(bytes)
+    }
+
+    /// Atomically write the gallery (`to_bytes` via a temp file then rename).
+    ///
+    /// # Errors
+    ///
+    /// Filesystem errors, or [`crate::lbph_store::LbphStoreError::Io`] wrapping them.
+    pub fn save(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), crate::lbph_store::LbphStoreError> {
+        crate::lbph_store::save(self, path)
+    }
+
+    /// Load a recogniser written by [`LbphRecognizer::save`].
+    ///
+    /// # Errors
+    ///
+    /// Filesystem errors or any [`crate::lbph_store::LbphStoreError`].
+    pub fn load(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, crate::lbph_store::LbphStoreError> {
+        crate::lbph_store::load(path)
     }
 
     pub fn config(&self) -> &LbphConfig {
