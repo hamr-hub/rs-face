@@ -20,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (between `visibility.js` and `telemetry.js`); updated the file's header
   comment to reflect the actual loading contract. The matching backend
   endpoint `POST /api/jobs/{id}/compare` is already in production.
+- **Moved frontend dev tooling back to the repo root** to fix an
+  inconsistency in commit 8add57a (`chore(structure): move vite/pnpm
+  tooling to platform/web-dev/`): the commit's commit-message claimed the
+  five files moved to `platform/web-dev/`, but the actual `git ls-tree -r`
+  shows them at the repo root. The `Makefile web-*` targets introduced in
+  8add57a called `cd platform/web-dev && pnpm <cmd>` against a directory
+  that did not exist, breaking `make web-install` / `web-dev` /
+  `web-build`. The fix: keep the dev files at the root (where they
+  always were), drop the `WEB_DEV_DIR` Makefile variable, call `pnpm`
+  directly. `vite.config.js` paths updated: `root: '../web'` →
+  `root: 'platform/web'`, `outDir: '../../web-dist'` →
+  `outDir: 'web-dist'`.
 - **`CONTRIBUTING.md § Project layout`**: full directory tree + per-file
   responsibilities + 7 conventions ("top-level dirs are sparse by design",
   "no planning docs at the root", "`src/bin/` is for `[[bin]]` targets",

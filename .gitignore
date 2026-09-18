@@ -61,6 +61,7 @@ platform/testdata/hls-loop/
 # this is purely for `make web-dev` hot-reload iteration.
 node_modules/
 web-dist/
+.vite/
 
 # ---- Local model weights (fetch via tools/fetch_models.sh) ----
 models/

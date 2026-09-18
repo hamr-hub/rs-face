@@ -1,16 +1,15 @@
-// rs-face platform — Vite dev server.
+// rs-face platform — Vite dev server (at the repo root).
 //
-// This config lives in `platform/web-dev/` (one level deeper than the frontend
-// assets). The production bundle is built into the rsface-server Docker image
+// The production bundle is shipped inside the rsface-server Docker image
 // (see platform/Dockerfile); this config exists only for the dev workflow:
 //
 //   1. Backend:  `make docker-up`  (rsface-server on http://localhost:20080)
 //   2. Frontend: `make web-dev`    (Vite on http://localhost:5173, HMR on)
 //
-// Vite serves `../web/` as a static root (one directory up = platform/web/),
-// then proxies /api/* and /events to the Docker backend. Edits to app.js /
-// *.css / index.html reflect immediately via HMR — no rebuild of the backend
-// image needed.
+// Vite serves `platform/web/` as a static root (see `root:` below), then
+// proxies /api/* and /events to the Docker backend. Edits to app.js /
+// *.css / index.html reflect immediately via HMR — no rebuild of the
+// backend image needed.
 //
 // To point at a different backend (e.g. a remote dev box), set
 // RSFACE_BACKEND=http://host:port  before running pnpm dev.
@@ -20,8 +19,10 @@ import { defineConfig } from 'vite';
 const BACKEND = process.env.RSFACE_BACKEND || 'http://localhost:20080';
 
 export default defineConfig({
-  // platform/web/ is the static root (relative to this config file).
-  root: '../web',
+  // platform/web/ is the static root (relative to the repo root where this
+  // config file lives). Production ships these same files from /app/web/
+  // inside the rsface-server container.
+  root: 'platform/web',
 
   server: {
     host: '0.0.0.0',       // listen on all interfaces so LAN peers can hit it
@@ -52,7 +53,7 @@ export default defineConfig({
     // Optional: `pnpm build` writes a production bundle here for inspection.
     // The Docker image rebuilds its own copy of platform/web/, so this is
     // mainly for `vite preview` smoke-tests.
-    outDir: '../../web-dist',
+    outDir: 'web-dist',
     emptyOutDir: true,
     sourcemap: true,
   },

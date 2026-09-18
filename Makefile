@@ -101,20 +101,19 @@ docker-clean: ## DESTRUCTIVE: stop stack and wipe data/ bind mounts (NOT dump fi
 # /api/* + /events to the docker backend at :20080. Edits to any file under
 # platform/web/ are picked up by Vite HMR immediately.
 #
-# All pnpm/Vite tooling lives under platform/web-dev/ (vite.config.js,
-# package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc). This keeps the
-# repo root for Rust core + meta only.
+# All pnpm/Vite tooling lives at the repo root (vite.config.js,
+# package.json, pnpm-lock.yaml, pnpm-workspace.yaml, .npmrc). This makes
+# `pnpm install` / `pnpm dev` callable directly from any Makefile target
+# without a `cd` wrapper, and matches the docs in CLAUDE.md / README.md.
 
-WEB_DEV_DIR := platform/web-dev
-
-web-install: ## install Vite + plugins (once, into platform/web-dev/)
-	cd $(WEB_DEV_DIR) && pnpm install
+web-install: ## install Vite + plugins (once, into ./node_modules/)
+	pnpm install
 
 web-dev: docker-up ## vite dev server :5173 → proxies /api to docker :20080 (HMR on)
-	cd $(WEB_DEV_DIR) && pnpm dev
+	pnpm dev
 
 web-build: ## produce production bundle to web-dist/ (optional; docker builds its own)
-	cd $(WEB_DEV_DIR) && pnpm build
+	pnpm build
 
 # --- CI parity --------------------------------------------------------------
 # Targets that match what CI runs, so a local `make ci-*` is a faithful

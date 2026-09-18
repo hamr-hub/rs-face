@@ -178,7 +178,7 @@ rs-face/
 │       └── README.md       # frontend-local notes
 │
 ├── package.json        # frontend dev (vite only); root: 'platform/web'
-├── pnpm-workspace.yaml # pnpm config (single workspace: platform/web)
+├── pnpm-workspace.yaml # pnpm config (onlyBuiltDependencies allow-list)
 ├── pnpm-lock.yaml      # committed for reproducible dev installs
 ├── vite.config.js       # vite dev server with /api + /events proxy → :20080
 │
