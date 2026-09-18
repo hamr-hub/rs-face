@@ -6,7 +6,7 @@ faces used for LBPH.
 
 ## 1. What "zero dependencies" means here
 
-| Capability | Default build (`--no-default-features`) | Optional (`--features onnx`) |
+| Capability | Default build (`--no-default-features`) | Optional (`--features ort-backend`) |
 |---|---|---|
 | Detection | Viola–Jones Haar cascade (pure Rust) | SCRFD-10G (ONNX, 17 MB weights) |
 | Recognition | **LBPH — no weights, no crates** ([doc](recognition-lbph.md)) | ArcFace R50 (ONNX, 174 MB weights) |
@@ -61,11 +61,13 @@ its members. Two metrics are provided:
 
 ## 3. Evaluation methodology — strict leave-one-out
 
-The crop set and ground truth are identical to the LBPH evaluation: **35 crops / 8
-identities** in `out/lbph/crops`, labels from offline ArcFace clustering; the evaluated
-path never touches ONNX. 85 same-identity and 510 different-identity unordered pairs.
-See [`recognition-lbph.md` §3](recognition-lbph.md) for how the crops and labels are
-produced (`prep_lbph_crops`, lab-only, `--features ort-backend`).
+The crop set and ground truth are identical to the LBPH evaluation: **77 crops / 21
+identities** in `out/lbph/crops` (150 frames from five short-drama clips, labels from
+offline ArcFace clustering; the evaluated path never touches ONNX). 195 same-identity
+and 2 731 different-identity unordered pairs. See
+[`recognition-lbph.md` §3](recognition-lbph.md) for the frame provenance, clustering
+and visual-label audit, and the no-regression role of the earlier 35-crop /
+8-identity easy gallery (`out/lbph/crops_old`).
 
 The crucial protocol difference from LBPH is that the PCA subspace is **gallery
 specific**, so holding a single model fixed would leak every probe into the training
@@ -83,22 +85,28 @@ Two measurements come out of that loop, with different evidential weight:
   with the LBPH numbers, but threshold calibration should lean conservative and be
   re-checked on the target deployment.
 
-Singletons (identities with one crop, here `id01` and `id07`) cannot have a
-same-identity gallery member left behind and are counted separately, not as errors.
+Nine of the 21 identities are singletons (one accepted crop each); those nine probes
+cannot have a same-identity gallery member left behind and are counted separately, not
+as errors, leaving 68 repeated-identity probes.
 
-Reproduce: `tools/lbph_prep.sh` (crop preparation) then
+The bench additionally sweeps crop size (32/48/64 px) and retained eigenvalue energy
+(90/95/98/100 %) for the Euclidean/raw variant; rows rank by strict-LOO rank-1 and
+then margin. Reproduce: `tools/lbph_prep.sh` (crop preparation) then
 `cargo run --release --bin bench_eigenface -- out/lbph/crops`.
 
-## 4. Measured results — 35 crops, 8 identities
+## 4. Measured results
 
-All four preprocessing/metric variants, strict LOO:
+### 4.1 Hard gallery — 77 crops, 21 identities
+
+All four preprocessing/metric variants at the shipped 64 px / 98 %-energy defaults,
+strict LOO:
 
 | variant | margin¹ | best-threshold pair acc | EER threshold | LOO rank-1 |
 |---|--:|--:|--:|--:|
-| **Euclidean, raw (crate default)** | **20.80** | **97.3 %** @ 6.03 | **6.33** | **33/33 = 100 %** |
-| Euclidean, histogram-equalised | 17.19 | 98.0 % @ 13.80 | 14.87 | 33/33 = 100 % |
-| Mahalanobis, raw | 2.46 | 94.8 % @ 2.98 | 3.78 | 33/33 = 100 % |
-| Mahalanobis, equalised | 1.79 | 91.8 % | 4.91 | **29/33 = 87.9 %** |
+| **Euclidean, raw (crate default)** | **11.92** | **95.8 %** @ 5.72 | **14.04** | **58/68 = 85.3 %** |
+| Euclidean, histogram-equalised | 10.33 | 96.5 % | 20.33 | 56/68 = 82.4 % |
+| Mahalanobis, raw | 2.01 | 95.4 % | 7.11 | 43/68 = 63.2 % |
+| Mahalanobis, equalised | 1.84 | 95.3 % | 8.15 | 38/68 = 55.9 % |
 
 ¹ margin = mean different-identity distance − mean same-identity distance.
 
@@ -106,31 +114,61 @@ Distance distributions for the shipped variant (Euclidean, raw):
 
 | pair type | n | mean | p5 | p50 | p95 | extreme |
 |---|--:|--:|--:|--:|--:|--:|
-| same identity | 85 | 2.70 | 0.43 | 1.94 | 6.06 | max 7.40 |
-| different identity | 510 | 23.49 | 6.92 | 25.52 | 31.55 | min 3.90 |
+| same identity | 195 | 8.14 | 0.85 | 6.38 | 19.48 | max 22.31 |
+| different identity | 2 731 | 20.06 | 8.14 | 20.11 | 30.82 | min 3.78 |
 
 | operating point | threshold | pair accuracy | FAR | FRR |
 |---|--:|--:|--:|--:|
-| **crate default** `DEFAULT_MAX_DISTANCE` | **6.3** | **97.0 %** | **2.9 %** | **3.5 %** |
-| best pair accuracy | 6.03 | 97.3 % | 2.2 % | 5.9 % |
-| equal-error (EER) | 6.33 | — | 2.9 % | 2.4 % |
+| **crate default** `DEFAULT_MAX_DISTANCE` | **6.3** | **95.1 %** | **1.5 %** | **51.8 %** |
+| best pair accuracy | 5.72 | 95.8 % | 0.6 % | 54.9 % |
+| equal-error (EER) | 14.04 | — | 20.5 % | 20.5 % |
+
+The same/different distributions overlap heavily (the closest impostor, 3.78, is well
+inside the genuine range), so as with LBPH the shipped constant is a **conservative
+low-FAR point**, not an EER point: it admits under 1.6 % of impostors at the cost of
+rejecting about half of genuine probes. For the close-set question ("which enrolled
+person is this?") use the threshold-free `EigenfaceRecognizer::rank` / `rank_crop`
+ranking — strict-LOO rank-1 is the honest headline at **85.3 %**.
 
 Calibration notes, stated plainly:
 
-* Unlike LBPH on this set, the distributions **overlap**: the closest impostor pair
-  (3.90) is well inside the genuine range (max 7.40). There is **no zero-FAR threshold
-  that still accepts a useful fraction of probes** — a threshold at 3.9 buys FAR 0 % at
-  the cost of FRR ≈ 33 %. The shipped default 6.3 is therefore the EER-region point
-  (FAR ≈ FRR ≈ 3 %), not a zero-FAR point.
-* Whitening by √λ (Mahalanobis) collapses the margin from 20.8 to 2.5: on this
-  near-frontal, similarly-lit material the dominant components already carry the
-  identity signal, and amplifying low-energy noise directions only adds impostors. It
-  is kept as an option for flatter-spectrum galleries but is not the default.
-* Histogram equalisation slightly improves the *best-threshold* pair accuracy (98.0 %)
-  but at double the threshold scale and with a smaller margin; rank-1 is unchanged.
-  Raw pixels win on margin and simplicity.
+* Whitening by √λ (Mahalanobis) collapses the margin from 11.9 to 2.0 and rank-1 from
+  58/68 to 43/68: on this material the dominant components already carry the identity
+  signal, and amplifying low-energy noise directions only adds impostors. It is kept as
+  an option for flatter-spectrum galleries but is not the default.
+* Histogram equalisation improves the *best-threshold* pair accuracy slightly (96.5 %)
+  but at a larger threshold scale, with a smaller margin and two fewer rank-1 probes.
+  Raw pixels win on margin, rank-1, and simplicity.
 
-The full generated report is committed at `docs/bench-results-eigenface.md`.
+### 4.2 Hyperparameter sweep — the defaults already sit on the PCA ceiling
+
+Strict-LOO rank-1 for Euclidean/raw across crop size and retained eigenvalue energy:
+
+| crop size | 90 % | 95 % | 98 % (shipped) | 100 % |
+|---|--:|--:|--:|--:|
+| 32 px | 56/68 | 57/68 | 58/68 | 57/68 |
+| 48 px | 57/68 | 58/68 | 58/68 | 57/68 |
+| **64 px (shipped)** | 57/68 | **58/68** | **58/68** | 57/68 |
+
+No configuration beats **58/68 = 85.3 %**: that is the classical-PCA ceiling on this
+gallery, and the shipped 64 px / 98 % point sits on it. Five rows tie at the ceiling;
+the tie-break names 64 px / 95 % (margin 12.28 vs 11.92), but the difference is within
+one probe of sampling noise and the accept constant is calibrated in the shipped
+coefficient scale, so the 98 % default is kept. Throwing away the last 2 % of energy or
+shrinking the crop cannot manufacture identity signal that global linear projection
+does not contain.
+
+The full generated report (all 16 rows, distributions, per-identity counts) is
+committed at `docs/bench-results-eigenface.md`.
+
+### 4.3 Easy gallery (no-regression set) — 35 crops, 8 identities
+
+On the original near-frontal gallery the shipped variant still achieves 33/33 strict
+LOO rank-1, and 6.3 sits at the EER there rather than below it: pair accuracy 97.0 %
+with FAR 2.9 % / FRR 3.5 % (closest impostor 3.90 vs farthest genuine 7.40, EER
+threshold ≈ 6.33). One constant therefore gives an EER-region operating point on easy
+data and a conservative low-FAR point on hard data — exactly the direction a
+verification default should fail.
 
 ## 5. Honest limitations
 
@@ -142,20 +180,26 @@ The full generated report is committed at `docs/bench-results-eigenface.md`.
   `O(n³)` with `n ≪ d`), not for thousands of identities.
 * **Threshold scale is not portable.** The coefficient L2 scale depends on crop size,
   retained energy, and gallery composition. `DEFAULT_MAX_DISTANCE = 6.3` is calibrated
-  on 35 drama crops; rerun `bench_eigenface` on your own data before trusting it.
+  on the repo's two drama galleries (EER-region on the easy 35-crop set, conservative
+  low-FAR on the hard 77-crop set); rerun `bench_eigenface` on your own data before
+  trusting it.
 * **Same detection bottleneck as LBPH.** The numbers answer "how good are eigenfaces
   given a correct box". The built-in Haar cascade is a demo and is not selective
   enough for production; supply a trained `.rfcf` cascade or use SCRFD. See
   [`recognition-lbph.md` §5](recognition-lbph.md).
-* **Small, single-domain dataset and no landmark alignment.** 35 near-frontal crops
-  from one content type; eyes/mouth are not normalised to fixed coordinates (only the
-  detector box is). Treat 100 % LOO rank-1 as "clearly works on this domain", not an
-  LFW claim. Pose/ageing/occlusion behaviour degrades faster for global PCA than for
-  local descriptors — that is the classical result, and the Mahalanobis row is a small
-  visible taste of it.
-* **Classical ceiling.** For uncontrolled scenes the `ort-backend`/`tract-backend`
-  ArcFace path remains the production recogniser; eigenfaces are a zero-dep baseline
-  and a teaching/diagnostic tool that also works fully offline.
+* **Small, clustered dataset and no landmark alignment.** 77 crops / 21 unevenly
+  populated identities from one content type; eyes/mouth are not normalised to fixed
+  coordinates (only the detector box is). Treat 85.3 % LOO rank-1 as "works on this
+  harder domain", not an LFW claim — and note the easy-gallery 100 % did not survive
+  harder pose and lighting: global PCA degrades faster than local descriptors, the
+  classical result, and the Mahalanobis collapse (63.2 % → 55.9 %) is a small visible
+  taste of how brittle global coefficient scaling is.
+* **Classical ceiling.** The 16-point sweep in §4.2 shows the PCA ceiling on this
+  gallery is 58/68 and the defaults already reach it; no configuration tuning of crop
+  size or retained energy closes the gap to LBPH, let alone ArcFace. For uncontrolled
+  scenes the `ort-backend`/`tract-backend` ArcFace path remains the production
+  recogniser; eigenfaces are a zero-dep baseline and a teaching/diagnostic tool that
+  also works fully offline.
 
 ## 6. API sketch
 

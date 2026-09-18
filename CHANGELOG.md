@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — larger real-face evaluation gallery
+- **Eval gallery expanded from 35 crops / 8 identities to 77 crops / 21
+  identities**: two additional short-drama clips (`dramabox`, `shorttv`) join the
+  three originals, 150 sampled frames in total (30 per clip), 77 of them passing the
+  SCRFD face gate — 195 same-identity / 2 731 different-identity pairs, with harder
+  pose and lighting than the original set. Clusters whose ArcFace join cosine sat in
+  the 0.48–0.55 grey zone were audited visually with per-identity contact sheets; all
+  are same-actor variation, no label mismatch accepted.
+- The original 35-crop gallery (`goodshort` + `reelshort` + `vibeshort`) is kept in
+  the lab tree as `out/lbph/crops_old`, an **easy no-regression set** every tuning
+  change must not regress.
+- **Hyperparameter sweeps in the accuracy benches**: `bench_lbph` now evaluates a
+  3×3 grid sweep (6×6/8×8/10×10 cells × 90/120/150 px) plus raw vs equalised
+  preprocessing; `bench_eigenface` sweeps crop size (32/48/64 px) × retained
+  eigenvalue energy (90/95/98/100 %) on top of the four metric/preprocessing
+  variants. Both rank configurations by strict LOO rank-1, then margin, name the
+  winner explicitly (including "shipped default wins/tied" language), and write the
+  full sweep tables into the committed markdown reports.
+
+### Changed — zero-dependency recognisers retuned on the harder gallery
+- **LBPH default histogram grid changed from 8×8 to 6×6** (`LbphConfig` default;
+  descriptor length 3 776 → 2 124 `f32`): the coarser grid wins at **every** swept
+  crop size on the hard gallery (61–62/68 vs 59–60/68; shipped point 62/68 = 91.2 %
+  rank-1) because larger cells pool the box-crop localisation jitter of an
+  unaligned pipeline, with no regression on the easy gallery (33/33 for every
+  grid/size combination). OpenCV's 8×8 remains one field away for landmark-aligned
+  deployments.
+- **`lbph::DEFAULT_MAX_DISTANCE` recalibrated from 30 to 16.7** for the new 6×6
+  chi-square scale, deliberately as a conservative low-FAR point rather than an EER
+  point: FAR 0.26 % / FRR 48.7 % at 96.5 % pair accuracy on the hard gallery
+  (EER ≈ 22.5, FAR ≈ FRR ≈ 20 %), and FAR 1.2 % / FRR 16.5 % on the easy gallery.
+  The same/different distributions overlap on hard data, so no threshold gives both
+  low FAR and low FRR; the docs now direct close-set use to the threshold-free
+  `rank_crop` API (91.2 % rank-1 is the honest headline).
+- **Eigenfaces defaults kept** at 64 px / 98 % energy after the 16-point sweep showed
+  58/68 = 85.3 % is the classical-PCA ceiling on the hard gallery and the shipped
+  point already sits on it (64 px / 95 % only ties within one probe). The 6.3 accept
+  constant is re-documented as a conservative low-FAR point there (FAR 1.5 %,
+  FRR 51.8 %) while remaining the EER-region point on the easy gallery
+  (FAR 2.9 % / FRR 3.5 %, rank-1 33/33).
+- Recognition docs (`docs/recognition-lbph.md`,
+  `docs/recognition-eigenface.md`, `docs/bench-results-*.md`, README) regenerated for
+  the 77-crop / 21-identity numbers, sweep tables, and the threshold/rank guidance.
+
 ### Added — zero-dependency recognition (LBPH)
 - **LBPH face recogniser in the default build** (`src/lbph.rs`): radius-1 /
   8-neighbour LBP codes, OpenCV-compatible 59-bin uniform-pattern mapping,
