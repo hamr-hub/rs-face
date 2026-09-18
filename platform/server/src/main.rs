@@ -91,8 +91,11 @@ async fn main() {
         shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
-    // 响应缓存层(无外部依赖)。两份 TTL cache:config 启动后不变,
-    // metrics 每 1s 复用,前端 2s 轮询 50% 命中。
+    // 响应缓存层(无外部依赖)。四份 TTL cache:
+    // - config 启动后不变,1h TTL
+    // - metrics 每 1s 复用,前端 2s 轮询 50% 命中
+    // - jobs list 500ms 复用,前端 SSE 期间频繁轮询(SSE 帧事件 + 列表刷新)70% 命中
+    // - jobs stats 1s 复用,按算法聚合无状态机依赖
     let caches = api::ResponseCaches {
         config_json: Arc::new(cache::TtlCache::new(
             "config_json",
@@ -100,6 +103,14 @@ async fn main() {
         )),
         metrics_json: Arc::new(cache::TtlCache::new(
             "metrics_json",
+            std::time::Duration::from_millis(1000),
+        )),
+        jobs_list_json: Arc::new(cache::TtlCache::new(
+            "jobs_list_json",
+            std::time::Duration::from_millis(500),
+        )),
+        jobs_stats_json: Arc::new(cache::TtlCache::new(
+            "jobs_stats_json",
             std::time::Duration::from_millis(1000),
         )),
     };
