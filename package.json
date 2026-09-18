@@ -1,0 +1,18 @@
+{
+  "name": "rs-face-platform-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "rs-face platform web frontend — Vite dev server with proxy to Docker backend (rsface-server on :20080). Production bundle is shipped inside the rsface-server container; this repo only carries the dev workflow.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.10"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
