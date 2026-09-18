@@ -19,7 +19,7 @@ this document for the per-algorithm detail.
 | Zero-weight detector for an in-process test | `luminance` | `--algo luminance` |
 | Real accuracy on unconstrained faces | `scrfd` (ONNX) | `--features ort-backend --algo scrfd` |
 | Pure Rust industrial accuracy, no C++ runtime | `scrfd` via tract | `--features tract-backend --algo scrfd` |
-| Recognise identities with zero downloads | `lbph` / `eigenface` | use `rsface::lbph::LbphRecognizer` / `rsface::eigenface::EigenfaceRecognizer` |
+| Recognise identities with zero downloads | `lbph` / `eigenface` / `fisherface` | use `rsface::lbph::LbphRecognizer` / `rsface::eigenface::EigenfaceRecognizer` / `rsface::fisherface::FisherfaceRecognizer` |
 | Verification under pose / lighting drift | `arcface` (ONNX) | `--features ort-backend` + `rsface::arcface_recognizer::ArcFaceRecognizer` |
 
 ### Detection algorithm matrix
@@ -44,8 +44,9 @@ this document for the per-algorithm detail.
 
 | algorithm | what it does | weights? | measured here | binary footprint | commercial OK? |
 |---|---|---|:-:|---|:-:|
-| `lbph` | uniform LBP histograms + chi-square | none | 33/33 rank-1, 97.6% pair accuracy (benchmarks) | libm only | ✅ |
-| `eigenface` | PCA + Jacobi eigendecomp + nearest-neighbour | none (gallery-trained) | 33/33 rank-1 strict LOO, 97% pair accuracy (benchmarks) | libm only | ✅ |
+| `lbph` | uniform LBP histograms (6×6 grid) + chi-square, incremental enrolment | none | **62/68 hard-gallery rank-1** (91.2 %), 33/33 easy; EER ≈ 22.5 % | libm only | ✅ |
+| `eigenface` | PCA + Jacobi eigendecomp + nearest-neighbour | none (gallery-trained) | **58/68 hard rank-1 strict LOO** (the sweep-proven PCA ceiling), 33/33 easy; EER ≈ 14.0 % | libm only | ✅ |
+| `fisherface` | n−C PCA reduction → C−1 LDA axes (whitened scatter problem) + nearest-neighbour | none (gallery-trained) | **59/68 hard rank-1 strict LOO**, 33/33 easy; **best zero-dep EER ≈ 12.8 %**; descriptor ≤ C−1 f32 | libm only | ✅ |
 | `arcface` | 512-d L2-normalised embedding via ONNX | InsightFace `w600k_r50` / `w600k_mbf` | cosine margin measured on real faces (benchmarks) | ~250 MB ONNX | ⛔ research only |
 
 ---

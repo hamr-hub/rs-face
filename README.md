@@ -12,7 +12,7 @@ libm.so.6
 libc.so.6
 ```
 
-> One crate, six detectors, two zero-dep recognisers, one ONNX path to
+> One crate, six detectors, three zero-dep recognisers, one ONNX path to
 > industrial accuracy. Every algorithm implements the same `FaceDetector`
 > trait, so swapping implementations is a one-line change.
 
@@ -27,8 +27,9 @@ libc.so.6
 
 | recogniser | what it is | zero-dep? | measured here |
 |---|---|:-:|---|
-| **lbph** | uniform LBP histograms + chi-square, zero deps, no weights | ✅ | 33/33 rank-1 on labelled gallery |
-| **eigenface** | PCA / Turk-Pentland, Jacobi eigendecomp in pure `std` | ✅ | 33/33 rank-1 strict LOO |
+| **lbph** | uniform LBP histograms + chi-square, zero deps, no weights; incremental enrolment | ✅ | **62/68** hard-gallery LOO rank-1, 33/33 easy |
+| **fisherface** | Fisherfaces/LDA — n−C PCA reduction then C−1 class-discriminant axes, pure `std` | ✅ | **59/68** hard-gallery LOO rank-1, **best zero-dep EER ≈ 12.8 %**, 33/33 easy |
+| **eigenface** | PCA / Turk-Pentland, Jacobi eigendecomp in pure `std` | ✅ | **58/68** hard-gallery strict LOO (PCA ceiling), 33/33 easy |
 | **arcface** | ArcFace R50 / MobileFaceNet via ONNX Runtime / tract | opt-in | cosine margin measured on real faces |
 
 ## 5-minute start
@@ -73,7 +74,8 @@ tools/fetch_models.sh                              # downloads pinned ONNX model
 | Frontal portrait, controlled lighting, no extra deps | `--algo haar` with an OpenXML-converted `.rfcf` cascade |
 | Variable face sizes in drama / Reels / vertical video | `--algo haar --scale 1.4 --stride 3 --only-with-face` |
 | Need a real accuracy on unconstrained faces | `--features ort-backend --algo scrfd` |
-| Recognise identities with no downloads | use `rsface::lbph::LbphRecognizer` or `rsface::eigenface::EigenfaceRecognizer` |
+| Recognise identities with no downloads | use `rsface::lbph::LbphRecognizer` (incremental enrolment) or the train-once `rsface::eigenface::EigenfaceRecognizer` / `rsface::fisherface::FisherfaceRecognizer` |
+| Lowest verification EER with zero deps | `rsface::fisherface::FisherfaceRecognizer` (EER ≈ 12.8 % on the hard drama gallery; rerun `bench_fisherface` on your own data) |
 | Need verification under pose / lighting drift | `--features ort-backend` + `rsface::arcface_recognizer::ArcFaceRecognizer` |
 
 ## Cookbook — same `Box<dyn FaceDetector>` for every algorithm
@@ -107,7 +109,7 @@ design / accuracy / operations document in the repo.
 - [Architecture](docs/architecture.md) — crate map + multi-threaded pipeline plumbing.
 - [Format reference](docs/format.md) — `.rfcf` cascade binary format, manifest JSON schema.
 - [GPU backends](docs/GPU_BACKENDS.md) — `cpu` / `metal` / `cuda` / `rocm` / `mlu` / `ascend`.
-- [Recognition LBPH](docs/recognition-lbph.md) / [Recognition Eigenface](docs/recognition-eigenface.md).
+- [Recognition LBPH](docs/recognition-lbph.md) / [Recognition Eigenface](docs/recognition-eigenface.md) / [Recognition Fisherface](docs/recognition-fisherface.md).
 - [Benchmarks](docs/benchmarks.md) — reproducible scripts.
 
 ## Algorithm (Viola-Jones path)
@@ -148,6 +150,7 @@ Recognition backbones we wire up:
 | ArcFace MobileFaceNet (w600k_mbf, `buffalo_s`) | InsightFace model zoo | 99.70 / 98.00 / 96.58 / 95.02 | not in this fixture set; available via `tools/fetch_models.sh` |
 | **LBPH (zero-dep, in the default build)** | `src/lbph.rs` — no weights | n/a | **62/68 = 91.2 % LOO rank-1** on 77 ArcFace-labelled drama crops (21 identities; 33/33 on the easier 8-identity no-regression gallery); 96.5 % pair accuracy at the conservative low-FAR default distance 16.7 (FAR 0.3 %, FRR 49 %); EER ≈ 20 % — given a correct detector box. 6×6 grid chosen by a 9-point sweep over OpenCV's 8×8 default. Full methodology and the detector caveat: [`docs/recognition-lbph.md`](docs/recognition-lbph.md) |
 | **Eigenfaces/PCA (zero-dep, in the default build)** | `src/eigenface.rs` — no weights, Jacobi eigendecomposition in pure `std` (Turk–Pentland 1991) | n/a | **58/68 = 85.3 % rank-1** under strict per-probe LOO retraining on the same 77 crops (21 identities) — the measured PCA ceiling across a 16-point crop-size/energy sweep, which the shipped defaults already reach; 95.1 % pair accuracy at the conservative low-FAR default 6.3 (FAR 1.5 %, FRR 52 %); 33/33 on the easy gallery. Methodology and caveats: [`docs/recognition-eigenface.md`](docs/recognition-eigenface.md) |
+| **Fisherfaces/LDA (zero-dep, in the default build)** | `src/fisherface.rs` — no weights, Gram-trick PCA reduction to n−C directions then ≤ C−1 Fisher axes via `S_W^{−1/2} S_B S_W^{−1/2}` (Belhumeur–Hespanha–Kriegman 1997) | n/a | **59/68 = 86.8 % rank-1** under strict per-probe LOO retraining — one probe above the PCA ceiling, three below LBPH; the **best zero-dep pair EER ≈ 12.8 %** (vs 14.0 % PCA, 22.5 % LBPH); 96.4 % pair accuracy at the conservative low-FAR default 3.0 (FAR 0.4 %, FRR 48 %); 33/33 and FAR 0 % on the easy gallery; descriptor is only ≤ 20 f32 but the model needs retraining when identities change. Methodology and caveats: [`docs/recognition-fisherface.md`](docs/recognition-fisherface.md) |
 
 > **Detector combinations that detect nothing.** Of the algorithms the README used to
 > list as first-class (`cnn`, `mtcnn`, `yunet`, `hog`), three — `mtcnn`, `yunet`, `hog` —
@@ -245,6 +248,7 @@ required:
 | `detect_uniform` | the "swiss army knife" demo: dispatch Haar + HoG via `FaceDetector` trait |
 | `recognise_lbph` | enrol + identify with LBPH, no weights |
 | `recognise_eigenface` | train + identify with eigenfaces/PCA, no weights |
+| `recognise_fisherface` | train + identify with fisherfaces/LDA, no weights |
 | `cascade_dump` | parse a `.rfcf` cascade and print its structure |
 | `synthetic_smoke` | minimal pipeline smoke-test (no external data) |
 | `lena_classify_stages` | walk a real cascade stage by stage |
@@ -272,7 +276,7 @@ Crate map (25+ modules, see `src/lib.rs` for full descriptions):
 | core numerical | `integral`, `image`, `haar` |
 | detection (zero-dep) | `detector`, `cnn`, `hog_face`, `yunet`, `mtcnn`, `luminance_face` |
 | detection (ONNX) | `scrfd`, `scrfd_detector`, `onnx` |
-| recognition (zero-dep) | `eigenface`, `lbph` |
+| recognition (zero-dep) | `eigenface`, `fisherface`, `lbph`, `linalg` (shared Jacobi eigensolver) |
 | recognition (ONNX) | `arcface`, `arcface_recognizer` |
 | domain types | `face`, `face_detector`, `models`, `align`, `embedding` |
 | pipeline / I/O | `pipeline`, `source`, `output`, `gpu`, `pool` |

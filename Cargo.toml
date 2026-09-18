@@ -32,6 +32,10 @@ name = "bench_eigenface"
 path = "src/bin/bench_eigenface.rs"
 
 [[bin]]
+name = "bench_fisherface"
+path = "src/bin/bench_fisherface.rs"
+
+[[bin]]
 name = "cnn_train"
 path = "src/bin/cnn_train.rs"
 

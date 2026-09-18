@@ -28,8 +28,9 @@ do I start?", read in the order below.
 
 Recognition (zero-dep, no external weights):
 
-- [`docs/recognition-lbph.md`](recognition-lbph.md) — uniform LBP histograms, chi-square distance, measured rank-1 on a real labelled gallery.
-- [`docs/recognition-eigenface.md`](recognition-eigenface.md) — PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`, strict per-probe LOO retraining.
+- [`docs/recognition-lbph.md`](recognition-lbph.md) — uniform LBP histograms, chi-square distance; 62/68 rank-1 on the 77-crop / 21-identity hard drama gallery (33/33 easy), 6×6 grid chosen by a 9-point sweep.
+- [`docs/recognition-eigenface.md`](recognition-eigenface.md) — PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`, strict per-probe LOO retraining; 58/68 = the measured PCA ceiling.
+- [`docs/recognition-fisherface.md`](recognition-fisherface.md) — Fisherfaces/LDA (Belhumeur 1997): n−C PCA reduction then ≤ C−1 class-discriminant axes, pseudo-inverse whitening; 59/68 rank-1 and the best zero-dep pair EER (≈ 12.8 %).
 
 Detection (zero-dep):
 
@@ -59,8 +60,9 @@ Detection (ONNX, opt-in via `ort-backend` or `tract-backend`):
 ## 3. Measured numbers (reproducible)
 
 - [`docs/bench-results.md`](bench-results.md) — detection accuracy / throughput on real footage.
-- [`docs/bench-results-lbph.md`](bench-results-lbph.md) — LBPH rank-1, pair accuracy, EER on labelled gallery.
-- [`docs/bench-results-eigenface.md`](bench-results-eigenface.md) — eigenfaces rank-1, pair accuracy, FAR/FRR curves.
+- [`docs/bench-results-lbph.md`](bench-results-lbph.md) — LBPH rank-1, pair accuracy, EER on the labelled galleries.
+- [`docs/bench-results-eigenface.md`](bench-results-eigenface.md) — eigenfaces rank-1, pair accuracy, FAR/FRR, size/energy sweep.
+- [`docs/bench-results-fisherface.md`](bench-results-fisherface.md) — fisherfaces rank-1, pair accuracy, FAR/FRR, raw/equalised + size sweep.
 
 Re-run from a clean tree:
 

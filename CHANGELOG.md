@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — zero-dependency recognition (Fisherfaces / LDA)
+- **Fisherfaces recogniser in the default build** (`src/fisherface.rs`): the
+  Belhumeur–Hespanha–Kriegman (PAMI 1997) class-discriminative counterpart to
+  eigenfaces — crops are reduced to the leading `n−C` total-scatter PCA directions
+  (Gram trick), then the at-most-`C−1` Fisher axes come from the symmetric whitened
+  problem `S_W^{−1/2} S_B S_W^{−1/2}`; near-zero eigenvalues of `S_W` use a
+  pseudo-inverse weight (floor `1e-9 · λ_max`) so near-duplicate frames and singleton
+  classes are handled without any BLAS. Euclidean nearest neighbour, multi-shot
+  best-member scoring, verification, and the same
+  `Match`/`BelowThreshold`/`Ambiguous`/`NoCandidates` policy as the other recognisers,
+  plus `FisherfaceError` (`TooFewSamples`/`SingleClass`/`DegenerateGallery`) and 4 unit
+  tests. No weights, no third-party crate.
+- The cyclic-Jacobi symmetric eigensolver is now shared in `src/linalg.rs`
+  (`pub(crate)`, same `1e-10` relative tolerance / 30 sweeps), used by both eigenfaces
+  and fisherfaces; behaviour-preserving extraction (all eigenface tests unchanged).
+- **Measured real-face accuracy** (`docs/recognition-fisherface.md`,
+  `docs/bench-results-fisherface.md`): strict per-probe LOO with full PCA+LDA retrain
+  gives **59/68 = 86.8 % rank-1** on the 77-crop / 21-identity hard gallery — one
+  probe above the sweep-proven 58/68 eigenfaces/PCA ceiling, three below LBPH's
+  62/68 — and **33/33** on the easy 35-crop set. The pair-distance **EER ≈ 12.8 % is
+  the best of the three zero-dep recognisers** (eigenfaces 14.0 %, LBPH 22.5 %),
+  making Fisherfaces the strongest classical verification option; the stored
+  descriptor is only `C−1 ≤ 20` `f32`s. The calibrated
+  `fisherface::DEFAULT_MAX_DISTANCE = 3.0` is a conservative low-FAR point on the hard
+  gallery (FAR 0.40 %, FRR 48.2 %) and a near-perfect point on the easy one
+  (FAR 0 %, FRR 2.4 %). Histogram equalisation lowers EER further (≈ 6.9 %) but
+  costs two rank-1 probes, so raw stays the default; the 64-px crop size wins a
+  32/48/64 sweep outright.
+- `bench_fisherface` bin (default features; registered explicitly in `Cargo.toml`):
+  strict-LOO raw/equalised canonical rows plus a crop-size sweep, pair distributions,
+  EER / best-threshold / crate-default operating points, rank-1; writes the markdown
+  report. `tools/lbph_prep.sh` gains it as stage 5.
+- `recognise_fisherface` example (`cargo run --example recognise_fisherface`):
+  train-once gallery + identify / rank / verify on synthetic crops, no downloads.
+
 ### Added — larger real-face evaluation gallery
 - **Eval gallery expanded from 35 crops / 8 identities to 77 crops / 21
   identities**: two additional short-drama clips (`dramabox`, `shorttv`) join the
