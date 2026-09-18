@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Housekeeping — repo audit + directory standards
+- **Removed orphan planning docs**: `TASK_PLAN.md` (root) and
+  `core/MULTI_ALGO.md` (along with the empty `core/` directory). Both were
+  internal Chinese working documents from earlier fix passes; their content
+  is superseded by `docs/algorithms.md`, `docs/architecture.md`, and the
+  commit history. Repository convention now explicit: working planning
+  docs do not belong at the repo root or under `core/`.
+- **Wired up the dormant `platform/web/compare.js`**: the "algorithm
+  compare mode" frontend module (289 lines) was complete but never loaded.
+  Added `<script defer src="/compare.js">` to `platform/web/index.html`
+  (between `visibility.js` and `telemetry.js`); updated the file's header
+  comment to reflect the actual loading contract. The matching backend
+  endpoint `POST /api/jobs/{id}/compare` is already in production.
+- **`CONTRIBUTING.md § Project layout`**: full directory tree + per-file
+  responsibilities + 7 conventions ("top-level dirs are sparse by design",
+  "no planning docs at the root", "`src/bin/` is for `[[bin]]` targets",
+  "`platform/web/` is zero-build", "`platform/testdata/` is split", etc.).
+  Previously the section was a one-liner pointing at the README.
+- **`README.md § Project layout`**: rewritten to show the full tree
+  (with platform/ sub-tree, tests/, benches/, examples/, docs/, tools/,
+  data/) and point at `CONTRIBUTING.md` for the canonical version.
+
+### Documentation — Docker is the canonical deployment story
+- **`CLAUDE.md` at the repo root codifies the rule**: platform services
+  (rustfs + postgres + rsface-server) are deployed / started / integration-tested
+  **only** via Docker; algorithm-core `cargo test` / `clippy` / `bench` keep their
+  native-cargo fast-iter path (CI remains cargo, ubuntu + macOS matrix).
+- **New authoritative ops guide `platform/DOCKER.md`** covers deploy / start /
+  verify / e2e-test / PG backup & restore / data migration from old named
+  volumes / troubleshooting / cleanup. `platform/README.md` slimmed down to an
+  entry-point that links to it.
+- **`README.md` gains a "Run as a service (Docker)" section** in the 5-minute
+  walkthrough, plus the canonical `make docker-up` one-liner.
+- **`CONTRIBUTING.md` gains two new sections**: "Working with the platform
+  services (Docker)" (the only allowed way to run `rsface-server`) and
+  "Frontend development (pnpm dev + hot reload)" (Vite dev server with proxy
+  to the Docker backend).
+- **`Makefile` gains 7 docker-* targets and 3 web-* targets** as thin wrappers
+  around `docker compose -f platform/docker-compose.yml` and `pnpm`:
+  `docker-up / docker-down / docker-ps / docker-logs / docker-test /
+  docker-restore-pg / docker-clean` and `web-install / web-dev / web-build`.
+- **`platform/scripts/docker-smoke.sh`** is the new `make docker-test` body —
+  `/api/health` → rustfs health → postgres `pg_isready` + jobs count → optional
+  image upload.
+- **`platform/docker-compose.yml` broken reference fixed**: the inline comment
+  pointing at a non-existent `./migrate-pg.sh` now correctly directs users to
+  `make docker-restore-pg`.
+- **`data/` bind mounts confirmed as the canonical data path**:
+  `data/{rustfs,pg/pgdata,media}/` next to the repo, visible + rsync-friendly.
+  The old docker named volumes `platform_rsface-media / platform_pg-data /
+  platform_rustfs-data` (introduced in v0.1) are retired; the migration recipe
+  lives in `platform/DOCKER.md`.
+
 ### Added — larger real-face evaluation gallery
 - **Eval gallery expanded from 35 crops / 8 identities to 77 crops / 21
   identities**: two additional short-drama clips (`dramabox`, `shorttv`) join the

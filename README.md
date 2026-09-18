@@ -52,6 +52,29 @@ cargo build --release
 ./target/release/rs-face --list-features
 ```
 
+### Run as a service (Docker)
+
+For end-to-end Web UI + REST + SSE + S3 + Postgres — the **canonical** way to
+deploy the platform side of `rs-face` (see [`CLAUDE.md`](CLAUDE.md)):
+
+```bash
+docker compose -f platform/docker-compose.yml up -d --build
+# or:  make docker-up
+```
+
+| endpoint | URL |
+|---|---|
+| Web / REST / SSE | <http://localhost:20080/> |
+| S3 (rustfs) | <http://localhost:19000/> |
+| S3 console | <http://localhost:19001/> |
+| PostgreSQL | `localhost:15432` (rsface / rsface) |
+
+Data is bind-mounted into `data/{rustfs,pg/pgdata,media}/` next to the repo —
+visible, greppable, rsync-friendly. Full ops guide: [`platform/DOCKER.md`](platform/DOCKER.md)
+(deploy / start / verify / e2e / backup / restore / troubleshoot / cleanup).
+Quick targets: `make docker-up`, `docker-down`, `docker-logs`, `docker-test`,
+`docker-restore-pg`, `docker-clean`.
+
 If you need a real cascade (OpenCV's `haarcascade_frontalface_default.xml`):
 ```bash
 python3 tools/convert_opencv_xml.py haarcascade_frontalface_default.xml haarcascade.rfcf
@@ -439,34 +462,34 @@ This project is an exercise in zero-dep classical CV. Two known caveats:
 
 ## Project layout
 
+The full directory tree is documented in [`CONTRIBUTING.md § Project layout`](CONTRIBUTING.md#project-layout).
+Short version:
+
 ```
 rs-face/
-├── Cargo.toml          # zero-dep package metadata
-├── Cargo.lock          # committed (binary-first project)
-├── LICENSE             # MIT
-├── README.md
-├── CHANGELOG.md        # release notes (Keep a Changelog format)
-├── CONTRIBUTING.md     # dev setup + coding conventions
-├── .github/workflows/  # CI: build, test, fmt, clippy
-├── src/
-│   ├── lib.rs          # library entrypoint
-│   ├── main.rs         # CLI
-│   ├── integral.rs     # integral + rotated + squared integral images
-│   ├── detector.rs     # multi-scale sliding window + NMS
-│   ├── pipeline.rs     # multi-threaded pipeline
-│   ├── output.rs       # PNG + JSON writers
-│   ├── haar/           # features, cascade, demo cascade
-│   ├── cnn/            # CNN detector
-│   ├── image/          # PNG / PPM codec, GrayImage / RgbImage
-│   ├── source/         # frame source trait + impls
-│   ├── gpu/            # OpenCL squared-integral kernel
-│   ├── pool/           # worker pool helper
-│   └── bin/            # debug binaries (debug_cascade, cnn_train)
-├── tests/              # integration tests + benchmarks
-├── tools/              # cascade XML→.rfcf converter
-├── examples/           # example programs using the library
-└── docs/samples/       # sample annotated PNGs from real-world runs
+├── src/                  # library + CLI source (Rust)
+├── tests/                # integration tests + ignored benchmarks
+├── benches/              # criterion-style benches
+├── examples/             # cargo run --example <NAME>
+├── docs/                 # long-form design + accuracy documentation
+├── tools/                # Python + shell helpers (not part of the crate)
+├── platform/             # deployment-grade server + web UI (Docker-only)
+│   ├── server/           # axum HTTP API + worker pool
+│   ├── web/              # vanilla-JS frontend (zero build step)
+│   ├── docs/             # platform design + roadmap + SDK notes
+│   ├── migrations/       # SQL migrations
+│   ├── scripts/          # bash + node smoke / screenshot scripts
+│   ├── testdata/         # small reference images; large mp4/HLS gitignored
+│   ├── Dockerfile        # rsface-server image (non-root, ffmpeg, static binary)
+│   └── docker-compose.yml # rustfs + postgres + rsface-server
+├── package.json + vite.config.js # frontend dev (vite only, root: platform/web)
+├── Makefile              # docker-up / docker-test / web-dev / ...
+└── data/                 # gitignored bind-mounted runtime state
 ```
+
+Every directory has exactly one purpose; new top-level directories are
+not added lightly. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
+complete tree, conventions, and module-split rationale.
 
 ## License
 
