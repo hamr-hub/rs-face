@@ -4,6 +4,54 @@ A reference for the algorithms implemented in `rs-face`. We follow OpenCV 4.x
 semantics where applicable so that the loaded `haarcascade_frontalface_default.xml`
 cascades behave identically.
 
+---
+
+## 0. Algorithm picker — "what to use when"
+
+This is the matrix to consult before reaching for `--algo`. See the rest of
+this document for the per-algorithm detail.
+
+| situation | algorithm | flag / Cargo feature |
+|---|---|---|
+| Smoke-test the pipeline, no external input | `haar` (default) | `--algo haar` + `test://60` |
+| Frontal portrait, controlled lighting, no downloads | `haar` + OpenCV `.xml` converted to `.rfcf` | `--algo haar --cascade haarcascade.rfcf` |
+| Variable face sizes (drama / Reels / vertical video) | `haar` + coarser pyramid | `--algo haar --scale 1.4 --stride 3 --only-with-face` |
+| Zero-weight detector for an in-process test | `luminance` | `--algo luminance` |
+| Real accuracy on unconstrained faces | `scrfd` (ONNX) | `--features ort-backend --algo scrfd` |
+| Pure Rust industrial accuracy, no C++ runtime | `scrfd` via tract | `--features tract-backend --algo scrfd` |
+| Recognise identities with zero downloads | `lbph` / `eigenface` | use `rsface::lbph::LbphRecognizer` / `rsface::eigenface::EigenfaceRecognizer` |
+| Verification under pose / lighting drift | `arcface` (ONNX) | `--features ort-backend` + `rsface::arcface_recognizer::ArcFaceRecognizer` |
+
+### Detection algorithm matrix
+
+| algorithm | weights? | stage | measured accuracy | binary footprint | commercial OK? |
+|---|---|---|:-:|---|:-:|
+| `haar` | optional `.rfcf` cascade (zero-dep bundled demo) | Production | real-face drama clips (benchmarks) | ~4 KB cascade + libm | ✅ |
+| `luminance` | none | Production | synthetic + drama (benchmarks) | libm only | ✅ |
+| `cnn` | `weights/cnn_*.bin` required | **Scaffold** | n/a (placeholder weights) | ~few KB | ✅ once real weights |
+| `hog` | `weights/hog_face.bin` required | **Scaffold** | n/a | ~3 KB | ✅ once real weights |
+| `yunet` | `weights/yunet.bin` required (Apache-2.0 YuNet 2023mar) | **Scaffold** | n/a | ~340 KB | ✅ once real weights |
+| `mtcnn` | `weights/mtcnn_{p,r,o}net.bin` required | **Scaffold** | n/a | ~3 stages | ✅ once real weights |
+| `scrfd` | ONNX via `tools/fetch_models.sh` | Production (gated) | WIDER FACE AP 0.95/0.94/0.83 (paper); measured locally | ~80 MB | ⛔ research only |
+
+> **Maturity labels** come from `rsface::face_detector::Maturity`. The CLI's
+> `--list-algos` prints them; the Web UI uses them to badge each card. A
+> scaffold detector's architecture is correct and exercised by tests, but its
+> bundled weights are placeholders — drop in real weights via `*_with_*`
+> constructors (or `--cnn-weights`) to move it to Production.
+
+### Recognition algorithm matrix
+
+| algorithm | what it does | weights? | measured here | binary footprint | commercial OK? |
+|---|---|---|:-:|---|:-:|
+| `lbph` | uniform LBP histograms + chi-square | none | 33/33 rank-1, 97.6% pair accuracy (benchmarks) | libm only | ✅ |
+| `eigenface` | PCA + Jacobi eigendecomp + nearest-neighbour | none (gallery-trained) | 33/33 rank-1 strict LOO, 97% pair accuracy (benchmarks) | libm only | ✅ |
+| `arcface` | 512-d L2-normalised embedding via ONNX | InsightFace `w600k_r50` / `w600k_mbf` | cosine margin measured on real faces (benchmarks) | ~250 MB ONNX | ⛔ research only |
+
+---
+
+## 1. Integral image (summed-area table)
+
 ## 1. Integral image (summed-area table)
 
 For an input grayscale image `I` of size `W × H`:

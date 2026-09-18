@@ -46,6 +46,7 @@ Detection (ONNX, opt-in via `ort-backend` or `tract-backend`):
 | doc | what it covers |
 |---|---|
 | [`docs/architecture.md`](architecture.md) | crate map, multi-threaded pipeline plumbing, the 5-detector uniform trait story. |
+| [`docs/algorithms.md`](algorithms.md) | per-algorithm reference + **algorithm picker matrix** (start here when picking `--algo`). |
 | [`docs/format.md`](format.md) | binary `.rfcf` cascade format, manifest JSON schema, ONNX model registry digests. |
 | [`docs/benchmarks.md`](benchmarks.md) | reproducible bench scripts and what they measure. |
 | [`docs/BENCHMARK_BASELINE.md`](BENCHMARK_BASELINE.md) | the pinned baseline numbers — every regression report compares to this. |
