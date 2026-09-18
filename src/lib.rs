@@ -40,7 +40,7 @@
 //! - [`detector`]            : multi-scale sliding window + NMS, pipeline-agnostic.
 //! - [`cnn`]                 : 24×24 Conv→ReLU→Pool→FC→Sigmoid CNN detector (scaffold weights bundled).
 //! - [`hog_face`]            : 64×128 HoG + linear SVM detector (dense multi-scale).
-//! - [`yunet`]               : YuNet-style anchor-based detector (5 scales, 15-d outputs).
+//! - [`yunet`]               : YuNet-style anchor-based detector (5 scales, 15-d outputs; **scaffold only** — the Apache-2.0 `yunet_2023mar.onnx` is in the model registry but the ONNX-runtime integration is TBD; current `YunetDetector` ships placeholder weights).
 //! - [`mtcnn`]               : 3-stage P-Net → R-Net → O-Net cascade.
 //! - [`luminance_face`]      : band-pattern + mirror-symmetry detector (no weights, classical CV).
 //!
