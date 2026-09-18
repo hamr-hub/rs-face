@@ -112,11 +112,17 @@ const telemetry = (() => {
       if (url.indexOf('/api/') === 0) {
         return originalFetch(input, init).then(
           (resp) => {
-            track('api_call', {
+            // 慢请求 / 失败请求显式分类,便于 dashboard 单独看。
+            const dur = Date.now() - t0;
+            const evt = resp.status >= 500 ? 'api_5xx'
+                      : resp.status >= 400 ? 'api_4xx'
+                      : dur > 2000 ? 'api_slow'
+                      : 'api_call';
+            track(evt, {
               url: stripQuery(url),
               method,
               status: resp.status,
-              duration_ms: Date.now() - t0,
+              duration_ms: dur,
             });
             return resp;
           },
@@ -149,16 +155,52 @@ const telemetry = (() => {
       });
     });
 
-    // 3) 初始 page_view。
-    track('page_view', { ref: document.referrer.slice(0, 128) || null });
+    // 3) 初始 page_view + 屏幕 / 视口快照(用户行为维度)。
+    track('page_view', {
+      ref: document.referrer.slice(0, 128) || null,
+      vw: Math.min(window.innerWidth, 1920),
+      vh: Math.min(window.innerHeight, 1080),
+      dpr: Math.round(window.devicePixelRatio * 10) / 10,
+      tz: (Intl.DateTimeFormat().resolvedOptions().timeZone || '').slice(0, 32),
+      lang: (navigator.language || '').slice(0, 8),
+    });
 
-    // 4) 定时 flush。
+    // 4) 性能指标首屏(便于定位慢网络 / 慢 parse 的用户群)。
+    try {
+      const nav = performance.getEntriesByType('navigation')[0];
+      if (nav) {
+        track('page_perf', {
+          ttfb_ms: Math.round(nav.responseStart || 0),
+          dom_ms: Math.round(nav.domContentLoadedEventEnd || 0),
+          load_ms: Math.round(nav.loadEventEnd || 0),
+        });
+      }
+    } catch {}
+
+    // 5) 长任务监控(>50ms 的同步任务,定位卡顿来源)
+    if (typeof PerformanceObserver !== 'undefined' && PerformanceObserver.supportedEntryTypes.indexOf('longtask') >= 0) {
+      try {
+        const lo = new PerformanceObserver(list => {
+          for (const e of list.getEntries()) {
+            track('long_task', { ms: Math.round(e.duration), name: e.name.slice(0, 32) });
+          }
+        });
+        lo.observe({ entryTypes: ['longtask'] });
+      } catch {}
+    }
+
+    // 6) 定时 flush。
     flushTimer = setInterval(flush, FLUSH_INTERVAL_MS);
 
-    // 5) 页面隐藏 / 关闭时 flush。
+    // 7) 页面隐藏 / 关闭时 flush。
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') flush();
+      if (document.visibilityState === 'hidden') {
+        // 隐藏时顺带记一个会话心跳(计算页面停留时长)
+        track('page_hidden', {});
+        flush();
+      }
     });
+    window.addEventListener('pageshow', () => track('page_show', {}));
     window.addEventListener('pagehide', flush);
     window.addEventListener('beforeunload', flush);
   }

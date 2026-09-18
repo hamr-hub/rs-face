@@ -1,9 +1,8 @@
 /* rs-face / platform/web/compare.js
  *
  * Independent module for the "algorithm compare mode" feature entry.
- *
- * Load (the doubao agent will add this after their layout work):
- *     <script type="module" src="/compare.js"></script>
+ * Loaded via `index.html` (defer, before app.js) so all DOM nodes it
+ * augments exist by the time it runs.
  *
  * What it does:
  *  1. Clicking the topbar gear button (id=`tb-settings`) opens a small
@@ -19,9 +18,8 @@
  *  4. Toggling off removes the panel.
  *
  * Zero new dependencies. Only calls `/api/*` endpoints that the
- * platform already exposes. Does NOT modify index.html / style.css
- * (the doubao agent owns those files) - only operates on its own
- * `.rsfc-` prefixed DOM.
+ * platform already exposes. Does NOT modify index.html / style.css -
+ * only operates on its own `.rsfc-` prefixed DOM, injected at runtime.
  */
 (() => {
   'use strict';
