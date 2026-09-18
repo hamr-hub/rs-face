@@ -11,7 +11,7 @@
 //! With those weights the sigmoid never crosses 0.5, so we get 0 detections
 //! — the task explicitly allows this as long as no panic.
 //!
-//! Reference: https://arxiv.org/abs/1604.02878 (Zhang et al., Joint Face
+//! Reference: <https://arxiv.org/abs/1604.02878> (Zhang et al., Joint Face
 //! Detection and Alignment Using Multitask Cascaded Convolutional Networks).
 //!
 //! ## How to plug in real MTCNN weights
@@ -88,7 +88,7 @@ impl FaceDetector for MtcnnDetector {
     }
 
     /// Random placeholder weights: the sigmoid never crosses 0.5, so this returns an
-    /// empty list for every input. Declared [`Maturity::Scaffold`] so no caller mistakes
+    /// empty list for every input. Declared [`crate::face_detector::Maturity::Scaffold`] so no caller mistakes
     /// that silence for "no faces present".
     fn maturity(&self) -> crate::face_detector::Maturity {
         crate::face_detector::Maturity::Scaffold

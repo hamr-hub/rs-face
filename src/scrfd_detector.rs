@@ -37,7 +37,7 @@ const KPS_DIM: usize = 10;
 pub enum HeadLayout {
     /// All scores, then all boxes, then all keypoints. The common InsightFace export.
     GroupedByHead,
-    /// Per stride: score, bbox, [kps]. Seen in some re-exports.
+    /// Per stride: score, bbox, keypoints. Seen in some re-exports.
     GroupedByStride,
 }
 

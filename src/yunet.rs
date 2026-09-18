@@ -140,7 +140,7 @@ impl FaceDetector for YunetDetector {
     }
 
     /// Random placeholder weights from `weights/yunet.bin`. Any boxes this emits are
-    /// noise, not faces — see [`Maturity::Scaffold`]. The real YuNet ONNX from OpenCV
+    /// noise, not faces — see [`crate::face_detector::Maturity::Scaffold`]. The real YuNet ONNX from OpenCV
     /// Zoo is wired up via the `onnx` feature instead.
     fn maturity(&self) -> crate::face_detector::Maturity {
         crate::face_detector::Maturity::Scaffold

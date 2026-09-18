@@ -5,7 +5,7 @@
 //! - Source frame pixels (grayscale, RGB)
 //! - Integral image (`(W+1) × (H+1)` u32)
 //! - Pyramid downscaled images (N × smaller allocations)
-//! - Detection lists (Vec<Detection>)
+//! - Detection lists (`Vec<Detection>`)
 //!
 //! Without pooling, every call to `IntegralImage::from_gray` and every
 //! pyramid level allocates a fresh `Vec<u32>`. With pooling we reuse the

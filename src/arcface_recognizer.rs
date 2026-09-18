@@ -15,7 +15,7 @@
 //!
 //! # Landmarks are mandatory, and that is enforced
 //!
-//! [`Self::embed`] requires [`Landmarks`]. A detection without them cannot be aligned, and
+//! [`ArcFaceRecognizer::embed`] requires [`crate::face::Landmarks`]. A detection without them cannot be aligned, and
 //! an unaligned crop produces an embedding that is *syntactically* fine — 512 unit-length
 //! floats — but semantically meaningless, yielding cosine similarities barely above chance.
 //! Because that failure is invisible at every layer, the type system refuses it: there is

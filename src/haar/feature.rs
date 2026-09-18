@@ -80,7 +80,7 @@ impl HaarFeature {
     /// of the inner normrect). There is **no** per-feature `normfactor`
     /// divided in at eval time — the older OpenCV code did this, and many
     /// third-party ports keep it, but the current OpenCV reference omits it.
-    /// See https://github.com/opencv/opencv/blob/4.x/modules/objdetect/src/cascadedetect.hpp
+    /// See <https://github.com/opencv/opencv/blob/4.x/modules/objdetect/src/cascadedetect.hpp>
     /// for the canonical reference.
     pub fn eval(
         &self,
