@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — zero-dependency LBPH gallery persistence
+- **LBPH galleries now survive restarts without the original crops**
+  (`src/lbph_store.rs`, new module): `LbphRecognizer::to_bytes` /
+  `from_bytes` / `save` / `load` serialise config + per-identity LBP histogram
+  descriptors in a checked little-endian binary format (magic `RSLB`,
+  versioned). Descriptors are stored verbatim as IEEE-754 `f32`, so the
+  round trip is **bit-exact** — chi-square distances and rankings after
+  `load` are identical to before `save` (asserted in tests).
+- `save` is crash-safe: encode to a sibling `.<name>.tmp`, then atomic
+  rename over the destination; rename failure best-effort removes the temp
+  file. `decode` treats the blob as an untrusted boundary and validates
+  magic/version, every length (truncation), UTF-8 non-empty NUL-free unique
+  labels, config sanity (`radius ≥ 1`, `face_size ≥ 2·radius+1`, grid
+  non-empty, finite non-negative thresholds), descriptor shape
+  (`cells == grid_x·grid_y`, `len == cells·59`), finite values, sanity caps
+  on counts, and the absence of trailing bytes; errors are returned as
+  `lbph_store::LbphStoreError` (`std::error::Error`), never panics.
+- Format documented byte-by-byte in `docs/gallery-persistence.md` (layout,
+  size ≈ 8.5 KB/crop at the default 6×6 grid, validation list, atomicity
+  guarantees, forward-compatibility policy); 7 codec unit tests; the
+  `recognise_lbph` example now ends with a save/load round-trip asserting
+  unchanged rankings.
+
 ### Added — zero-dependency recognition (Fisherfaces / LDA)
 - **Fisherfaces recogniser in the default build** (`src/fisherface.rs`): the
   Belhumeur–Hespanha–Kriegman (PAMI 1997) class-discriminative counterpart to

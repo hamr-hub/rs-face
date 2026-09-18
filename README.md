@@ -27,7 +27,7 @@ libc.so.6
 
 | recogniser | what it is | zero-dep? | measured here |
 |---|---|:-:|---|
-| **lbph** | uniform LBP histograms + chi-square, zero deps, no weights; incremental enrolment | ✅ | **62/68** hard-gallery LOO rank-1, 33/33 easy |
+| **lbph** | uniform LBP histograms + chi-square, zero deps, no weights; incremental enrolment, atomic on-disk gallery persistence (`save`/`load`, crops not required) | ✅ | **62/68** hard-gallery LOO rank-1, 33/33 easy |
 | **fisherface** | Fisherfaces/LDA — n−C PCA reduction then C−1 class-discriminant axes, pure `std` | ✅ | **59/68** hard-gallery LOO rank-1, **best zero-dep EER ≈ 12.8 %**, 33/33 easy |
 | **eigenface** | PCA / Turk-Pentland, Jacobi eigendecomp in pure `std` | ✅ | **58/68** hard-gallery strict LOO (PCA ceiling), 33/33 easy |
 | **arcface** | ArcFace R50 / MobileFaceNet via ONNX Runtime / tract | opt-in | cosine margin measured on real faces |
@@ -109,7 +109,7 @@ design / accuracy / operations document in the repo.
 - [Architecture](docs/architecture.md) — crate map + multi-threaded pipeline plumbing.
 - [Format reference](docs/format.md) — `.rfcf` cascade binary format, manifest JSON schema.
 - [GPU backends](docs/GPU_BACKENDS.md) — `cpu` / `metal` / `cuda` / `rocm` / `mlu` / `ascend`.
-- [Recognition LBPH](docs/recognition-lbph.md) / [Recognition Eigenface](docs/recognition-eigenface.md) / [Recognition Fisherface](docs/recognition-fisherface.md).
+- [Recognition LBPH](docs/recognition-lbph.md) / [Recognition Eigenface](docs/recognition-eigenface.md) / [Recognition Fisherface](docs/recognition-fisherface.md) / [Gallery persistence](docs/gallery-persistence.md) (the `RSLB` binary format behind `LbphRecognizer::save`/`load`).
 - [Benchmarks](docs/benchmarks.md) — reproducible scripts.
 
 ## Algorithm (Viola-Jones path)
@@ -246,7 +246,7 @@ required:
 |---|---|
 | `detect_haar` | smallest end-to-end Haar run on a synthetic frame |
 | `detect_uniform` | the "swiss army knife" demo: dispatch Haar + HoG via `FaceDetector` trait |
-| `recognise_lbph` | enrol + identify with LBPH, no weights |
+| `recognise_lbph` | enrol + identify with LBPH, no weights; ends with an atomic save/load round-trip |
 | `recognise_eigenface` | train + identify with eigenfaces/PCA, no weights |
 | `recognise_fisherface` | train + identify with fisherfaces/LDA, no weights |
 | `cascade_dump` | parse a `.rfcf` cascade and print its structure |
@@ -276,7 +276,7 @@ Crate map (25+ modules, see `src/lib.rs` for full descriptions):
 | core numerical | `integral`, `image`, `haar` |
 | detection (zero-dep) | `detector`, `cnn`, `hog_face`, `yunet`, `mtcnn`, `luminance_face` |
 | detection (ONNX) | `scrfd`, `scrfd_detector`, `onnx` |
-| recognition (zero-dep) | `eigenface`, `fisherface`, `lbph`, `linalg` (shared Jacobi eigensolver) |
+| recognition (zero-dep) | `eigenface`, `fisherface`, `lbph`, `lbph_store` (versioned binary gallery persistence), `linalg` (shared Jacobi eigensolver) |
 | recognition (ONNX) | `arcface`, `arcface_recognizer` |
 | domain types | `face`, `face_detector`, `models`, `align`, `embedding` |
 | pipeline / I/O | `pipeline`, `source`, `output`, `gpu`, `pool` |

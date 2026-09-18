@@ -53,6 +53,7 @@
 //! - [`eigenface`]           : PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`.
 //! - [`fisherface`]          : Fisherfaces / LDA (Belhumeur–Hespanha–Kriegman): n−C PCA reduction then C−1 class-discriminant axes; best zero-dep pair EER.
 //! - [`lbph`]                : uniform Local Binary Patterns histograms + chi-square distance.
+//! - [`lbph_store`]          : zero-dep binary gallery persistence (save/load across restarts, no crops needed).
 //!
 //! ### Recognition (ONNX, opt-in)
 //! - [`arcface`]             : ArcFace R50 / MobileFaceNet pre/post-processing (alignment, L2-norm).
@@ -204,6 +205,7 @@ pub mod hog_face;
 pub mod image;
 pub mod integral;
 pub mod lbph;
+pub mod lbph_store;
 pub(crate) mod linalg;
 pub mod luminance_face;
 pub mod models;

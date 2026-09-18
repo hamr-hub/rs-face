@@ -50,13 +50,21 @@ fn main() {
     //    degenerate; this example is mainly here to show the API surface.
     let probe = load_ppm_or_placeholder();
     match rec.identify_crop(&probe) {
-        LbphMatch::Match { label, distance, margin } => {
+        LbphMatch::Match {
+            label,
+            distance,
+            margin,
+        } => {
             println!("LBPH  ->  match={label}  distance={distance:.3}  margin={margin:.3}");
         }
         LbphMatch::BelowThreshold { best } => {
             println!("LBPH  ->  no match within threshold (best={best:?})");
         }
-        LbphMatch::Ambiguous { first, second, margin } => {
+        LbphMatch::Ambiguous {
+            first,
+            second,
+            margin,
+        } => {
             println!("LBPH  ->  ambiguous between {first} and {second} (margin={margin:.3})");
         }
         LbphMatch::NoCandidates => {
@@ -65,8 +73,27 @@ fn main() {
     }
 
     // 4. Verification path: do these two crops look like the same person?
-    let score = rec
-        .verify("alice", &probe)
-        .unwrap_or(f32::INFINITY);
+    let score = rec.verify("alice", &probe).unwrap_or(f32::INFINITY);
     println!("LBPH verify(alice, probe) = {score:.3}");
+
+    // 5. Persistence: store descriptors (not crops) and reload them in a fresh
+    //    recogniser. The ranking is bit-identical after reload; see
+    //    docs/gallery-persistence.md for the on-disk format.
+    let gallery_path = std::env::temp_dir().join(format!(
+        "rsface_example_gallery_{}.lbph",
+        std::process::id()
+    ));
+    rec.save(&gallery_path).expect("save gallery");
+    let before = rec.rank_crop(&probe);
+    drop(rec);
+
+    let reloaded = LbphRecognizer::load(&gallery_path).expect("load gallery");
+    println!(
+        "LBPH gallery reloaded: {} identities, {} crop(s)",
+        reloaded.len(),
+        reloaded.crop_count()
+    );
+    assert_eq!(reloaded.rank_crop(&probe), before);
+    std::fs::remove_file(&gallery_path).expect("cleanup gallery");
+    println!("LBPH persistence round-trip OK (ranking unchanged)");
 }

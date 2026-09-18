@@ -31,6 +31,7 @@ Recognition (zero-dep, no external weights):
 - [`docs/recognition-lbph.md`](recognition-lbph.md) — uniform LBP histograms, chi-square distance; 62/68 rank-1 on the 77-crop / 21-identity hard drama gallery (33/33 easy), 6×6 grid chosen by a 9-point sweep.
 - [`docs/recognition-eigenface.md`](recognition-eigenface.md) — PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`, strict per-probe LOO retraining; 58/68 = the measured PCA ceiling.
 - [`docs/recognition-fisherface.md`](recognition-fisherface.md) — Fisherfaces/LDA (Belhumeur 1997): n−C PCA reduction then ≤ C−1 class-discriminant axes, pseudo-inverse whitening; 59/68 rank-1 and the best zero-dep pair EER (≈ 12.8 %).
+- [`docs/gallery-persistence.md`](gallery-persistence.md) — zero-dep binary LBPH gallery format (`RSLB` v1): bit-exact f32 descriptors, full decode validation, atomic save; survives restarts without the original crops.
 
 Detection (zero-dep):
 
