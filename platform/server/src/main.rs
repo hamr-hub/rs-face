@@ -3,6 +3,7 @@
 //! rsface-platform = rsface core(SDK)+ Web API + 任务引擎 + S3(rustfs)存储。
 
 mod api;
+mod cache;
 mod config;
 mod jobs;
 mod metrics;
@@ -90,7 +91,20 @@ async fn main() {
         shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
-    let app = api::router(state.clone());
+    // 响应缓存层(无外部依赖)。两份 TTL cache:config 启动后不变,
+    // metrics 每 1s 复用,前端 2s 轮询 50% 命中。
+    let caches = api::ResponseCaches {
+        config_json: Arc::new(cache::TtlCache::new(
+            "config_json",
+            std::time::Duration::from_secs(3600),
+        )),
+        metrics_json: Arc::new(cache::TtlCache::new(
+            "metrics_json",
+            std::time::Duration::from_millis(1000),
+        )),
+    };
+
+    let app = api::router(state.clone(), caches);
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)
         .await

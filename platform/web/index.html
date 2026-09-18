@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN" data-theme="auto"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>rs-face Platform</title><link rel="stylesheet" href="/style.css">
+<title>rs-face Platform</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/theme.css">
 </head><body>
 <header class="topbar" id="topbar" role="banner">
   <div class="tb-left">
@@ -431,10 +431,13 @@
 <!-- 移动端侧栏抽屉遮罩 -->
 <div class="drawer-backdrop hidden" id="drawer-backdrop" aria-hidden="true"></div>
 
-<!-- 拆分模块(顺序敏感:依赖 utils/state 的模块必须在 app.js 前定义) -->
-<script src="/toast.js"></script>
-<script src="/modal.js"></script>
-<script src="/dashboard.js"></script>
-<script src="/visibility.js"></script>
-<script src="/app.js"></script>
+<!-- 拆分模块(顺序敏感:依赖 utils/state 的模块必须在 app.js 前定义)
+     全部 defer:解析期间并行下载,DOMContentLoaded 前执行,避免阻塞首屏渲染。
+     顺序由 defer 队列保持(浏览器按出现顺序执行)。-->
+<script defer src="/toast.js"></script>
+<script defer src="/modal.js"></script>
+<script defer src="/dashboard.js"></script>
+<script defer src="/visibility.js"></script>
+<script defer src="/telemetry.js"></script>
+<script defer src="/app.js"></script>
 </body></html>

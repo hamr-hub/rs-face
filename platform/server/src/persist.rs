@@ -8,6 +8,21 @@ use sqlx::Row;
 
 use crate::jobs::{FaceEntry, FrameResult, JobKind, JobStats, JobStatus};
 
+/// 前端埋点单条事件的扁平化形态(由 api::telemetry_ingest 接收并转发)。
+/// 字段和 `api::TelemetryEvent` 一致;这里独立定义是为了让 persist 层
+/// 不依赖 axum 提取器类型(便于单测和将来加其它 ingest 路径)。
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct TelemetryEvent {
+    pub name: String,
+    pub ts: u64,
+    #[serde(default)]
+    pub props: serde_json::Value,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Db {
     pub pool: Option<PgPool>, // None 时降级为不持久化
@@ -36,15 +51,21 @@ impl Db {
         let Some(pool) = &self.pool else {
             return;
         };
-        let sql = include_str!("../../migrations/0001_init.sql");
-        // sqlx::query 不支持多语句,按 `;` 切分逐条执行。
-        for stmt in sql.split(';') {
-            let s = stmt.trim();
-            if s.is_empty() {
-                continue;
-            }
-            if let Err(e) = sqlx::query(s).execute(pool).await {
-                eprintln!("[persist] migration statement failed: {e}\n>> {s}");
+        // 多迁移文件,按文件名升序逐个 apply。sqlx::query 不支持多语句,
+        // 每个文件内按 `;` 切分逐条执行。
+        let files: [&str; 2] = [
+            include_str!("../../migrations/0001_init.sql"),
+            include_str!("../../migrations/0002_telemetry.sql"),
+        ];
+        for sql in files {
+            for stmt in sql.split(';') {
+                let s = stmt.trim();
+                if s.is_empty() {
+                    continue;
+                }
+                if let Err(e) = sqlx::query(s).execute(pool).await {
+                    eprintln!("[persist] migration statement failed: {e}\n>> {s}");
+                }
             }
         }
     }
@@ -63,7 +84,54 @@ impl Db {
         }
     }
 
-    pub async fn insert_job(
+    pub async fn insert_telemetry_batch(&self, events: &[TelemetryEvent]) {
+        if events.is_empty() {
+            return;
+        }
+        let Some(pool) = &self.pool else {
+            return;
+        };
+        let n = events.len();
+        let mut name = Vec::with_capacity(n);
+        let mut ts = Vec::with_capacity(n);
+        let mut now_ms = Vec::with_capacity(n);
+        let mut session = Vec::with_capacity(n);
+        let mut path = Vec::with_capacity(n);
+        let mut props = Vec::with_capacity(n);
+        let received = now_ms_u64();
+        for e in events {
+            name.push(e.name.clone());
+            ts.push(e.ts as i64);
+            now_ms.push(received as i64);
+            session.push(e.session.clone());
+            // path 截断防滥用:超过 256 直接丢(异常路径 / 错误数据)。
+            path.push(
+                e.path
+                    .as_ref()
+                    .map(|p| if p.len() > 256 { "" } else { p.as_str() })
+                    .unwrap_or("")
+                    .to_string(),
+            );
+            props.push(e.props.clone());
+        }
+        let res = sqlx::query(
+            "INSERT INTO telemetry (name, ts_ms, received_ms, session, path, props)
+             SELECT * FROM UNNEST($1::text[], $2::bigint[], $3::bigint[], $4::text[], $5::text[], $6::jsonb[])"
+        )
+        .bind(&name)
+        .bind(&ts)
+        .bind(&now_ms)
+        .bind(&session)
+        .bind(&path)
+        .bind(&props)
+        .execute(pool)
+        .await;
+        if let Err(e) = res {
+            eprintln!("[persist] insert_telemetry_batch failed: {e}");
+        }
+    }
+
+pub async fn insert_job(
         &self,
         id: &str,
         kind: JobKind,
