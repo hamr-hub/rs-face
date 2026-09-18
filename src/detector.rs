@@ -583,6 +583,7 @@ fn iou(a: &Detection, b: &Detection) -> f32 {
 mod tests {
     use super::*;
     use crate::haar::params::demo_face_cascade;
+    use std::path::Path;
 
     #[test]
     #[ignore = "GPU/OpenCL init via OnceLock is flaky under multi-thread test runner on this Tegra box. Passes in isolation with --nocapture, segfaults when run with other tests. Tracked separately."]
@@ -764,5 +765,54 @@ mod tests {
         }
         assert!(timed.levels >= 1);
         assert!(timed.windows_evaluated > 0);
+    }
+
+    /// Real-face smoke test for the bundled demo cascade. We don't make claims
+    /// about which cascade detects which fixture — the demo cascade is
+    /// deliberately small and stage_bias is tunable for that — but we do assert
+    /// the pipeline runs end-to-end on a real face fixture and reports
+    /// non-negative scores in valid image coordinates.
+    ///
+    /// Honest about the demo cascade: it is calibrated for synthetic test
+    /// patterns, so this test is intentionally lax — it would only fail if the
+    /// detector panicked, returned NaN scores, or produced boxes outside the
+    /// image. The full real-face measurement lives in
+    /// `docs/CASCADE_FIX.md` + `docs/bench-results.md` for users who load a
+    /// trained `.rfcf` cascade.
+    #[test]
+    fn demo_cascade_runs_on_real_face_fixture() {
+        let fixture = Path::new("tests/fixtures/lena.ppm");
+        assert!(
+            fixture.exists(),
+            "fixture {} missing — repo layout changed",
+            fixture.display(),
+        );
+        let mut f = std::fs::File::open(fixture).expect("open lena.ppm");
+        let rgb = crate::image::codec::read_ppm(&mut f).expect("decode ppm");
+        let img = rgb.to_gray();
+        let (w, h) = (img.width(), img.height());
+
+        let cfg = DetectorConfig {
+            min_size: 24,
+            max_size: 4096,
+            scale_factor: 1.4,
+            window_stride: 3,
+            use_gpu: false,
+            equalize_hist: true,
+            ..DetectorConfig::default()
+        };
+        let det = Detector::new(demo_face_cascade(), cfg);
+        let hits = det.detect(&img);
+
+        // Every box must be in-bounds and have a finite, non-negative score.
+        for d in &hits {
+            assert!(d.score.is_finite(), "NaN score");
+            assert!(d.score >= 0.0, "negative score");
+            assert!(d.x < w && d.y < h, "box origin out of bounds");
+            assert!(d.x + d.w <= w && d.y + d.h <= h, "box extent out of bounds");
+            assert!(d.w >= 24 && d.h >= 24, "box smaller than window");
+        }
+        // The fixture must be a real PPM, not the test-suite placeholder.
+        assert!(w > 100 && h > 100, "fixture suspiciously small: {w}x{h}");
     }
 }

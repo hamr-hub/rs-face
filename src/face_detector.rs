@@ -264,6 +264,24 @@ mod tests {
         assert_eq!(hog.color_input(), ColorInput::Gray);
     }
 
+    /// The HaarDetector adapter must report the canonical name + maturity, so
+    /// `--algo haar` and the FaceDetector-trait dispatch agree on the algorithm
+    /// tag. Regression: a typo here would silently break `Vec<Box<dyn FaceDetector>>`
+    /// users that key off the string.
+    #[test]
+    fn haar_detector_reports_canonical_name_and_maturity() {
+        let det = HaarDetector::new(
+            crate::haar::params::demo_face_cascade(),
+            crate::detector::DetectorConfig::default(),
+        );
+        assert_eq!(det.name(), "haar");
+        assert_eq!(det.maturity(), Maturity::Production);
+        assert!(det.color_input() == ColorInput::Gray);
+        // detect() must not panic on uniform input — universal contract.
+        let img = crate::image::GrayImage::new(16, 16);
+        let _ = det.detect(&img);
+    }
+
     /// The blanket `detect_faces_rgb` default must round-trip through grayscale without
     /// panicking, since every classical detector relies on it.
     #[test]
