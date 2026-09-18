@@ -149,6 +149,50 @@ fn print_features() {
     );
 }
 
+/// Best-match suggestion for a typo'd algorithm name. Returns the closest
+/// known name within edit-distance ≤ 3, or `None` if everything is far.
+fn did_you_mean<'a>(needle: &str, haystack: &'a [&'a str]) -> Option<&'a str> {
+    let mut best: Option<(&'a str, usize)> = None;
+    for &cand in haystack {
+        let d = edit_distance(needle, cand);
+        if d <= 3 && best.map_or(true, |(_, bd)| d < bd) {
+            best = Some((cand, d));
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
+/// Iterative Damerau-style edit distance (insert / delete / substitute /
+/// adjacent transposition). Small enough for the 8-element algorithm list;
+/// a real CLI parser would swap in a published crate.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (n, m) = (a.len(), b.len());
+    if n == 0 { return m; }
+    if m == 0 { return n; }
+    let mut prev2 = vec![0usize; m + 1];
+    let mut prev1 = vec![0usize; m + 1];
+    let mut curr  = vec![0usize; m + 1];
+    for j in 0..=m { prev1[j] = j; }
+    for i in 1..=n {
+        curr[0] = i;
+        for j in 1..=m {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = std::cmp::min(
+                std::cmp::min(curr[j - 1] + 1, prev1[j] + 1),
+                prev1[j - 1] + cost,
+            );
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                curr[j] = std::cmp::min(curr[j], prev2[j - 2] + 1);
+            }
+        }
+        std::mem::swap(&mut prev2, &mut prev1);
+        std::mem::swap(&mut prev1, &mut curr);
+    }
+    prev1[m]
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut input: Option<String> = None;
@@ -272,6 +316,27 @@ fn main() {
             }
         }
     };
+    let known: &[&str] = &[
+        "haar", "cnn", "yunet", "mtcnn", "hog", "luminance", "scrfd", "arcface",
+    ];
+    if !known.contains(&algo_name.as_str()) {
+        let suggestion = did_you_mean(&algo_name, known);
+        match suggestion {
+            Some(guess) => eprintln!(
+                "[rs-face] unknown algorithm '{}'; did you mean '{}'? (known: {})",
+                algo_name,
+                guess,
+                known.join(", "),
+            ),
+            None => eprintln!(
+                "[rs-face] unknown algorithm '{}'; known: {}",
+                algo_name,
+                known.join(", "),
+            ),
+        }
+        eprintln!("[rs-face] run with --list-algos for the full description table");
+        std::process::exit(2);
+    }
     println!("[rs-face] algorithm: {}", algo_name);
 
     // Load cascade.

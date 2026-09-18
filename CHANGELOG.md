@@ -50,6 +50,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recognition docs (`docs/recognition-lbph.md`,
   `docs/recognition-eigenface.md`, `docs/bench-results-*.md`, README) regenerated for
   the 77-crop / 21-identity numbers, sweep tables, and the threshold/rank guidance.
+### Added — Swiss-army-knife sweep (SDK discoverability + uniform trait)
+
+- **`FaceDetector` uniform-interface parity.** New `HaarDetector` newtype
+  (`src/face_detector.rs`) adapts the crate-root Haar cascade
+  `rsface::Detector` so it implements `FaceDetector`. Every algorithm the CLI
+  accepts (`haar`, `cnn`, `yunet`, `mtcnn`, `hog`, `luminance`, `scrfd`) now
+  implements the same trait and can be dispatched through
+  `Vec<Box<dyn FaceDetector>>`. Fixes a real consistency gap.
+- **CLI discovery flags.** `rs-face --list-algos` prints every algorithm with
+  its maturity badge (`Production` / `Scaffold`) and description;
+  `--list-features` prints every Cargo feature the binary was compiled with;
+  `--version` prints the crate version. `--help` now ends with a RECIPES
+  section showing 6 concrete invocations.
+- **`docs/INDEX.md`** (new): single table-of-contents for every doc in the
+  repo. Replaces the implicit "read README then poke around" workflow.
+- **Four new SDK examples** (`cargo run --example <name>`):
+  - `detect_haar` — smallest end-to-end Haar run on a synthetic frame
+  - `detect_uniform` — "swiss-army-knife" demo: dispatch Haar + HoG via
+    `Box<dyn FaceDetector>` heterogeneous vec
+  - `recognise_lbph` — enrol + identify with zero-dep LBPH
+  - `recognise_eigenface` — train + identify with zero-dep PCA
+- **README rewrite.** New opening pitch ("the face-library swiss army knife"),
+  what's-in-the-box matrix, 5-minute start, "pick the right algorithm" guide,
+  Cookbook, Documentation index. Old duplicate sections (Algorithm diagram,
+  Quick start, Architecture) removed; everything they covered is now in
+  `docs/INDEX.md` + Cookbook.
+- **Library-level docs (`//!` block in `src/lib.rs`)**: rewrote from a 9-module
+  list to cover all 25+ public modules, plus a feature matrix, Maturity table,
+  `no_std` notes, and SDK cookbook recipes (5-line examples for detection,
+  uniform dispatch, recognition, pipeline).
+- 4 new doctests added to `src/lib.rs`; **270 tests pass**, 0 fail.
+
 
 ### Added — zero-dependency recognition (LBPH)
 - **LBPH face recogniser in the default build** (`src/lbph.rs`): radius-1 /
