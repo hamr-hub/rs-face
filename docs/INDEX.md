@@ -30,6 +30,7 @@ Recognition (zero-dep, no external weights):
 
 - [`docs/recognition-lbph.md`](recognition-lbph.md) — uniform LBP histograms, chi-square distance, measured rank-1 on a real labelled gallery.
 - [`docs/recognition-eigenface.md`](recognition-eigenface.md) — PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`, strict per-probe LOO retraining.
+- [`docs/recognition-video.md`](recognition-video.md) — **video-level identification** across one or many videos: tracker + single-linkage clusterer + cross-video re-id (`src/video_id.rs`, `examples/identify_short_drama.rs`).
 
 Detection (zero-dep):
 

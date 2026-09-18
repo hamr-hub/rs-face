@@ -52,6 +52,7 @@
 //! ### Recognition (zero-dep)
 //! - [`eigenface`]           : PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`.
 //! - [`lbph`]                : uniform Local Binary Patterns histograms + chi-square distance.
+//! - [`video_id`]            : video-level identification — IoU tracker + single-linkage clusterer + cross-video re-id. Plugs any (detector, recogniser) pair via the [`video_id::Identify`] trait; example wires the zero-dep haar + LBPH path.
 //!
 //! ### Recognition (ONNX, opt-in)
 //! - [`arcface`]             : ArcFace R50 / MobileFaceNet pre/post-processing (alignment, L2-norm).
@@ -212,6 +213,7 @@ pub mod pool;
 pub mod scrfd;
 pub mod scrfd_detector;
 pub mod source;
+pub mod video_id;
 pub mod yunet;
 
 pub use detector::{Detection, Detector};
