@@ -19,7 +19,7 @@
 //!   at most two 0↔1 transitions around the bit ring carry the vast majority of natural
 //!   image statistics; the other 198 codes share one "miscellaneous" bin.
 //!
-//! The face is tiled into `grid_y × grid_x` cells (8×8 by default) and one 59-bin
+//! The face is tiled into `grid_y × grid_x` cells (6×6 by default) and one 59-bin
 //! histogram is accumulated per cell. Spatial layout is what distinguishes LBPH from a
 //! texture classifier — eyes-in-cell-1 and mouth-in-cell-5 must not be interchangeable.
 //! Each cell histogram is L1-normalised, making the descriptor robust to crop-size
@@ -63,15 +63,24 @@ const NON_UNIFORM_BIN: usize = BINS - 1;
 /// Chi-square epsilon: a bin that is zero in both descriptors contributes nothing.
 const CHI_EPS: f32 = 1e-10;
 
-/// Default chi-square accept distance.
+/// Default chi-square accept distance for the default config (6×6 grid, 120 px crops).
 ///
-/// Calibrated on this repo's real-face evaluation set (35 ArcFace-labelled drama-frame
-/// crops, 85 same / 510 different pairs; see `docs/recognition-lbph.md`): 30 is the
-/// empirical **zero-FAR** operating point there — no different-identity pair scored
-/// below ≈ 32.7 — at the cost of ≈ 16 % FRR. The equal-error operating point is ≈ 48
-/// (FAR ≈ FRR ≈ 10 %). Recalibrate per deployment. `f32::MAX` would be the OpenCV
-/// default ("always identify"), which is useless for verification.
-pub const DEFAULT_MAX_DISTANCE: f32 = 30.0;
+/// Conservative **low-FAR** point, calibrated on this repo's two real-face evaluation
+/// sets (see `docs/recognition-lbph.md`; labels from offline ArcFace clustering, the
+/// evaluated path never touches ONNX):
+///
+/// * 35 crops / 8 identities (85 same / 510 different pairs): FAR 1.2 %, FRR 16.5 %;
+/// * 77 crops / 21 identities (195 same / 2 731 different pairs, harder pose/lighting):
+///   FAR 0.3 %, FRR 48.7 % at 16.7; the EER point is ≈ 22.5 (FAR ≈ FRR ≈ 20 %).
+///
+/// The distributions overlap on the harder gallery, so no threshold gives both low FAR
+/// and low FRR there; this constant deliberately buys a low false-accept rate and lets
+/// `LbphMatch::BelowThreshold` reject uncertain probes. Close-set identification does
+/// not need it — rank-1 LOO is 91 % on the hard set — so prefer `rank_crop` when the
+/// probe is known to be enrolled. The scale is descriptor-specific (grid and crop
+/// size); recalibrate with `bench_lbph` per deployment rather than trusting it blindly.
+/// `f32::MAX` would be the OpenCV default ("always identify"), useless for verification.
+pub const DEFAULT_MAX_DISTANCE: f32 = 16.7;
 
 /// LBPH extraction and matching parameters.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -99,13 +108,19 @@ pub struct LbphConfig {
 }
 
 impl Default for LbphConfig {
-    /// OpenCV-compatible defaults: radius 1, 8×8 grid, 120 px crops.
+    /// radius 1, 6×6 histogram grid, 120 px crops.
+    ///
+    /// OpenCV's `face::LBPHFaceRecognizer` ships an 8×8 grid; the measured LOO rank-1
+    /// on the repo's hard 21-identity gallery is 62/68 with 6×6 vs 59/68 with 8×8
+    /// (coarser cells pool the box-crop localisation jitter of an unaligned pipeline),
+    /// with no regression on the easier 8-identity gallery (33/33 either way). 8×8 and
+    /// 10×10 remain one field away for deployments with landmark-aligned crops.
     fn default() -> Self {
         Self {
             radius: 1,
             face_size: 120,
-            grid_x: 8,
-            grid_y: 8,
+            grid_x: 6,
+            grid_y: 6,
             max_distance: DEFAULT_MAX_DISTANCE,
             min_margin: 0.0,
             equalize: false,
@@ -492,14 +507,12 @@ mod tests {
     #[test]
     fn constant_image_puts_all_mass_in_zero_code_bin() {
         let img = GrayImage::new(24, 24); // all zero -> every code is 0xFF
-        let d = extract(
-            &img,
-            &LbphConfig {
-                face_size: 24,
-                ..LbphConfig::default()
-            },
-        );
-        let cells = 8 * 8;
+        let cfg = LbphConfig {
+            face_size: 24,
+            ..LbphConfig::default()
+        };
+        let d = extract(&img, &cfg);
+        let cells = cfg.grid_x * cfg.grid_y;
         assert_eq!(d.dim(), cells * BINS);
         for cell in 0..cells {
             for bin in 0..BINS {
@@ -578,7 +591,7 @@ mod tests {
         };
         let img = GrayImage::new(1, 1);
         let d = extract(&img, &cfg);
-        assert_eq!(d.dim(), 64 * BINS);
+        assert_eq!(d.dim(), cfg.grid_x * cfg.grid_y * BINS);
         assert!(d.as_slice().iter().all(|v| *v == 0.0));
     }
 

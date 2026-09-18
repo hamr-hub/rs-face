@@ -10,11 +10,21 @@
 //!     crate default
 //!   * leave-one-out rank-1 identification rate
 //!
-//! Both the raw and histogram-equalised descriptors are scored. No ONNX backend, no
-//! model files, no third-party crates — this builds with the default zero-dep profile.
+//! Two groups are scored:
+//!   1. the shipped descriptor at its defaults (6×6 grid, 120 px), raw and
+//!      histogram-equalised — the headline comparison;
+//!   2. a tuning sweep (grid × crop size, raw) used to check that the shipped grid
+//!      and crop size actually win on harder, larger galleries.
+//!
+//! Configurations rank by LOO rank-1 (primary), then same/different margin. The
+//! detailed distributions always describe the SHIPPED raw config, since the crate's
+//! `DEFAULT_MAX_DISTANCE` is only meaningful in that descriptor's chi-square scale.
+//!
+//! No ONNX backend, no model files, no third-party crates — this builds with the
+//! default zero-dep profile.
 //!
 //! Usage:
-//!   cargo run --release --bin bench_lbph -- out/lbph_crops
+//!   cargo run --release --bin bench_lbph -- out/lbph/crops
 //!
 //! The markdown report is written to docs/bench-results-lbph.md.
 
@@ -26,13 +36,18 @@ use std::fs;
 use std::path::PathBuf;
 
 use bench_common::{best_threshold, eer, label_counts, load_crops, pair_accuracy, Stats};
-use rsface::lbph::{extract, LbphConfig, LbphDescriptor};
+use rsface::lbph::{extract, LbphConfig, LbphDescriptor, DEFAULT_MAX_DISTANCE};
+
+/// Grid sides (cells per edge) swept by the tuning grid.
+const SWEEP_GRIDS: [usize; 3] = [6, 8, 10];
+/// Square crop sizes swept by the tuning grid.
+const SWEEP_FACE_SIZES: [usize; 3] = [90, 120, 150];
 
 fn main() {
     let dir = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("out/lbph_crops"));
+        .unwrap_or_else(|| PathBuf::from("out/lbph/crops"));
     if !dir.is_dir() {
         eprintln!(
             "crops directory {} not found.\nRun the prep step first:\n  \
@@ -58,30 +73,66 @@ fn main() {
         println!("  {label:>12}: {n}");
     }
 
+    // Canonical: the shipped raw descriptor and its equalised variant.
     let raw_cfg = LbphConfig::default();
     let eq_cfg = LbphConfig {
         equalize: true,
         ..LbphConfig::default()
     };
+    let canonical = vec![
+        Evaluation::run(&crops, &raw_cfg, "raw LBP (6×6, 120 px)"),
+        Evaluation::run(&crops, &eq_cfg, "equalised LBP (6×6, 120 px)"),
+    ];
 
-    let raw = Evaluation::run(&crops, &raw_cfg, "raw LBP");
-    let eq = Evaluation::run(&crops, &eq_cfg, "histogram-equalised LBP");
+    // Tuning sweep: grid × crop size, raw only.
+    let mut sweep: Vec<Evaluation> = Vec::new();
+    for &grid in &SWEEP_GRIDS {
+        for &face_size in &SWEEP_FACE_SIZES {
+            let cfg = LbphConfig {
+                grid_x: grid,
+                grid_y: grid,
+                face_size,
+                ..LbphConfig::default()
+            };
+            let name = format!("raw, {grid}×{grid} grid, {face_size} px");
+            println!("running sweep: {name} ...");
+            sweep.push(Evaluation::run(&crops, &cfg, &name));
+        }
+    }
 
-    println!("\n{}", raw.summary());
-    println!("\n{}", eq.summary());
+    for r in canonical.iter().chain(sweep.iter()) {
+        println!("\n{}", r.summary());
+    }
 
-    // Pick whichever preprocessing separates identities better and persist it.
-    let best = if raw.margin() >= eq.margin() {
-        &raw
-    } else {
-        &eq
-    };
+    // Winner: honest rank-1 first, margin as tiebreak.
+    let mut winner: &Evaluation = canonical
+        .iter()
+        .chain(sweep.iter())
+        .max_by(|a, b| {
+            a.loo_rank1_repeated
+                .total_cmp(&b.loo_rank1_repeated)
+                .then(a.margin().total_cmp(&b.margin()))
+        })
+        .expect("non-empty configs");
+    // Detail section always follows the shipped raw config (canonical row 0).
+    let shipped = &canonical[0];
+    // The sweep re-evaluates the shipped config under a different row name; when the
+    // numbers are genuinely tied, point at the canonical row instead of a duplicate.
+    if winner.name != shipped.name
+        && winner.loo_rank1_repeated == shipped.loo_rank1_repeated
+        && (winner.margin() - shipped.margin()).abs() < 1e-9
+    {
+        winner = shipped;
+    }
     println!(
-        "\nreporting {:?} preprocessing in docs/bench-results-lbph.md (margin {:.3})",
-        best.name,
-        best.margin()
+        "\nrank-1 winner: {} ({:.1}%, margin {:.3}); reporting shipped config {} in \
+         docs/bench-results-lbph.md",
+        winner.name,
+        winner.loo_rank1_repeated * 100.0,
+        winner.margin(),
+        shipped.name
     );
-    let report = best.markdown(&dir, &by_label);
+    let report = shipped.markdown(&dir, &by_label, &canonical, &sweep, winner);
     fs::write("docs/bench-results-lbph.md", report).expect("write report");
     println!("wrote docs/bench-results-lbph.md");
 }
@@ -169,21 +220,30 @@ impl Evaluation {
         Stats::of(&self.different).mean - Stats::of(&self.same).mean
     }
 
+    fn rank1_fraction(&self) -> f32 {
+        self.loo_rank1_repeated
+    }
+
     fn summary(&self) -> String {
         let s = Stats::of(&self.same);
         let d = Stats::of(&self.different);
-        let at_default = pair_accuracy(
-            rsface::lbph::DEFAULT_MAX_DISTANCE,
-            &self.same,
-            &self.different,
-        );
+        let far_frr = |t: f32| -> (f32, f32) {
+            let frr = self.same.iter().filter(|&&x| x > t).count() as f32 / self.same.len() as f32;
+            let far = self.different.iter().filter(|&&x| x <= t).count() as f32
+                / self.different.len() as f32;
+            (far, frr)
+        };
+        let (far_best, frr_best) = far_frr(self.best_threshold);
+        let (far_eer, frr_eer) = far_frr(self.eer_threshold);
+        let (far_def, frr_def) = far_frr(DEFAULT_MAX_DISTANCE);
+        let at_default = pair_accuracy(DEFAULT_MAX_DISTANCE, &self.same, &self.different);
         format!(
             "{}\n  same identity      n={} mean={:.3} p5={:.3} p50={:.3} p95={:.3} max={:.3}\n\
              \x20 different identity n={} mean={:.3} p5={:.3} p50={:.3} p95={:.3} min={:.3}\n\
              \x20 margin (diff mean - same mean) = {:.3}\n\
-             \x20 best pair threshold = {:.3} -> pair accuracy {:.1}%\n\
-             \x20 EER threshold = {:.3}\n\
-             \x20 pair accuracy at crate default ({}) = {:.1}%\n\
+             \x20 best pair threshold = {:.3} -> pair accuracy {:.1}% (FAR {:.2}%, FRR {:.2}%)\n\
+             \x20 EER threshold = {:.3} (FAR {:.2}%, FRR {:.2}%)\n\
+             \x20 crate default ({}) pair accuracy {:.1}% (FAR {:.2}%, FRR {:.2}%)\n\
              \x20 leave-one-out rank-1 (repeated identities) = {}/{} = {:.1}% \
              (+ {} singleton probes without a gallery match)",
             self.name,
@@ -202,9 +262,15 @@ impl Evaluation {
             self.margin(),
             self.best_threshold,
             self.best_accuracy * 100.0,
+            far_best * 100.0,
+            frr_best * 100.0,
             self.eer_threshold,
-            rsface::lbph::DEFAULT_MAX_DISTANCE,
+            far_eer * 100.0,
+            frr_eer * 100.0,
+            DEFAULT_MAX_DISTANCE,
             at_default * 100.0,
+            far_def * 100.0,
+            frr_def * 100.0,
             (self.loo_rank1_repeated * self.loo_repeated_n as f32) as usize,
             self.loo_repeated_n,
             self.loo_rank1_repeated * 100.0,
@@ -212,7 +278,14 @@ impl Evaluation {
         )
     }
 
-    fn markdown(&self, dir: &std::path::Path, labels: &BTreeMap<String, usize>) -> String {
+    fn markdown(
+        &self,
+        dir: &std::path::Path,
+        labels: &BTreeMap<String, usize>,
+        canonical: &[Evaluation],
+        sweep: &[Evaluation],
+        winner: &Evaluation,
+    ) -> String {
         let s = Stats::of(&self.same);
         let d = Stats::of(&self.different);
         let far_frr = |t: f32| -> (f32, f32) {
@@ -223,7 +296,8 @@ impl Evaluation {
         };
         let (far_best, frr_best) = far_frr(self.best_threshold);
         let (far_eer, frr_eer) = far_frr(self.eer_threshold);
-        let (far_def, frr_def) = far_frr(rsface::lbph::DEFAULT_MAX_DISTANCE);
+        let (far_def, frr_def) = far_frr(DEFAULT_MAX_DISTANCE);
+        let acc_def = pair_accuracy(DEFAULT_MAX_DISTANCE, &self.same, &self.different);
 
         let total = self.loo_repeated_n + self.loo_singletons;
         let mut md = String::new();
@@ -234,7 +308,45 @@ impl Evaluation {
             labels.len(),
             total
         ));
-        md.push_str(&format!("preprocessing: **{}**\n\n", self.name));
+        md.push_str(
+            "LBPH descriptors are gallery-independent, so every crop is described once and \
+             every unordered pair contributes one chi-square distance; the rank-1 loop is \
+             leave-one-out. Configurations rank by LOO rank-1, then margin.\n\n",
+        );
+        md.push_str("## Canonical variants at the shipped defaults (6×6 grid, 120 px)\n\n");
+        push_table(&mut md, canonical, winner);
+        md.push_str("\n## Hyperparameter sweep (raw LBP)\n\n");
+        push_table(&mut md, sweep, winner);
+        md.push_str(&format!("\nRank-1 winner: **{}**", winner.name));
+        if winner.name != self.name {
+            let delta = ((winner.loo_rank1_repeated - self.loo_rank1_repeated)
+                * self.loo_repeated_n as f32)
+                .round() as usize;
+            let winner_correct =
+                (winner.loo_rank1_repeated * winner.loo_repeated_n as f32) as usize;
+            let shipped_correct = (self.loo_rank1_repeated * self.loo_repeated_n as f32) as usize;
+            if delta == 0 {
+                md.push_str(&format!(
+                    " — tied with the shipped **{}** at {shipped_correct}/{} rank-1; the \
+                     shipped grid is kept (margin differences of one probe or less are \
+                     sampling noise on 68 probes)",
+                    self.name, self.loo_repeated_n
+                ));
+            } else {
+                md.push_str(&format!(
+                    " — {winner_correct}/{} rank-1 vs the shipped **{}** {shipped_correct}/{}, \
+                     a difference of {delta} probe(s)",
+                    winner.loo_repeated_n, self.name, self.loo_repeated_n
+                ));
+            }
+        } else {
+            md.push_str(" — the shipped default configuration wins outright");
+        }
+        md.push_str(".\n\n");
+        md.push_str(&format!(
+            "Shipped configuration detailed below: **{}**.\n\n",
+            self.name
+        ));
         md.push_str("## Chi-square distance distributions\n\n");
         md.push_str("| pair type | n | mean | p5 | p50 | p95 | min/max |\n");
         md.push_str("|---|--:|--:|--:|--:|--:|--:|\n");
@@ -277,9 +389,10 @@ impl Evaluation {
             frr_eer * 100.0
         ));
         md.push_str(&format!(
-            "| crate default `{}` | {} | — | {:.2}% | {:.2}% |\n\n",
+            "| crate default `{}` | {} | {:.1}% | {:.2}% | {:.2}% |\n\n",
             "DEFAULT_MAX_DISTANCE",
-            rsface::lbph::DEFAULT_MAX_DISTANCE,
+            DEFAULT_MAX_DISTANCE,
+            acc_def * 100.0,
             far_def * 100.0,
             frr_def * 100.0
         ));
@@ -302,5 +415,25 @@ impl Evaluation {
         md.push_str("\n_Generated by `cargo run --release --bin bench_lbph`; crops prepared by ");
         md.push_str("`prep_lbph_crops` with ArcFace-verified identity labels._\n");
         md
+    }
+}
+
+/// One comparison table; the winning row is bolded.
+fn push_table(out: &mut String, rows: &[Evaluation], winner: &Evaluation) {
+    out.push_str("| variant | margin | best-threshold pair acc | EER threshold | LOO rank-1 |\n");
+    out.push_str("|---|--:|--:|--:|--:|\n");
+    for r in rows {
+        let bold = if r.name == winner.name { "**" } else { "" };
+        out.push_str(&format!(
+            "| {bold}{}{bold} | {bold}{:.3}{bold} | {bold}{:.1}%{bold} | {:.3} | \
+             {bold}{}/{} = {:.1}%{bold} |\n",
+            r.name,
+            r.margin(),
+            r.best_accuracy * 100.0,
+            r.eer_threshold,
+            (r.rank1_fraction() * r.loo_repeated_n as f32) as usize,
+            r.loo_repeated_n,
+            r.rank1_fraction() * 100.0,
+        ));
     }
 }

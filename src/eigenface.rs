@@ -60,13 +60,21 @@ const JACOBI_SWEEPS: usize = 30;
 
 /// Default accept distance for the default config (64×64 crops, Euclidean metric).
 ///
-/// Calibrated on this repo's real-face evaluation set (35 crops / 8 identities,
-/// strict LOO — see `docs/recognition-eigenface.md`): the EER threshold is ≈ 6.33
-/// (FAR 2.9 %, FRR 2.4 %). The distributions overlap (closest impostor 3.90,
-/// farthest genuine 7.40), so no zero-FAR threshold that still accepts probes
-/// exists on that set; the EER point is the honest shipped default. The scale is
-/// gallery- and crop-size-dependent — recalibrate with `bench_eigenface` per
-/// deployment rather than trusting this value blindly.
+/// A conservative **low-FAR** point checked on both of this repo's real-face
+/// evaluation sets (strict per-probe LOO; see `docs/recognition-eigenface.md`):
+///
+/// * 35 crops / 8 identities (85 same / 510 different pairs): FAR 2.9 %, FRR 3.5 %
+///   at 6.3 — it sits at the EER there (≈ 6.33, closest impostor 3.90 vs farthest
+///   genuine 7.40, so no useful zero-FAR threshold exists on that set);
+/// * 77 crops / 21 identities (195 same / 2 731 different pairs, harder pose and
+///   lighting): FAR 1.5 %, FRR 51.8 % at 6.3; the EER is ≈ 14.0 (FAR ≈ FRR ≈ 20 %).
+///
+/// On the harder gallery the distributions overlap heavily, so this constant keeps
+/// false accepts expensive (≤ 3 % FAR on both sets) at a high reject rate; probes
+/// known to be enrolled are better handled with `rank`/`rank_crop`, whose LOO rank-1
+/// is 85 % there. A 64-px/95 %-energy sweep point ties that rank-1 within one probe
+/// without changing it, so the 98 % defaults are kept. The scale is gallery- and
+/// crop-size-dependent — recalibrate with `bench_eigenface` per deployment.
 pub const DEFAULT_MAX_DISTANCE: f32 = 6.3;
 
 /// Distance metric used in the projection space.
