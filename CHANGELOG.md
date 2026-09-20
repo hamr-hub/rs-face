@@ -31,6 +31,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every detector's output on the golden set so a calibration cycle
   can inspect failure modes without modifying the eval table.
 
+### Added — golden-set eval is now `#[ignore]`-gated
+- **`tests/golden_eval.rs::golden_eval_table`** now carries
+  `#[ignore = "requires gitignored tests/fixtures/golden/labels/*.txt —
+  bootstrap via inspect_algos"]`. The default `cargo test --tests` run
+  no longer fails on a fresh clone; the eval is opt-in via
+  `cargo test --test golden_eval -- --ignored --nocapture --test-threads=1`.
+  This unblocks CI matrix runs that previously blocked on the missing
+  gitignored labels.
+
+### Performance — 2.31× single-frame detection speedup
+End-to-end `Detector::detect` on a 640×480 grayscale frame, default
+preset, 30-iter median:
+
+| step | median (ms) | speedup |
+|------|------------:|--------:|
+| baseline (pre-merge main) | 300 | 1.00× |
+| + variance fast path | 268 | 1.12× |
+| + narrow `IntegralImage` dispatch (u32 specialisation) | 180 | 1.78× |
+| + precomputed `variance_part` (FMA-friendly) | 135 | 2.22× |
+| + cast/refactor polish | **130** | **2.31×** |
+
+- **`src/integral.rs`** — `passes_variance_sums_fast` skips the
+  pre-filter check on images whose variance is provably in-range; the
+  `IntegralTable` match is hoisted; `rect_sum_unchecked_narrow` skips
+  the bounds check when the image fits in a `u32` squared integral.
+- **`src/detector.rs`** — per-level constants hoisted, `variance_part`
+  precomputed once per scale and threaded through `classify`, GPU
+  probe logging (`[gpu] OpenCL probe OK/FALLBACK`) so silent GPU
+  failures become diagnosable from stderr.
+- **`src/haar/cascade.rs`** — `classify_inbounds_with_variance_part`
+  shares one inner loop across narrow / wide integral paths;
+  `EvalCache` carries a `narrow_integral` flag.
+- **`src/haar/feature.rs`** — kind discriminators (`is_custom` /
+  `is_tilted` / `is_wide`) hoisted out of the per-rect loop, the
+  redundant `u64 → i64` cast dropped (rect sums are always ≥ 0).
+- **`benches/detect_640x480.rs`** — focused single-image criterion
+  benchmark for regression tracking.
+
+### Added — `--batch-dir` for photo-folder triage
+- **`src/batch.rs`** (new) + `src/main.rs` wires `--batch-dir <DIR>`
+  for batch face detection on a directory of standalone images.
+  Before, passing a directory treated it as a video sequence with
+  monotonic `frame_NNNNN.png` outputs. Now each input image produces
+  its own annotated PNG named after the basename
+  (`photo1.pgm → detections/photo1.png`) plus a single combined
+  `batch_manifest.json` with per-image detection counts, errors, and a
+  global stats block (`images_processed`, `images_with_face`,
+  `total_detections`, `elapsed_ms`). Per-image decode failures
+  (truncated JPEG) are isolated — the manifest records `"error"`
+  and the run continues.
+- **`tests/batch_dir.rs`** (new, 4 tests) — uses the bundled demo
+  portrait to assert `run_batch_dir` produces the expected manifest
+  shape, correctly handles missing PNG outputs for face-less images,
+  and surfaces per-image errors for truncated input.
+- Feature gate: `batch` is on the default feature list (alongside
+  `pipeline`); zero-dep build (`cargo build --no-default-features --lib`)
+  still passes.
+
+### Added — platform worker health + structured error responses
+- **`platform/migrations/0003_jobs_health_columns.sql`** — five new
+  columns (`started_at`, `heartbeat_at`, `updated_at`, `archived`,
+  `error_code`) with idempotent `IF NOT EXISTS`, plus five indices
+  (BRIN on `heartbeat_at` + `updated_at`, B-tree on `status` +
+  `(archived, created_ms DESC)` + `error_code`).
+- **`platform/server/src/persist.rs`** — `mark_started`, `heartbeat`,
+  `set_archived`, `set_error_code`, `reap_orphans(stale_secs)`.
+- **`platform/server/src/jobs.rs`** — `run_job` writes `started_at`
+  + first `heartbeat_at` via `mark_started`; a tokio task ticks
+  every 30 s until `cancel` flips. Cancelled / done / error paths
+  stop naturally via the shared `AtomicBool` with the watchdog.
+- **`platform/server/src/main.rs`** — after `migrate()` success,
+  calls `db.reap_orphans(300)` (10× heartbeat) with a single log
+  line; orphaned jobs are marked `error_code='orphaned'`.
+- **`platform/server/src/api.rs`** — `error_response_with(code, msg,
+  hint)` produces `{"error": "<msg>", "error_code": "<snake>",
+  "error_hint": "<opt>"}`. Legacy `{"error": "<msg>"}` shape
+  preserved. 7 high-impact codes mapped: `queue_full` (429),
+  `upload_too_large` (413), `missing_field` (400), `no_such_job` (404),
+  `bad_key` (400), `ssrf_blocked` (403), `media_gone` (410); other
+  paths fall back to `error_code="internal"`.
+
+### Added — frontend UX: drag-drop preview + sidebar SSE progress + upload queue
+- **`platform/web/upload-queue.js`** (new, 433 lines) — multi-file
+  upload queue with `XHR` (real `bytesSent/bytesTotal` progress),
+  per-file concurrency (`localStorage.rsface.upload.concurrency`,
+  1/2/3/4/6/8), failure-row retry/remove, aggregate progress,
+  persistence across reloads. Old `submitImage(file)` API still
+  works (now goes through the queue).
+- **`platform/web/dropzone-preview.js`** (new, 153 lines) — once a
+  user drops / picks files, the dropzone shows count + size + a
+  56×56 thumbnail of the first image before submission; ✕ button
+  resets the underlying `<input type="file">`. Video dropzone
+  shows icon + name + size (no thumbnail decode).
+- **`platform/web/index.html` + `app.js`** — each `.sb-item` card
+  gains a 2px SSE-driven progress bar; `running` pulses, `done`
+  fills 100% in `--success`, `error/cancelled` fills in `--danger`,
+  hidden otherwise. Stream tasks where `frame_count` is unknown
+  fall back to a 2-95% pulse so the user always sees motion.
+- **`platform/web/style.css`** — new `.seq-*` / `.sb-prog-*` /
+  `.dz-preview-*` classes using existing CSS variables, so the
+  dark/light/auto theme switch keeps working.
+
+### Added — test / benchmark / CI hardening
+- **6 new integration test suites** (1655 lines, all default-feature
+  green):
+  - `tests/nms_edge_cases.rs` (9) — full overlap, threshold 0/1,
+    many-vs-one cluster, modern + classical paths
+  - `tests/iou_edge_cases.rs` (12) — degenerate w/h, inverted boxes,
+    12×12 = 144-pair symmetry matrix, NaN through classical NMS
+  - `tests/integral_image_tests.rs` (12, `detector-haar`) — oracle
+    vs brute-force reference, wide `u64` path coverage (4500×4500)
+  - `tests/resize_tests.rs` (14) — bilinear / area / downscale at
+    1×1, 2×2, odd, 1:100, 4×4 ramp→2×2 hand-checked
+  - `tests/algo_compat.rs` (7, `detector-haar + detector-luminance`,
+    CNN opt-in via `RSFACE_RUN_CNN_COMPAT=1`) — schema invariants
+    across algorithms, zero-size edges, brand strings
+  - `tests/cnn_scratch_tests.rs` (11, `detector-cnn`) — `CnnScratch`
+    size contract, buffer reuse, standalone `conv2d_into` /
+    `maxpool2_into` / `fc_into` / `relu` / `sigmoid` sanity
+- **3 new criterion benches** (`harness = false`):
+  - `benches/detect_640x480.rs` — Haar on synthetic 640×480, 3 soft
+    blobs
+  - `benches/iou_bench.rs` — 1000-call IoU batches (integer +
+    sub-pixel)
+  - `benches/integral_bench.rs` — `from_gray` + 1000-query batches
+    at 640×480 and 1920×1080
+- **`.github/workflows/ci.yml`** — new `benches` job runs
+  `cargo bench --no-run` + `cargo test --no-run` across 4 feature
+  combos (default / `detector-haar` / `detector-luminance` /
+  `detector-cnn`) so `[[bench]]` / `[[test]]` required-features
+  drift is caught before PR time. Existing `core` job gained a
+  `cargo test --tests` step so every `tests/*.rs` target gates the
+  merge.
+- Test counts: `cargo test --lib` **201** (+15), `cargo test --tests`
+  **282** (+218 across 23 suites), platform **54** (unchanged).
+
 ### Changed — code-quality sweep (no behaviour change)
 - **`src/main.rs`** — `run_cnn_pipeline` and `run_algo_pipeline` were
   near-identical (~120 lines of duplicated frame-loop / RGB-fallback /
@@ -55,9 +191,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`src/detector.rs`** — `detector_with_zero_area_image_returns_no_detections`
   covers `0×0`, `10×0`, `0×10` zero-area images so future pyramid /
   scan refactors cannot regress the empty-source path.
->>>>>>> ac37493 (docs(changelog): cover code-quality sweep (main refactor, onnx source, edge tests)
 
-< HEAD
 ### Security — platform server hardening
 - **Uploads now stream to a staging file instead of buffering in memory**
   (`platform/server/src/api.rs`, `stream_field_to_staging`): the multipart
@@ -136,33 +270,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.env.example` documents every knob including timeouts and memory limits.
 - `.dockerignore` rewritten to keep the build context small (target/data/
   models/web-dist excluded).
-=======
-### Changed — code-quality sweep (no behaviour change)
-- **`src/main.rs`** — `run_cnn_pipeline` and `run_algo_pipeline` were
-  near-identical (~120 lines of duplicated frame-loop / RGB-fallback /
-  record-building / manifest-write code). Replaced by a single shared
-  `run_with_detector` driver; the CNN path now adapts its `&[f32]` /
-  `CnnDetection` contract to the shared `Fn(&GrayImage) -> Vec<Detection>`
-  signature via a small closure. Same manifest layout, same `--only-with-face`
-  semantics, same `--out` paths.
-
-### Fixed — error chain consistency
-- **`OnnxError::source()`** (`src/onnx/mod.rs`) now exposes the wrapped
-  `io::Error` as the error source. Previously only `Display` carried the
-  underlying message; `Error::source()` returned `None`, breaking any
-  generic error chainer that walks `source()`.
-
-### Added — edge-case tests
-- **`src/face.rs`** — `iou_nested_box` (a box fully contained in another
-  should give `area(inner)/area(outer)`) and `iou_is_symmetric`
-  (`a.iou(b) == b.iou(a)` across disjoint, partial-overlap and nested
-  cases). The pre-existing `iou_*` tests covered identical, disjoint
-  and half-overlap but not these.
-- **`src/detector.rs`** — `detector_with_zero_area_image_returns_no_detections`
-  covers `0×0`, `10×0`, `0×10` zero-area images so future pyramid /
-  scan refactors cannot regress the empty-source path.
-
-
 
 ### Added — every algorithm is now a cargo trimmable
 - **Per-algorithm feature flags** turn the monolithic build into a pick-and-mix
