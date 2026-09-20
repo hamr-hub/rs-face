@@ -237,7 +237,7 @@ impl DetectorConfig {
 #[derive(Clone, Debug)]
 pub struct DetectResult {
     /// Detections after NMS, sorted by descending score (same order as
-    /// [`Detector::detect`]).
+    /// [`Detector::detect`] and the public API of the same name).
     pub detections: Vec<Detection>,
     /// Wall-clock detection time in milliseconds (pyramid + integrals +
     /// cascade + NMS).
@@ -848,6 +848,60 @@ mod tests {
             score: 0.1,
         };
         assert_eq!(a.iou(&c), 0.0);
+    }
+
+    #[test]
+    fn detection_iou_nested_and_symmetric() {
+        // A box fully contained in another: IoU = area(inner) / area(outer).
+        let outer = Detection {
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+            score: 1.0,
+        };
+        let inner = Detection {
+            x: 10,
+            y: 10,
+            w: 20,
+            h: 20,
+            score: 0.5,
+        };
+        let expected_inner = (inner.area() as f32) / (outer.area() as f32);
+        assert!((inner.iou(&outer) - expected_inner).abs() < 1e-6);
+        // IoU is symmetric.
+        assert!((outer.iou(&inner) - expected_inner).abs() < 1e-6);
+        assert!((outer.iou(&inner) - inner.iou(&outer)).abs() < 1e-6);
+
+        // Partial overlap (two squares 10×10 shifted by 5px).
+        let p = Detection {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            score: 1.0,
+        };
+        let q = Detection {
+            x: 5,
+            y: 0,
+            w: 10,
+            h: 10,
+            score: 0.9,
+        };
+        // Intersection = 5×10 = 50; union = 10×10 + 10×10 - 50 = 150.
+        assert!((p.iou(&q) - (50.0 / 150.0)).abs() < 1e-6);
+        assert!((q.iou(&p) - (50.0 / 150.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn detector_with_empty_image_returns_no_detections() {
+        let det = Detector::new(demo_face_cascade(), DetectorConfig::default());
+        let img = GrayImage::new(0, 0);
+        assert!(det.detect(&img).is_empty());
+        let img = GrayImage::new(10, 0);
+        assert!(det.detect(&img).is_empty());
+        let img = GrayImage::new(0, 10);
+        assert!(det.detect(&img).is_empty());
     }
 
     #[test]
