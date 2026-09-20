@@ -116,6 +116,23 @@ path = "benches/perf_compare.rs"
 harness = false
 required-features = ["detector-haar", "detector-cnn", "source"]
 
+[[bench]]
+name = "detect_640x480"
+path = "benches/detect_640x480.rs"
+harness = false
+required-features = ["detector-haar", "source"]
+
+[[bench]]
+name = "iou_bench"
+path = "benches/iou_bench.rs"
+harness = false
+
+[[bench]]
+name = "integral_bench"
+path = "benches/integral_bench.rs"
+harness = false
+required-features = ["detector-haar"]
+
 [[bin]]
 name = "bench-accuracy"
 path = "benches/accuracy.rs"
@@ -179,6 +196,18 @@ required-features = ["detector-haar"]
 [[test]]
 name = "bench_components"
 required-features = ["detector-haar"]
+
+[[test]]
+name = "integral_image_tests"
+required-features = ["detector-haar"]
+
+[[test]]
+name = "algo_compat"
+required-features = ["detector-haar", "detector-luminance"]
+
+[[test]]
+name = "cnn_scratch_tests"
+required-features = ["detector-cnn"]
 
 [[test]]
 name = "bench_detect"
