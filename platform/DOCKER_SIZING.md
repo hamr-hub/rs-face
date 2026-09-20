@@ -24,7 +24,7 @@ SIZE      COMMENT
 0B        EXPOSE [8080/tcp]
 0B        ENV BIND_ADDR=0.0.0.0:8080 ...
 0B        RUN mkdir -p /var/rsface-media
-121kB     COPY cascade.rfcf /app/cascade.rfcf
+121kB     COPY src/weights/haarcascade_frontalface_default.rfcf /app/cascade.rfcf
 22kB      COPY platform/web /app/web
 7.33MB    COPY rsface-server
 413MB     RUN apt-get install -y ffmpeg ca-certificates

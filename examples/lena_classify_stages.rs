@@ -11,7 +11,11 @@ fn main() {
     let mut eq = img.clone();
     eq.equalize_hist_inplace();
 
-    let cascade = Cascade::load(std::path::Path::new("cascade.rfcf")).expect("load");
+    // 权重随 core 分发在 src/weights/(从仓库根 cargo run --example 时的相对路径)。
+    let cascade = Cascade::load(std::path::Path::new(
+        "src/weights/haarcascade_frontalface_default.rfcf",
+    ))
+    .expect("load");
     let ii = IntegralImage::from_gray(&eq);
     let ri = rsface::integral::RotatedIntegralImage::from_gray(&eq);
     let sq = rsface::integral::SquaredIntegralImage::from_gray(&eq);

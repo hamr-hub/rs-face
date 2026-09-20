@@ -1,7 +1,11 @@
 use rsface::haar::Cascade;
 
 fn main() {
-    let cascade = Cascade::load(std::path::Path::new("cascade.rfcf")).expect("load");
+    // 权重随 core 分发在 src/weights/(从仓库根 cargo run --example 时的相对路径)。
+    let cascade = Cascade::load(std::path::Path::new(
+        "src/weights/haarcascade_frontalface_default.rfcf",
+    ))
+    .expect("load");
     println!(
         "Window: {}x{}, {} stages, {} features",
         cascade.window_w,
