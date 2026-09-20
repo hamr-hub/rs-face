@@ -5,7 +5,7 @@ platform/target/
 docs/samples/
 *.log
 # 构建上下文排除:这些目录不进镜像(Dockerfile 只 COPY src/ platform/
-# Cargo.* cascade.rfcf),留着会把 GB 级数据发给 daemon。
+# Cargo.*;级联权重在 src/weights/ 内),留着会把 GB 级数据发给 daemon。
 data/
 out/
 models/

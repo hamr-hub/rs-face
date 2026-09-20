@@ -20,7 +20,7 @@
 | Docker | 跑 rustfs / postgres / server | 20.10+ | https://docs.docker.com/engine/install/ |
 | Docker Compose | 一键起三件套 | v2 (plugin) | `apt install docker-compose-plugin` |
 | ffmpeg | 视频/流转码(运行在 server 容器内,镜像已自带) | 任意 | **无需宿主安装** |
-| rs-face `cascade.rfcf` | Haar 分类器(已生成) | — | 仓库根自带 |
+| rs-face Haar 权重 | Haar 分类器 | — | 仓库自带于 `src/weights/`(镜像构建时 COPY 进容器) |
 
 > 开发模式(不通过 Docker)还需要: Rust toolchain (1.75+)、ffmpeg 命令行、PostgreSQL 14+。
 
@@ -96,7 +96,8 @@ cargo build --release
 ./target/release/rsface-cli --help
 ```
 
-需要 1 个 `cascade.rfcf` 文件 + 任意图片/视频输入。
+默认 Haar 级联已嵌入二进制(`src/weights/haarcascade_frontalface_default.rfcf`),
+无需自备权重文件;再准备任意图片/视频输入即可。
 
 ## 8. 故障排查(端口已被占用)
 

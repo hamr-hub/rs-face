@@ -135,6 +135,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.env.example` documents every knob including timeouts and memory limits.
 - `.dockerignore` rewritten to keep the build context small (target/data/
   models/web-dist excluded).
+
+### Fixed — deploy on a fresh checkout works end to end
+- **`platform/Dockerfile` cascade path synced with the weights move**: PR #3
+  shipped the cascade inside `src/weights/`, but the Dockerfile still
+  `COPY`ed `cascade.rfcf` from the repo root. Any fresh checkout failed at
+  the asset step; only because CI builds the crate (never the image) did
+  this land on main. Path now points at
+  `src/weights/haarcascade_frontalface_default.rfcf`.
+- **`Dockerfile` cache layer stubs cargo target placeholders**: PR #3 added
+  explicit `[[bin]]/[[bench]]/[[example]]/[[test]]` targets (per-algorithm
+  `required-features` trimming). Cargo validates target paths at manifest
+  parse even for path deps, and the cache-prefetch layer only stubbed
+  `lib.rs` + `main.rs`, so it failed with "can't find `cascade_dump`
+  example" before any compile happened. The cache layer now creates empty
+  placeholders from the manifest itself; the real layer `COPY`s
+  `examples/`, `benches/`, `tests/`.
+- **`platform/Dockerfile.gpu` mirrors the same asset/target fix** so the GPU
+  build stays in lock-step with the standard image.
+- `README.md`, `benches/perf_compare.rs`, `examples/{cascade_dump,
+  lena_classify_stages}.rs`, `tests/e2e_stress.sh`, `platform/DOCKER_SIZING.md`,
+  `platform/MINIMUM_CONFIG.md`, `platform/docs/PLATFORM_DESIGN.md` had stale
+  `cascade.rfcf` paths — all refreshed.
+- `platform/.env.example` documents the new `SERVER_STOP_GRACE` knob.
 ### Added — every algorithm is now a cargo trimmable
 - **Per-algorithm feature flags** turn the monolithic build into a pick-and-mix
   crate while `default` keeps the exact 0.2.x surface:
