@@ -180,7 +180,7 @@ docker run -d --name rsface-server-alpine \
   -e DATABASE_URL=postgres://rsface:rsface-pass@rsface-postgres:5432/rsface \
   -e LOCAL_MEDIA_DIR=/var/rsface-media \
   -p 20080:8080 \
-  -v rsface-platform_rsface-media:/var/rsface-media \
+  -v "$(pwd)/../data/media:/var/rsface-media" \
   rsface-server:slim
 ```
 

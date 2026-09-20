@@ -1,7 +1,13 @@
 # rsface-server 镜像:musl 静态二进制 + alpine 运行时(瘦镜像 A 方案,已应用)。
 #
-# 目标架构:arm64 (Jetson Orin 部署环境)。
-# - 编译:rust:1.97-slim + aarch64-unknown-linux-musl target,产出完全静态二进制
+# 多架构:按 BuildKit 自动注入的 TARGETARCH 选择 Rust target ——
+#   arm64 → aarch64-unknown-linux-musl (Jetson Orin / Apple Silicon)
+#   amd64 → x86_64-unknown-linux-musl
+# 两种路径都按"原生构建"假设(在目标架构的机器/VM 上构建,compose 默认
+# 即为 daemon 的原生平台),因此 musl-gcc 可用;不支持跨架构交叉编译
+# (amd64 主机构建 arm64 镜像需另配 cross linker,请用 `cross` 或 zigbuild)。
+#
+# - 编译:rust:1.97-slim + musl target,产出完全静态二进制
 # - 运行时:alpine:3.20 + ffmpeg + ca-certificates + tini
 # - 镜像大小:~125 MB(相比原 521 MB 减少 76%)
 #
@@ -14,17 +20,31 @@
 # 或走 compose:
 #   docker compose -f platform/docker-compose.yml up -d --build server
 
-FROM rust:1.97-slim AS build
+# 编译阶段固定在 build 主机的原生平台(musl-gcc 只做原生链接)。
+FROM --platform=$BUILDPLATFORM rust:1.97-slim AS build
+ARG TARGETARCH
 WORKDIR /build
 
-# 预装 musl target
-RUN rustup target add aarch64-unknown-linux-musl \
+# 按 TARGETARCH 选出 musl triple,写入 /tmp/rust-target 供后续各层使用。
+# 2026-09-20:旧版写死 aarch64,amd64 主机构建时 host 的 musl-gcc 是
+# x86 linker,为 arm64 target 链接必然失败。
+RUN case "${TARGETARCH}" in \
+      arm64) echo aarch64-unknown-linux-musl ;; \
+      amd64) echo x86_64-unknown-linux-musl ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac > /tmp/rust-target
+
+# 预装 musl target + musl-tools(musl-gcc 只面向原生架构,与上面选取一致)。
+RUN RUST_TARGET=$(cat /tmp/rust-target) \
+    && rustup target add "${RUST_TARGET}" \
     && apt-get update \
     && apt-get install -y --no-install-recommends musl-tools \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CC_aarch64_unknown_linux_musl=musl-gcc \
+    CC_x86_64_unknown_linux_musl=musl-gcc \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
     RUSTFLAGS="-C target-feature=+crt-static"
 
 # 1) 缓存层:只拷贝 manifest,先 resolve deps
@@ -34,14 +54,19 @@ RUN mkdir -p src platform/server/src \
     && echo 'pub fn _stub(){}' > src/lib.rs \
     && echo 'fn main(){}' > src/main.rs \
     && echo 'fn main(){}' > platform/server/src/main.rs \
-    && cargo build --release --manifest-path platform/Cargo.toml --target aarch64-unknown-linux-musl \
+    && cargo build --release --manifest-path platform/Cargo.toml \
+         --target "$(cat /tmp/rust-target)" \
     && rm -rf src platform/server/src
 
 # 2) 真正源码
 COPY src ./src
 COPY platform ./platform
 RUN touch src/lib.rs src/main.rs platform/server/src/main.rs \
-    && cargo build --release --manifest-path platform/Cargo.toml --target aarch64-unknown-linux-musl
+    && cargo build --release --manifest-path platform/Cargo.toml \
+         --target "$(cat /tmp/rust-target)" \
+    # 拷到固定路径,让下游 COPY 不依赖具体 triple 名
+    && cp "platform/target/$(cat /tmp/rust-target)/release/rsface-server" \
+          /tmp/rsface-server
 
 # 运行时:alpine + ffmpeg + ca-certificates
 FROM alpine:3.20
@@ -54,7 +79,7 @@ RUN apk add --no-cache ffmpeg ca-certificates tini curl \
 
 # 复制静态二进制与资产
 # 二进制 group=1000:root 让 UID 1000 进程可执行(root-owned 不可写,只可执行/读)
-COPY --chown=0:1000 --from=build /build/platform/target/aarch64-unknown-linux-musl/release/rsface-server /usr/local/bin/rsface-server
+COPY --chown=0:1000 --from=build /tmp/rsface-server /usr/local/bin/rsface-server
 COPY --chown=1000:1000 platform/web /app/web
 COPY --chown=1000:1000 cascade.rfcf /app/cascade.rfcf
 

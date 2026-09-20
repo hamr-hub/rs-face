@@ -34,7 +34,6 @@ use rsface::luminance_face::{LuminanceConfig, LuminanceFaceDetector};
 use rsface::source::{open as open_source, Frame};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -126,12 +125,14 @@ pub struct Job {
 }
 
 impl Job {
+    /// poison 容忍:持锁线程 panic 时仍读出最后状态。跨 job 聚合循环
+    /// (metrics / list)会遍历所有 job,单个死 job 不应 panic 整个端点。
     pub fn status(&self) -> JobStatus {
-        *self.status.lock().unwrap()
+        *self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn set_status(&self, s: JobStatus) {
-        *self.status.lock().unwrap() = s;
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = s;
     }
 
     pub fn emit(&self, payload: &str) {
@@ -235,6 +236,8 @@ impl std::fmt::Display for QueueFull {
 }
 
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// 暂存上传文件名的进程内序号(与时间戳组合,避免重名)。
+static UPLOAD_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -319,6 +322,18 @@ impl JobRegistry {
         self.queued_jobs.fetch_sub(1, Ordering::SeqCst);
     }
 
+    /// 删除任务媒体:fire-and-forget 地在 blocking 线程枚举并删除
+    /// S3 对象 + 本地 media/tmp 目录。任务已先从索引移除,清理结果
+    /// 不影响删除响应;个别对象删除失败只在服务端日志告警。
+    pub fn spawn_media_cleanup(&self, id: &str) {
+        let s3 = self.s3.clone();
+        let cfg = self.cfg.clone();
+        let jid = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            cleanup_job_media_blocking(&s3, &cfg, &jid);
+        });
+    }
+
     /// 优雅停机:拒绝新任务 + 对所有 queued/running 任务发 cancel。
     pub fn begin_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
@@ -401,6 +416,20 @@ impl JobRegistry {
     pub fn remove_many(&self, ids: &[String]) -> Vec<bool> {
         let mut jobs = self.jobs.lock().unwrap();
         ids.iter().map(|id| jobs.remove(id).is_some()).collect()
+    }
+
+    /// 排队阶段失败时调用:从索引删除**并**回退 `queued_jobs` 计数。
+    ///
+    /// 只有当任务确实还在索引里(即尚未 `mark_started` 进入 running)才回退计数,
+    /// 因此重复调用、或对已进入 running 的任务调用都不会让计数器失衡。
+    /// 返回任务是否存在;DB 行的删除由调用方负责。
+    pub fn abandon_job(&self, id: &str) -> bool {
+        if self.remove(id) {
+            self.mark_abandoned();
+            true
+        } else {
+            false
+        }
     }
 
     /// 启动后台检测线程。`input` 为本地文件路径(上传落盘)或 URL(直播流)。
@@ -591,9 +620,11 @@ impl JobRegistry {
                 if is_core_native_video(input) {
                     input.to_string()
                 } else {
-                    // 视频 URL:同步 ffmpeg 跑完后再喂给 core(简单可靠)。
-                    let (path, mut child) = spawn_ffmpeg_to_local(input, &work_dir, "video.mp4")?;
-                    let _ = child.wait();
+                    // 视频 URL:同步 ffmpeg 跑完后再喂给 core。等待过程可被
+                    // 用户取消/停机打断(旧代码 child.wait() 不可中断,长转码会
+                    // 一直跑到结束);取消时 kill 子进程并让本任务提前失败。
+                    let (path, child) = spawn_ffmpeg_to_local(input, &work_dir, "video.mp4")?;
+                    wait_child_cancellable(child, &job.cancel)?;
                     path.to_string_lossy().to_string()
                 }
             }
@@ -698,6 +729,10 @@ impl JobRegistry {
         let mut _frames_since_reopen: u64 = 0;
         // 批量 DB 写缓冲(20 帧一批;cancel/done 路径都会 flush)。
         let mut db_pending: Vec<FrameResult> = Vec::new();
+        // 已产出的人脸裁剪总数(跨帧累计)。旧实现每帧都 lock frames 把
+        // 历史所有帧的 faces.len() 重算一遍,长视频上是 O(n²);循环外维护
+        // 一个单调计数器即可,与 frames 里的实际裁剪数始终一致。
+        let mut total_crops: usize = 0;
         loop {
             if job.cancel.load(Ordering::Relaxed) {
                 job.set_status(JobStatus::Cancelled);
@@ -725,7 +760,7 @@ impl JobRegistry {
                         db.add_frames_batch(&jid, &db_pending).await;
                     });
                 }
-                finalize(job, started);
+                finalize(job, started, &self.cfg.tmp_dir);
                 return Ok(());
             }
             if max_frames > 0 && frame_idx >= max_frames {
@@ -797,13 +832,6 @@ impl JobRegistry {
 
                 // 人脸裁剪。
                 if has_face {
-                    let mut total_crops: usize = job
-                        .frames
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .map(|f| f.faces.len())
-                        .sum();
                     for (i, d) in detections.iter().enumerate() {
                         if total_crops >= self.cfg.max_face_crops {
                             break;
@@ -898,7 +926,7 @@ impl JobRegistry {
                 db.add_frames_batch(&jid, &db_pending).await;
             });
         }
-        finalize(job, started);
+        finalize(job, started, &self.cfg.tmp_dir);
         job.emit(
             &serde_json::json!({
                 "type": "done",
@@ -910,13 +938,37 @@ impl JobRegistry {
     }
 }
 
-fn finalize(job: &Job, started: std::time::Instant) {
+fn finalize(job: &Job, started: std::time::Instant, tmp_dir: &Path) {
     job.stats.lock().unwrap().elapsed_ms = started.elapsed().as_millis() as u64;
-    // 清理临时目录(异步尽力而为)。
-    let dir = std::path::PathBuf::from("/tmp/rsface-jobs").join(&job.id);
+    // 清理临时目录(异步尽力而为)。必须用配置的 TMP_DIR,而非硬编码
+    // /tmp/rsface-jobs——否则非默认部署下每个 job 的工作目录都会泄漏在磁盘上。
+    let dir = tmp_dir.join(&job.id);
     std::thread::spawn(move || {
         let _ = std::fs::remove_dir_all(dir);
     });
+}
+
+/// 轮询等待同步 ffmpeg 转码子进程,期间周期性检查取消标志。
+///
+/// 旧代码直接 `child.wait()`,用户点"取消"/服务停机时阻塞的 wait 不会被打断,
+/// 长视频转码会一直跑到结束(甚至卡死时永不退出)。这里每 200ms `try_wait`
+/// 一次;一旦 `cancel` 置位就 kill 子进程、回收并返回错误,让 run_job 提前结束。
+fn wait_child_cancellable(
+    mut child: std::process::Child,
+    cancel: &AtomicBool,
+) -> std::io::Result<std::process::ExitStatus> {
+    const POLL_INTERVAL_MS: u64 = 200;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if cancel.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other("ffmpeg transcode cancelled"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+    }
 }
 
 /// 非 core 直接支持的图片统一转 PGM(灰度,无压缩)。
@@ -1012,17 +1064,27 @@ fn crop_face(base: &RgbImage, d: &Detection) -> Option<RgbImage> {
 }
 
 /// 供 API 层把上传字节落盘。
-pub fn save_upload(
+/// 生成分块直落的暂存路径:`tmp_dir/staging/upload-<ms>-<seq>.part`。
+/// 与 job id 解耦——慢速上传在 `create()` 占队列名额之前就先落盘,
+/// 不会让一个慢客户端长期占用排队深度。
+pub fn staging_upload_path(cfg: &Config) -> PathBuf {
+    let n = UPLOAD_SEQ.fetch_add(1, Ordering::Relaxed);
+    cfg.tmp_dir
+        .join("staging")
+        .join(format!("upload-{}-{n}.part", now_ms()))
+}
+
+/// 把暂存文件移动(同文件系统 rename)到 job 的工作目录,命名 `input.{ext}`。
+pub fn move_staged_into_job(
     cfg: &Config,
+    staged: &Path,
     job_id: &str,
     ext: &str,
-    bytes: &[u8],
 ) -> std::io::Result<PathBuf> {
     let dir = cfg.tmp_dir.join(job_id);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("input.{ext}"));
-    let mut f = std::fs::File::create(&path)?;
-    f.write_all(bytes)?;
+    std::fs::rename(staged, &path)?;
     Ok(path)
 }
 
@@ -1086,6 +1148,36 @@ fn put_with_inline_fallback(reg: &JobRegistry, key: &str, ct: &str, bytes: &[u8]
     }
     eprintln!("[storage] BOTH S3 and local failed for {key} — inlining base64 into SSE event");
     format!("inline://{key}")
+}
+
+/// 删除 job 在 S3 与本地媒体目录里的全部对象(prefix `jobs/{id}/`)。
+/// 阻塞 IO:只能从 `spawn_blocking` 调用。S3 枚举失败时保留对象不阻断
+/// 删除流程(只告警);本地目录缺失视为正常。
+pub fn cleanup_job_media_blocking(s3: &S3Client, cfg: &Config, id: &str) {
+    let prefix = format!("jobs/{id}/");
+    match s3.list_objects(&prefix) {
+        Ok(keys) => {
+            for key in keys {
+                if let Err(e) = s3.delete_object(&key) {
+                    eprintln!("[storage] delete object {key} failed: {e}");
+                }
+            }
+        }
+        Err(e) => eprintln!("[storage] list {prefix} failed: {e} — orphan objects left in bucket"),
+    }
+    let local = cfg.local_media_dir.join(&prefix);
+    if let Err(e) = std::fs::remove_dir_all(&local) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("[storage] cleanup local {local:?} failed: {e}");
+        }
+    }
+    // tmp 工作目录一并清掉(任务已从索引删除,没有再读的路径)。
+    let tmp = cfg.tmp_dir.join(id);
+    if let Err(e) = std::fs::remove_dir_all(&tmp) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("[jobs] cleanup tmp {tmp:?} failed: {e}");
+        }
+    }
 }
 
 /// 把 `inline://` key 转成 base64 字符串(供 SSE 事件 `data_b64` 字段)。
@@ -1468,7 +1560,7 @@ impl JobRegistry {
         self.list()
             .iter()
             .map(|j| {
-                let stats = j.stats.lock().unwrap().clone();
+                let stats = j.stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 AggSample {
                     algo: stats.algo,
                     status: j.status(),
