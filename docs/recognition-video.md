@@ -103,13 +103,14 @@ The global manifest shape:
 
 ## Plugging in industrial accuracy
 
-`Identify` is a trait (`src/video_id.rs:512`). The default trait
-implementation just calls the (detector, recogniser) pair as closures; an
-override lets you fuse them (e.g. share one ONNX session for both). For
-SCRFD + ArcFace:
+`Identify` is a trait in `src/video_id.rs`. The closure adapter calls a
+(detector, recogniser) pair; an override lets you fuse them (e.g. share
+one ONNX session for both). For SCRFD + ArcFace the glue is now trivial:
+`embed_all` already returns the sparse, index-tagged pairs the contract
+requires.
 
 ```rust,ignore
-use rsface::video_id::{Identify, IdentifyError};
+use rsface::video_id::Identify;
 use rsface::arcface_recognizer::ArcFaceRecognizer;
 use rsface::scrfd_detector::ScrfdDetector;
 
@@ -119,22 +120,15 @@ impl Identify for Pipeline {
     type Err = OnnxError;
     fn detect_and_embed(
         &mut self,
-        gray: &GrayImage,
+        _gray: &GrayImage,
         rgb: Option<&RgbImage>,
-    ) -> Result<(Vec<Detection>, Vec<Embedding>), Self::Err> {
+    ) -> Result<(Vec<Detection>, Vec<(usize, Embedding)>), Self::Err> {
         let rgb = rgb.expect("ArcFace needs RGB");
         let dets = self.det.detect_rgb(rgb)?;
+        // (detection index, embedding); detections without landmarks are
+        // simply absent, and the tracker drops those detections.
         let pairs = self.rec.embed_all(rgb, &dets)?;
-        // embed_all returns (idx, embedding); collapse to embedding-only
-        // ordered the same way as the detector output, dropping anything
-        // that didn't get an embedding (no landmarks).
-        let mut embs = vec![None; dets.len()];
-        for (i, e) in pairs { embs[i] = Some(e); }
-        let dets = dets.into_iter()
-            .zip(embs)
-            .filter_map(|(d, e)| e.map(|e| (d.to_detection(), e)))
-            .unzip();
-        Ok(dets)
+        Ok((dets, pairs))
     }
 }
 ```
