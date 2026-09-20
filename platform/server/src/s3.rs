@@ -46,22 +46,54 @@ impl S3Client {
         }
     }
 
-    /// 桶不存在则创建;存在则跳过。
+    /// 桶不存在则创建;HEAD 失败区分 404 vs 403,避免坏凭据被当桶不存在再试一次。
     pub fn ensure_bucket(&self) -> Result<(), S3Error> {
         match self.request("HEAD", "/", &[], &[], None) {
             Ok(_) => Ok(()),
-            Err(_) => self.request("PUT", "/", &[], &[], None).map(|_| ()),
+            Err(S3Error(e))
+                if e.contains("404") || e.contains("NotFound") || e.contains("NoSuchKey") =>
+            {
+                self.request("PUT", "/", &[], &[], None).map(|_| ())
+            }
+            Err(other) => Err(other),
         }
     }
 
     pub fn put_object(&self, key: &str, content_type: &str, body: Vec<u8>) -> Result<(), S3Error> {
-        let body = Some(body);
         self.request(
             "PUT",
             &format!("/{key}"),
             &[],
             &[("content-type", content_type)],
-            body,
+            Some(Body::Bytes(body)),
+        )
+        .map(|_| ())
+    }
+
+    /// 流式 PUT:从 `path` 直接发送文件内容,body 在请求过程中按需 read。
+    /// 用于大文件上传到 S3 时避免 `fs::read` + `to_vec` 双倍拷贝。
+    /// 调用方负责文件存在性与大小;签名阶段 ureq 会 seek-to-end 读 Content-Length。
+    pub fn put_object_file(
+        &self,
+        key: &str,
+        content_type: &str,
+        path: &std::path::Path,
+    ) -> Result<(), S3Error> {
+        let f = std::fs::File::open(path)
+            .map_err(|e| S3Error(format!("open for put {path:?}: {e}")))?;
+        let len = f
+            .metadata()
+            .map_err(|e| S3Error(format!("stat for put {path:?}: {e}")))?
+            .len();
+        self.request(
+            "PUT",
+            &format!("/{key}"),
+            &[],
+            &[
+                ("content-type", content_type),
+                ("content-length", &len.to_string()),
+            ],
+            Some(Body::File(f)),
         )
         .map(|_| ())
     }
@@ -80,8 +112,9 @@ impl S3Client {
 
     /// 带 Range 的 GET(S3 语义:`bytes=start-end`,end 含端,可省略表示到 EOF)。
     /// 返回 (切片字节, 服务端给的 total 长度)。
-    /// total 从 `Content-Range: bytes s-e/total` 解析;无该头时退化为 bytes.len()。
-    /// 用于 /media 视频拖进度条(浏览器发 Range 请求)。
+    /// 用于 compare_algos 的 bounded read (≤ 16 MiB 用 in-memory 即可,
+    /// 避免 streaming 复杂度)。
+    #[allow(dead_code)]
     pub fn get_object_range(
         &self,
         key: &str,
@@ -92,9 +125,7 @@ impl S3Client {
             Some(e) => format!("bytes={start}-{e}"),
             None => format!("bytes={start}-"),
         };
-        // range 作为 header 传给 request();签名时一并纳入 canonical headers。
         let resp = self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
-        // 先取 header 再消费 reader(into_reader 之后 resp 已 move)。
         let cr_total = resp
             .header("content-range")
             .and_then(|v| v.rsplit('/').next())
@@ -104,6 +135,31 @@ impl S3Client {
             .map_err(|e| S3Error(e.to_string()))?;
         let total = cr_total.unwrap_or(buf.len() as u64);
         Ok((buf, total))
+    }
+
+    /// 流式 Range GET:返回 `tokio::io::AsyncRead` 适配器 + Content-Range total。
+    /// Content-Length 头 + 同步读 → 异步适配,后台驱动 ureq 同步 socket)。
+    /// 总字节数来自 Content-Range 的 total 字段。
+    /// 高 #3:用于 /media 视频拖进度条,避免一次性 GB 级别 `to_vec`。
+    pub fn get_object_range_stream(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<(S3RangeStream, u64), S3Error> {
+        let range = match end {
+            Some(e) => format!("bytes={start}-{e}"),
+            None => format!("bytes={start}-"),
+        };
+        let resp = self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
+        let total = resp
+            .header("content-range")
+            .and_then(|v| v.rsplit('/').next())
+            .and_then(|t| t.parse::<u64>().ok())
+            .ok_or_else(|| S3Error("missing Content-Range total".into()))?;
+        // resp.into_reader() 是 sync std::io::Read;包到 S3RangeStream。
+        let sync_reader = resp.into_reader();
+        Ok((S3RangeStream::new(sync_reader), total))
     }
 
     /// HEAD object:取 Content-Length(不下载 body)。Range 请求需要先知道
@@ -167,7 +223,7 @@ impl S3Client {
         path: &str,
         query: &[(&str, &str)],
         extra_headers: &[(&str, &str)],
-        body: Option<Vec<u8>>,
+        body: Option<Body>,
     ) -> Result<ureq::Response, S3Error> {
         let path_trimmed = path.trim_start_matches('/');
         // path 风格 /bucket/key(virtual-host 风格不适用 rustfs 单 IP 部署)。
@@ -208,8 +264,14 @@ impl S3Client {
             format!("{url_base}?{canonical_query}")
         };
 
-        let body_bytes = body.unwrap_or_default();
-        let payload_hash = hex(&sha2::Sha256::digest(&body_bytes));
+        // body 哈希:小/未知 body 用真 SHA-256;流式 File body 用 S3 SigV4
+        // 标准 `UNSIGNED-PAYLOAD` sentinel(S3 + rustfs 都支持),避免
+        // `fs::read` 进内存来给 GB 级上传算 hash。
+        let (payload_hash, body_kind) = match body.as_ref() {
+            None => (hex(&sha2::Sha256::digest([])), BodyKind::Empty),
+            Some(Body::Bytes(b)) => (hex(&sha2::Sha256::digest(b)), BodyKind::Bytes),
+            Some(Body::File(_)) => ("UNSIGNED-PAYLOAD".to_string(), BodyKind::File),
+        };
         let amz_date = now_amz_date();
 
         // canonical headers:content-type(可选), host, x-amz-content-sha256, x-amz-date,
@@ -281,10 +343,11 @@ impl S3Client {
             req = req.set(k, v);
         }
 
-        let result = if body_bytes.is_empty() && method != "PUT" {
-            req.call()
-        } else {
-            req.send_bytes(&body_bytes)
+        let result = match (body_kind, body) {
+            (BodyKind::Empty, _) => req.call(),
+            (BodyKind::Bytes, Some(Body::Bytes(b))) => req.send_bytes(&b),
+            (BodyKind::File, Some(Body::File(f))) => req.send(f),
+            _ => req.call(),
         };
         match result {
             Ok(resp) => Ok(resp),
@@ -319,9 +382,102 @@ impl S3Client {
     }
 }
 
+/// S3 请求 body:内存字节或磁盘文件(后者走 UNSIGNED-PAYLOAD 签名,
+/// body 在传输阶段按需 read,不上传整文件到内存)。
+pub enum Body {
+    Bytes(Vec<u8>),
+    File(std::fs::File),
+}
+
+#[derive(Clone, Copy)]
+enum BodyKind {
+    Empty,
+    Bytes,
+    File,
+}
+
+/// 同步 std::io::Read → tokio::io::AsyncRead 适配器。
+///
+/// 设计:后台线程同步 read,然后通过 `tokio::sync::mpsc` channel 把每段
+/// bytes 推给前端 poll_read;只缓存一段在内存,GB 级视频不会驻留堆。
+/// 用于把 ureq 的同步响应体桥到 axum 的流式 Body,避免大文件
+/// `read_to_end` + `to_vec` 双倍拷贝。
+pub struct S3RangeStream {
+    rx: tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    /// 当前持有的 bytes(上一段还没消费完的部分)。
+    pending: std::io::Cursor<Vec<u8>>,
+}
+
+impl S3RangeStream {
+    pub fn new(r: Box<dyn std::io::Read + Send>) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<Vec<u8>>>(1);
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                use std::io::Read;
+                let mut r = r;
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    match r.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if tx.blocking_send(Ok(buf[..n].to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.blocking_send(Err(e));
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("spawn s3 stream pump");
+        Self {
+            rx,
+            pending: std::io::Cursor::new(Vec::new()),
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for S3RangeStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        loop {
+            // 已有 pending 字节:消费一部分。
+            let pos = self.pending.position() as usize;
+            let len = self.pending.get_ref().len();
+            if pos < len {
+                let remaining = &self.pending.get_ref()[pos..];
+                let n = remaining.len().min(buf.remaining());
+                buf.put_slice(&remaining[..n]);
+                self.pending.set_position((pos + n) as u64);
+                return std::task::Poll::Ready(Ok(()));
+            }
+            // 没有 pending,等下一段。
+            match self.rx.poll_recv(cx) {
+                std::task::Poll::Ready(Some(Ok(bytes))) => {
+                    self.pending = std::io::Cursor::new(bytes);
+                }
+                std::task::Poll::Ready(Some(Err(e))) => return std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Ready(None) => return std::task::Poll::Ready(Ok(())),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+    }
+}
+
 fn agent_builder_no_tls() -> Agent {
+    // 低 #15:原来 `.timeout(120s)` 是整个请求的全局上限,大对象 GET 会
+    // 在 read 阶段被卡死。拆成 connect / read:connect 短(网络层异常),
+    // read 长(允许 GB 级流式拉取)。
     ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(600))
+        .timeout_write(std::time::Duration::from_secs(600))
         .build()
 }
 
