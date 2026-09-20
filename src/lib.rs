@@ -268,6 +268,15 @@ pub mod pipeline;
 pub mod source;
 #[cfg(feature = "video-id")]
 pub mod video_id;
+// ---------------------------------------------------------------------------
+// Batch directory processor — wraps `detector::Detector` for "scan a folder
+// of photos, write per-image annotated PNGs + a single combined manifest".
+// Feature-gated behind `pipeline` because it pulls in `detector-haar`,
+// `output` (annotated writer), and the PNG codec, all of which the
+// zero-dep build doesn't carry.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "pipeline")]
+pub mod batch;
 
 // ---------------------------------------------------------------------------
 // Opt-in industrial ONNX stack (SCRFD detector + ArcFace recogniser).

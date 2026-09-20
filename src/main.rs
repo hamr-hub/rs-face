@@ -31,6 +31,10 @@ fn print_help() {
            luminance  band-pattern + mirror symmetry (no weights, classical CV)\n\n\
          OPTIONS:\n  \
            --out <DIR>           output directory (required)\n  \
+           --batch-dir <DIR>     scan DIR for *.png/*.jpg/*.ppm/*.pgm images,\n  \
+                                           run detection on each independently, and\n  \
+                                           write per-image annotated PNGs + a single\n  \
+                                           batch_manifest.json under --out\n  \
            --algo <NAME>         detection algorithm (default: haar)\n  \
            --cascade <PATH>      load cascade from .rfcf file (haar only,\n  \
                                            default: bundled OpenCV frontalface cascade)\n  \
@@ -60,6 +64,8 @@ fn print_help() {
            rs-face test://60 --out ./out\n\n  \
            # Real footage with the bundled cascade:\n  \
            rs-face video.mp4 --out ./out --threads 4\n\n  \
+           # Scan a folder of photos for faces (per-image annotated PNGs):\n  \
+           rs-face --batch-dir ./photos --out ./out --only-with-face\n\n  \
            # Real footage with a converted OpenCV Haar cascade:\n  \
            rs-face video.mp4 --out ./out --cascade haarcascade.rfcf\n\n  \
            # Heavy drama footage (variable face sizes):\n  \
@@ -193,6 +199,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mut input: Option<String> = None;
     let mut out: Option<PathBuf> = None;
+    let mut batch_dir: Option<PathBuf> = None;
     let mut cascade_path: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
     let mut queue_depth: Option<usize> = None;
@@ -230,6 +237,9 @@ fn main() {
             }
             "--out" => {
                 out = args.next().map(PathBuf::from);
+            }
+            "--batch-dir" => {
+                batch_dir = args.next().map(PathBuf::from);
             }
             "--cascade" => {
                 cascade_path = args.next().map(PathBuf::from);
@@ -292,6 +302,7 @@ fn main() {
 
     let input = match input {
         Some(s) => s,
+        None if batch_dir.is_some() => String::new(),
         None => {
             print_help();
             std::process::exit(2);
@@ -401,6 +412,73 @@ fn main() {
                 }
             }
         }
+    }
+
+    // --batch-dir takes precedence over the positional INPUT: the directory
+    // is scanned once for image files, each is processed independently, and
+    // per-image annotated PNGs + a combined manifest are written. The
+    // multi-frame pipeline driver (Pipeline::run) is bypassed entirely.
+    if let Some(dir) = batch_dir {
+        if algo_name != "haar" {
+            eprintln!(
+                "[rs-face] --batch-dir currently uses the Haar cascade (--algo {} not supported in batch mode yet)",
+                algo_name
+            );
+            std::process::exit(2);
+        }
+        let mut batch_cfg = rsface::batch::BatchConfig::default();
+        if let Some(v) = min_size {
+            batch_cfg.min_size = v;
+        }
+        if let Some(v) = max_size {
+            batch_cfg.max_size = v;
+        }
+        if let Some(v) = scale {
+            batch_cfg.scale_factor = v;
+        }
+        if let Some(v) = stride {
+            batch_cfg.window_stride = v;
+        }
+        if let Some(v) = nms {
+            batch_cfg.nms_iou_threshold = v;
+        }
+        if let Some(v) = min_neighbors {
+            batch_cfg.min_neighbors = v;
+        }
+        if let Some(v) = min_score {
+            batch_cfg.min_score = v;
+        }
+        batch_cfg.only_with_face = only_with_face;
+        batch_cfg.stage_bias = std::env::var("RS_FACE_CASCADE_BIAS")
+            .ok()
+            .and_then(|s| s.parse().ok());
+        println!(
+            "[rs-face] batch: dir={} out={} only_with_face={}",
+            dir.display(),
+            out.display(),
+            batch_cfg.only_with_face
+        );
+        let t0 = Instant::now();
+        let (stats, results) = match rsface::batch::run_batch_dir(cascade, &dir, &out, &batch_cfg)
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("batch error: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let wall_ms = t0.elapsed().as_millis() as u64;
+        let errs = results.iter().filter(|r| r.error.is_some()).count();
+        println!(
+            "[rs-face] batch done: {} images ({} with face), {} detections, {} errors, wall {:.2}s, manifest {}/batch_manifest.json",
+            stats.images_processed,
+            stats.images_with_face,
+            stats.total_detections,
+            errs,
+            wall_ms as f32 / 1000.0,
+            out.display()
+        );
+        return;
     }
 
     // Open source.
