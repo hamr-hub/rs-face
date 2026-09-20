@@ -122,6 +122,9 @@ pub struct Job {
     pub cancel: Arc<AtomicBool>,
     /// SSE 事件通道(payload 为 JSON 字符串)。
     pub event_tx: broadcast::Sender<String>,
+    /// 任务运行线程的 JoinHandle。中 #5:cleanup 删除媒体前 join 一下,
+    /// 防止后台线程在 delete 之后继续写 S3 对象(产生孤儿)。
+    pub worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Job {
@@ -146,21 +149,30 @@ impl Job {
     /// self.face_count(),GET /api/jobs 会永久挂起)。
     #[allow(dead_code)] // 公共访问器;summary 内部走 face_count_locked 避免重入
     pub fn face_count(&self) -> usize {
-        face_count_locked(&self.frames.lock().unwrap())
+        face_count_locked(&self.frames.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     pub fn summary(&self) -> serde_json::Value {
         // For video/stream jobs, prefer the first annotated frame as the cover
         // thumbnail (the original key points to .mp4 which renders as a broken
         // image in <img>). For image jobs, the original_key IS the cover.
-        let frames = self.frames.lock().unwrap();
+        let frames = self.frames.lock().unwrap_or_else(|e| e.into_inner());
         let face_count = face_count_locked(&frames);
         let cover_key: Option<String> = match self.kind {
-            JobKind::Image => self.original_media_key.lock().unwrap().clone(),
+            JobKind::Image => self
+                .original_media_key
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             _ => frames
                 .iter()
                 .find_map(|f| f.annotated_key.clone())
-                .or_else(|| self.original_media_key.lock().unwrap().clone()),
+                .or_else(|| {
+                    self.original_media_key
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                }),
         };
         let frame_count = frames.len();
         drop(frames);
@@ -170,15 +182,15 @@ impl Job {
             "display_name": self.display_name,
             "status": self.status(),
             "created_ms": self.created_ms,
-            "stats": *self.stats.lock().unwrap(),
-            "algo": self.algo.lock().unwrap().clone(),
+            "stats": *self.stats.lock().unwrap_or_else(|e| e.into_inner()),
+            "algo": self.algo.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             "face_count": face_count,
             "frame_count": frame_count,
-            "original_key": self.original_media_key.lock().unwrap().clone(),
+            "original_key": self.original_media_key.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             "cover_key": cover_key,
-            "error": self.error.lock().unwrap().clone(),
-            "archived": *self.archived.lock().unwrap(),
-            "original_input": self.original_input.lock().unwrap().clone(),
+            "error": self.error.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            "archived": *self.archived.lock().unwrap_or_else(|e| e.into_inner()),
+            "original_input": self.original_input.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         })
     }
 }
@@ -289,6 +301,7 @@ impl JobRegistry {
             original_input: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
             event_tx: tx,
+            worker: Mutex::new(None),
         });
         self.jobs
             .lock()
@@ -329,8 +342,15 @@ impl JobRegistry {
         let s3 = self.s3.clone();
         let cfg = self.cfg.clone();
         let jid = id.to_string();
+        // 中 #5:接管 worker JoinHandle,join 完再删 S3(防止 run_job 末尾还在写)。
+        let worker = self
+            .jobs
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|j| j.worker.lock().unwrap_or_else(|p| p.into_inner()).take());
         tokio::task::spawn_blocking(move || {
-            cleanup_job_media_blocking(&s3, &cfg, &jid);
+            cleanup_job_media_blocking(&s3, &cfg, &jid, worker);
         });
     }
 
@@ -360,7 +380,7 @@ impl JobRegistry {
     /// 设置 job 的原始输入路径(URL / 文件名),供"重试"使用。
     pub fn set_original_input(&self, id: &str, input: String) {
         if let Some(j) = self.jobs.lock().unwrap().get(id).cloned() {
-            *j.original_input.lock().unwrap() = Some(input);
+            *j.original_input.lock().unwrap_or_else(|e| e.into_inner()) = Some(input);
         }
     }
 
@@ -370,7 +390,7 @@ impl JobRegistry {
         if let Some(j) = self.jobs.lock().unwrap().get(id).cloned() {
             let lower = algo.trim().to_ascii_lowercase();
             if available_algos().contains(&lower.as_str()) {
-                *j.algo_override.lock().unwrap() = Some(lower);
+                *j.algo_override.lock().unwrap_or_else(|e| e.into_inner()) = Some(lower);
             }
         }
     }
@@ -378,7 +398,7 @@ impl JobRegistry {
     /// 标记 job 为已归档(侧栏默认隐藏但仍在内存/DB 中)。
     pub fn set_archived(&self, id: &str, archived: bool) -> bool {
         if let Some(j) = self.jobs.lock().unwrap().get(id).cloned() {
-            *j.archived.lock().unwrap() = archived;
+            *j.archived.lock().unwrap_or_else(|e| e.into_inner()) = archived;
             true
         } else {
             false
@@ -463,6 +483,18 @@ impl JobRegistry {
                 job.set_status(JobStatus::Cancelled);
                 job.emit(&serde_json::json!({"type": "cancelled"}).to_string());
                 reg.mark_abandoned();
+                // 低 #14:同 terminated 路径一样写 DB,避免重启后行残留 Queued。
+                let db = reg.db.clone();
+                let id = job.id.clone();
+                tokio::spawn(async move {
+                    db.update_job_status(
+                        &id,
+                        JobStatus::Cancelled,
+                        Some(crate::persist::now_ms_u64()),
+                        None,
+                    )
+                    .await;
+                });
                 return;
             }
             let permit = match semaphore.acquire_owned().await {
@@ -483,7 +515,8 @@ impl JobRegistry {
             reg.mark_started();
             // 把 permit 搬到 std::thread 里,thread 结束(成功/panic/超时)时
             // permit 自动 drop → 释放槽位。
-            std::thread::spawn(move || {
+            let job_for_handle = job.clone();
+            let handle = std::thread::spawn(move || {
                 let _permit = permit; // 关键:绑在 stack 上,thread 退出 → drop
                 let _guard = rt.enter();
                 // 线程任何退出路径都先扣 running 计数(permit 的 drop 在此之后)。
@@ -551,7 +584,7 @@ impl JobRegistry {
                 match result {
                     Ok(Ok(())) => { /* run_job 自己处理 success */ }
                     Ok(Err(e)) => {
-                        *job.error.lock().unwrap() = Some(e.to_string());
+                        *job.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string());
                         job.set_status(JobStatus::Error);
                         job.emit(
                             &serde_json::json!({"type": "error", "message": e.to_string()})
@@ -574,7 +607,8 @@ impl JobRegistry {
                     Err(panic_info) => {
                         // panic 转 Error 状态,避免拖垮 server。
                         let msg = panic_message(&panic_info);
-                        *job.error.lock().unwrap() = Some(format!("panic: {msg}"));
+                        *job.error.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(format!("panic: {msg}"));
                         job.set_status(JobStatus::Error);
                         job.emit(&serde_json::json!({"type": "error", "message": format!("panic: {msg}")}).to_string());
                         eprintln!("[job {}] PANIC: {msg}", job.id);
@@ -593,6 +627,12 @@ impl JobRegistry {
                     }
                 }
             });
+            // 中 #5:把 JoinHandle 存进 job.worker;delete 时 join 一下,确保
+            // 后台线程不会再写新的 S3 对象,然后再清理 prefix。
+            *job_for_handle
+                .worker
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(handle);
         });
     }
 
@@ -640,13 +680,18 @@ impl JobRegistry {
         // 3) 原始媒体写入存储(S3 失败自动降级本地)。
         //    如果 handle_upload 阶段已经预存了用户的原始文件(用于
         //    PNG/JPG 转 PGM 后 web preview),这里就跳过。
-        if job.kind != JobKind::Stream && job.original_media_key.lock().unwrap().is_none() {
+        if job.kind != JobKind::Stream
+            && job
+                .original_media_key
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        {
             let ext = Path::new(&input_path)
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("bin")
                 .to_ascii_lowercase();
-            let bytes = std::fs::read(&input_path)?;
             let key = format!("jobs/{}/original.{ext}", job.id);
             let ct = match ext.as_str() {
                 "png" => "image/png",
@@ -656,8 +701,13 @@ impl JobRegistry {
                 "mkv" => "video/x-matroska",
                 _ => "application/octet-stream",
             };
-            let stored = put_with_fallback(self, &key, ct, &bytes);
-            *job.original_media_key.lock().unwrap() = Some(stored.clone());
+            // 高 #2:流式 PUT —— `fs::read` + `bytes.to_vec` 在大视频上传时
+            // 是 ~2× 文件大小的堆峰值;改走 `put_object_file` (UNSIGNED-PAYLOAD
+            // 签名),GB 级文件不再进内存。
+            let stored = put_with_fallback_file(self, &key, ct, Path::new(&input_path));
+            *job.original_media_key
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(stored.clone());
             {
                 let db = self.db.clone();
                 let id = job.id.clone();
@@ -676,23 +726,33 @@ impl JobRegistry {
         // 选 haar 但 cascade.rfcf 缺失),前端 /api/jobs 摘要里也要显示
         // "尝试的是哪个",而不是 null — 否则 UI 没法定位是哪条配置导致
         // 的 failure。
-        if let Some(override_name) = job.algo_override.lock().unwrap().clone() {
-            *job.algo.lock().unwrap() = Some(override_name);
-        }
-        let detector = match build_detector(&self.cfg, job.algo_override.lock().unwrap().as_deref())
+        if let Some(override_name) = job
+            .algo_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
         {
+            *job.algo.lock().unwrap_or_else(|e| e.into_inner()) = Some(override_name);
+        }
+        let detector = match build_detector(
+            &self.cfg,
+            job.algo_override
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_deref(),
+        ) {
             Ok(d) => d,
             Err(e) => {
                 // 把 attempted algo 写进 stats,前端 chip 仍能过滤
-                if let Some(a) = job.algo.lock().unwrap().clone() {
-                    job.stats.lock().unwrap().algo = a;
+                if let Some(a) = job.algo.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                    job.stats.lock().unwrap_or_else(|e| e.into_inner()).algo = a;
                 }
                 return Err(e);
             }
         };
         // 记录实际使用的算法,供 /api/jobs 摘要里的 algo 字段(算法过滤 chip 用)
         let algo_name = detector.kind_name().to_string();
-        *job.algo.lock().unwrap() = Some(algo_name.clone());
+        *job.algo.lock().unwrap_or_else(|e| e.into_inner()) = Some(algo_name.clone());
         {
             let db = self.db.clone();
             let id = job.id.clone();
@@ -703,7 +763,7 @@ impl JobRegistry {
         }
         // 同时把算法名记进 stats:供 /api/jobs/stats 按算法聚合 + 前端 chip 过滤。
         {
-            let mut st = job.stats.lock().unwrap();
+            let mut st = job.stats.lock().unwrap_or_else(|e| e.into_inner());
             if st.algo.is_empty() {
                 st.algo = detector.kind_name().to_string();
             }
@@ -740,7 +800,7 @@ impl JobRegistry {
                 {
                     let db = self.db.clone();
                     let id = job.id.clone();
-                    let st = job.stats.lock().unwrap().clone();
+                    let st = job.stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     tokio::spawn(async move {
                         db.update_job_status(
                             &id,
@@ -858,7 +918,10 @@ impl JobRegistry {
                     }
                 }
 
-                job.frames.lock().unwrap().push(result.clone());
+                job.frames
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(result.clone());
                 // DB 持久化:攒 20 帧批量写一次(把每帧 1+N 次往返压成每批
                 // 2 条语句);job 结束时 flush 兜底(见 loop 后),不会丢帧。
                 db_pending.push(result.clone());
@@ -883,7 +946,7 @@ impl JobRegistry {
             }
 
             {
-                let mut st = job.stats.lock().unwrap();
+                let mut st = job.stats.lock().unwrap_or_else(|e| e.into_inner());
                 st.frames_processed += 1;
                 if has_face {
                     st.frames_with_face += 1;
@@ -894,7 +957,7 @@ impl JobRegistry {
             if frame_idx.is_multiple_of(30) {
                 let db = self.db.clone();
                 let jid = job.id.clone();
-                let st = job.stats.lock().unwrap().clone();
+                let st = job.stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 tokio::spawn(async move {
                     db.update_job_stats(&jid, &st).await;
                 });
@@ -906,7 +969,7 @@ impl JobRegistry {
         {
             let db = self.db.clone();
             let id = job.id.clone();
-            let st = job.stats.lock().unwrap().clone();
+            let st = job.stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
             tokio::spawn(async move {
                 db.update_job_status(
                     &id,
@@ -930,7 +993,7 @@ impl JobRegistry {
         job.emit(
             &serde_json::json!({
                 "type": "done",
-                "stats": *job.stats.lock().unwrap(),
+                "stats": *job.stats.lock().unwrap_or_else(|e| e.into_inner()),
             })
             .to_string(),
         );
@@ -939,7 +1002,10 @@ impl JobRegistry {
 }
 
 fn finalize(job: &Job, started: std::time::Instant, tmp_dir: &Path) {
-    job.stats.lock().unwrap().elapsed_ms = started.elapsed().as_millis() as u64;
+    job.stats
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .elapsed_ms = started.elapsed().as_millis() as u64;
     // 清理临时目录(异步尽力而为)。必须用配置的 TMP_DIR,而非硬编码
     // /tmp/rsface-jobs——否则非默认部署下每个 job 的工作目录都会泄漏在磁盘上。
     let dir = tmp_dir.join(&job.id);
@@ -1090,6 +1156,8 @@ pub fn move_staged_into_job(
 
 /// 写入媒体:S3 优先,失败则降级到本地磁盘。
 /// 返回的 key 形如 `s3://<key>` 或 `local://<key>`,供 `/media/` 路由识别。
+/// 保留:被单测覆盖,生产路径现在走 `put_with_fallback_file` (流式 PUT)。
+#[allow(dead_code)]
 fn put_with_fallback(reg: &JobRegistry, key: &str, ct: &str, bytes: &[u8]) -> String {
     match reg.s3.put_object(key, ct, bytes.to_vec()) {
         Ok(_) => format!("s3://{key}"),
@@ -1105,6 +1173,26 @@ fn put_with_fallback(reg: &JobRegistry, key: &str, ct: &str, bytes: &[u8]) -> St
             format!("local://{key}")
         }
     }
+}
+
+/// 流式 put_with_fallback:S3 优先(走 `put_object_file`,不在内存里复制
+/// 文件),失败则把磁盘文件复制到 local media(避免改源文件)。大文件时
+/// 与 `put_with_fallback` 的内存峰值差异是 GB 级的。
+fn put_with_fallback_file(reg: &JobRegistry, key: &str, ct: &str, src: &std::path::Path) -> String {
+    match reg.s3.put_object_file(key, ct, src) {
+        Ok(_) => return format!("s3://{key}"),
+        Err(e) => {
+            eprintln!("[storage] S3 stream-put failed for {key}: {e} — falling back to local")
+        }
+    }
+    let dst = reg.cfg.local_media_dir.join(key);
+    if let Some(parent) = dst.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::copy(src, &dst).is_err() {
+        eprintln!("[storage] local stream-copy failed for {key}");
+    }
+    format!("local://{key}")
 }
 
 /// 同步版 put_with_fallback(从 spawn_blocking 调用,不能直接持有 S3Client 的 .put_object)。
@@ -1153,7 +1241,30 @@ fn put_with_inline_fallback(reg: &JobRegistry, key: &str, ct: &str, bytes: &[u8]
 /// 删除 job 在 S3 与本地媒体目录里的全部对象(prefix `jobs/{id}/`)。
 /// 阻塞 IO:只能从 `spawn_blocking` 调用。S3 枚举失败时保留对象不阻断
 /// 删除流程(只告警);本地目录缺失视为正常。
-pub fn cleanup_job_media_blocking(s3: &S3Client, cfg: &Config, id: &str) {
+///
+/// 中 #5:若调用方传入了 `worker`,join 一下确保后台线程退出后再列
+/// prefix,防止 run_job 末尾还在 put_with_fallback(产生孤儿)。
+pub fn cleanup_job_media_blocking(
+    s3: &S3Client,
+    cfg: &Config,
+    id: &str,
+    worker: Option<std::thread::JoinHandle<()>>,
+) {
+    if let Some(h) = worker {
+        // 限定 join 等待时间,避免 cleanup 永远卡住(panic 死锁等情况)。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if h.is_finished() {
+                let _ = h.join();
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                eprintln!("[jobs] cleanup worker join timeout for {id}, proceeding anyway");
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
     let prefix = format!("jobs/{id}/");
     match s3.list_objects(&prefix) {
         Ok(keys) => {
@@ -1738,7 +1849,10 @@ mod tests {
         for good in ["haar", "cnn", "luminance"] {
             reg.set_algo_override(&id, good.to_string());
             assert_eq!(
-                job.algo_override.lock().unwrap().as_deref(),
+                job.algo_override
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_deref(),
                 Some(good),
                 "{good} must be accepted"
             );
@@ -1746,7 +1860,11 @@ mod tests {
         for bad in ["", "HAAR", "yolo", "fast-rcnn", "transformer", ".."] {
             reg.set_algo_override(&id, bad.to_string());
             // 应当保持上次有效值不变(bad 不会覆盖 good)。
-            let cur = job.algo_override.lock().unwrap().clone();
+            let cur = job
+                .algo_override
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let cur_str = cur.unwrap_or_default();
             assert!(
                 available_algos().contains(&cur_str.as_str()),

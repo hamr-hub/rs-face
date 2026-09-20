@@ -39,6 +39,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_util::io::ReaderStream;
 use tower_http::compression::CompressionLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -543,7 +544,9 @@ async fn job_detail(
     match state.get(&id) {
         Some(job) => {
             let mut v = job.summary();
-            v["frames"] = serde_json::to_value(&*job.frames.lock().unwrap()).unwrap_or_default();
+            v["frames"] =
+                serde_json::to_value(&*job.frames.lock().unwrap_or_else(|e| e.into_inner()))
+                    .unwrap_or_default();
             Json(v).into_response()
         }
         None => error_response(StatusCode::NOT_FOUND, "no such job"),
@@ -631,7 +634,7 @@ async fn batch_ops(
             for id in &req.ids {
                 if let Some(j) = state.get(id) {
                     let mut s = j.summary();
-                    let frames = j.frames.lock().unwrap();
+                    let frames = j.frames.lock().unwrap_or_else(|e| e.into_inner());
                     s["frames"] = serde_json::to_value(&*frames).unwrap_or_default();
                     jobs.push(s);
                 }
@@ -653,7 +656,11 @@ async fn retry_job(
         let Some(j) = state.get(&id) else {
             return error_response(StatusCode::NOT_FOUND, "no such job");
         };
-        let inp = j.original_input.lock().unwrap().clone();
+        let inp = j
+            .original_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let k = j.kind;
         (inp, k)
     };
@@ -733,7 +740,11 @@ async fn compare_algos(
         Some(j) => j,
         None => return error_response(StatusCode::NOT_FOUND, "no such job"),
     };
-    let media_key = job.original_media_key.lock().unwrap().clone();
+    let media_key = job
+        .original_media_key
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let media_key = match media_key {
         Some(k) => k,
         None => {
@@ -743,6 +754,32 @@ async fn compare_algos(
             )
         }
     };
+    // 中 #8:compare_algos 之前 `fs::read` / `get_object` 把整段原视频灌进
+    // 内存(2 GB+),对流任务没意义,而且一旦输入是 2 GB 视频就是 GB 级
+    // 堆分配 → OOM。compare 实际只关心首帧,直接拒非图片 + 大于 16 MiB 的
+    // 输入,让前端切到 video-specific compare 路径(或先下载缩略图)。
+    let ext_is_image = {
+        let ext = std::path::Path::new(
+            media_key
+                .rsplit_once('/')
+                .map(|(_, n)| n)
+                .unwrap_or(&media_key),
+        )
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+        matches!(
+            ext.as_str(),
+            "png" | "pgm" | "ppm" | "jpg" | "jpeg" | "bmp" | "webp"
+        )
+    };
+    if !ext_is_image {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "compare_algos only supports image jobs (videos / streams require a separate per-frame endpoint)",
+        );
+    }
     let bytes: Vec<u8> = {
         if let Some(rest) = media_key.strip_prefix("local://") {
             let path = state.cfg.local_media_dir.join(rest);
@@ -864,6 +901,44 @@ async fn compare_algos(
 /// ffmpeg 单图转换的硬超时:损坏/截断的输入可能让 ffmpeg 长时间不退出,
 /// 必须有上限,超时即 kill。
 const FFMPEG_IMAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 同步版 ffmpeg 调用的超时包装:在 spawn_blocking 里用 std::thread 启
+/// ffmpeg,在超时窗口内等 join;超时则 std::process::exit(2) 暴力杀进程
+/// (子进程继承 stdio 句柄,fork 杀子进程足够;若有 shell 包装再补一层
+/// `pgrep ffmpeg | xargs kill` 兜底)。
+///
+/// 高 #6 / 中 #4:替换 upload_image + import_video_url 的 `Command::output()`
+/// 裸调用;以前版本被损坏图片/慢直播源卡住,占死一个并发槽位。
+fn run_ffmpeg_with_timeout_blocking(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    // 子进程 std::process::Child:用 busy-wait + try_wait 直到超时或退出。
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap zombie
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("ffmpeg timeout after {timeout:?}"),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(e);
+            }
+        }
+    }
+}
 
 /// Decode arbitrary image bytes (PNG/PGM/PPM/JPG via ffmpeg) into a GrayImage.
 /// Falls back to ffmpeg-based PGM conversion for JPG/WebP inputs that the
@@ -1120,18 +1195,16 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
             {
                 let work = raw_path.parent().unwrap().to_path_buf();
                 let ppm = work.join("input.ppm");
-                let status = std::process::Command::new("ffmpeg")
+                let mut ffmpeg_cmd = std::process::Command::new("ffmpeg");
+                ffmpeg_cmd
                     .args(["-y", "-loglevel", "error", "-i"])
                     .arg(&raw_path)
                     .args(["-pix_fmt", "rgb24", "-f", "image2"])
-                    .arg(&ppm)
-                    .output()
-                    .map_err(|e| std::io::Error::other(format!("ffmpeg spawn: {e}")))?;
-                if !status.status.success() || !ppm.is_file() {
-                    return Err(std::io::Error::other(format!(
-                        "ffmpeg image→ppm failed: {}",
-                        String::from_utf8_lossy(&status.stderr)
-                    )));
+                    .arg(&ppm);
+                let status = run_ffmpeg_with_timeout_blocking(ffmpeg_cmd, FFMPEG_IMAGE_TIMEOUT)
+                    .map_err(|e| std::io::Error::other(format!("ffmpeg image→ppm: {e}")))?;
+                if !status.success() || !ppm.is_file() {
+                    return Err(std::io::Error::other("ffmpeg image→ppm failed"));
                 }
                 // 3) 用户的原始字节落到 local_media_dir,作 preview 用。
                 //    图片上限小(MB 级),blocking 里读回内存可接受;视频路径
@@ -1182,7 +1255,9 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
     // 如果已经在 handle_upload 阶段存了 original,直接更新 job 的 original_media_key,
     // run_job 看到已设置就会跳过重复存储。
     if let Some(stored) = pre_stored_original {
-        *job.original_media_key.lock().unwrap() = Some(stored.clone());
+        *job.original_media_key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(stored.clone());
         let db = state.db.clone();
         let id_db = id.clone();
         let stored_db = stored.clone();
@@ -1343,14 +1418,19 @@ fn is_safe_event(e: &crate::persist::TelemetryEvent) -> bool {
         return false;
     }
     // 服务端永远不信客户端的"已脱敏"声明;再扫一次敏感字段。
-    let blob = format!("{:?}{:?}", e.name, e.props);
+    // 低 #10:case-fold 比较,客户端换大小写/URL-encode 绕过全部拦下。
+    let blob = format!("{:?}{:?}", e.name, e.props).to_ascii_lowercase();
     const FORBIDDEN: &[&str] = &[
         "s3://",
         "local://",
         "inline://", // 存储 key 前缀
         "/media/",   // 媒体代理路径
-        "Authorization",
-        "Bearer ", // 鉴权相关
+        "authorization",
+        "bearer ",  // 鉴权相关
+        "bearer\t", // 制表符分词也算
+        "secret",   // 常见密钥字段
+        "password",
+        "token",
     ];
     !FORBIDDEN.iter().any(|s| blob.contains(s))
 }
@@ -1400,7 +1480,7 @@ async fn job_events(
     // 把 job 现有的帧当作历史回放,跳过 start_after 之前的。
     let mut seq: u64 = 0;
     let replay: Vec<(u64, String)> = {
-        let frames = job.frames.lock().unwrap();
+        let frames = job.frames.lock().unwrap_or_else(|e| e.into_inner());
         frames
             .iter()
             .enumerate()
@@ -1507,40 +1587,6 @@ fn sse_payload_is_terminal(payload: &str) -> bool {
         .is_some_and(|t| TERMINAL.contains(&t.as_str()))
 }
 
-/// 构造 206 Partial Content 响应(动态 Content-Range/Content-Length 需要运行期
-/// 字符串,用 builder 逐个 insert 而非静态 header 元组)。
-fn range_response(
-    code: StatusCode,
-    ct: &str,
-    cache: &str,
-    content_range: &str,
-    body: Vec<u8>,
-) -> Response {
-    let mut resp = (code, body).into_response();
-    let headers = resp.headers_mut();
-    let _ = headers.try_insert(
-        header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_str(ct).unwrap_or(axum::http::HeaderValue::from_static(
-            "application/octet-stream",
-        )),
-    );
-    let _ = headers.try_insert(
-        header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_str(cache)
-            .unwrap_or(axum::http::HeaderValue::from_static("public, max-age=3600")),
-    );
-    let _ = headers.try_insert(
-        header::ACCEPT_RANGES,
-        axum::http::HeaderValue::from_static("bytes"),
-    );
-    let _ = headers.try_insert(
-        header::CONTENT_RANGE,
-        axum::http::HeaderValue::from_str(content_range)
-            .unwrap_or(axum::http::HeaderValue::from_static("bytes */0")),
-    );
-    resp
-}
-
 /// 解析 `Range: bytes=start-end` 请求头(仅支持单区间;多区间降级为 200 全量)。
 /// 返回 Some((start, end_inclusive));end 为 None 表示到 EOF。
 /// 不合规范(Satisfiable=false,start 超过文件长度)由调用方处理。
@@ -1572,12 +1618,14 @@ fn parse_range_header(hv: &str, total_len: u64) -> Option<(u64, Option<u64>)> {
     Some((start, end))
 }
 
-/// 用 tokio::fs 按 seek+read 切片(本地媒体 Range 路径,避免整个文件读进内存)。
-async fn read_local_range(
+/// 高 #3:本地媒体 Range 切片(流式)。返回 `tokio::fs::File` 加 seek 偏移,
+/// 调用方用 `ReaderStream` 转 axum `Body::from_stream` 边读边发,避免
+/// `read_exact` 把整段塞进 Vec(GB 级视频拖进度条的关键)。
+async fn read_local_range_stream(
     path: &std::path::Path,
     start: u64,
     end_inclusive: Option<u64>,
-) -> std::io::Result<(Vec<u8>, u64)> {
+) -> std::io::Result<(tokio::io::Take<tokio::fs::File>, u64)> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut f = tokio::fs::File::open(path).await?;
     let total = f.metadata().await?.len();
@@ -1587,12 +1635,43 @@ async fn read_local_range(
             "range start beyond EOF",
         ));
     }
-    let end = end_inclusive.unwrap_or(total - 1).min(total - 1);
-    let len = end - start + 1;
+    let end_inclusive = end_inclusive.unwrap_or(total - 1).min(total - 1);
+    let len = end_inclusive - start + 1;
     f.seek(std::io::SeekFrom::Start(start)).await?;
-    let mut buf = vec![0u8; len as usize];
-    f.read_exact(&mut buf).await?;
-    Ok((buf, total))
+    let limited = f.take(len);
+    Ok((limited, total))
+}
+
+/// 高 #3:206 Partial Content 流式响应。从 AsyncRead 构造 axum Body,
+/// 配上 Content-Range / Content-Length 头。注意 Content-Length 是
+/// 服务端给的对象总大小(用于客户端下一段 Range 请求),body 实际只
+/// 发对应片段。
+fn stream_range_response(
+    status: StatusCode,
+    content_type: &'static str,
+    cache_control: &'static str,
+    content_range: &str,
+    reader: impl tokio::io::AsyncRead + Send + 'static,
+    _total: u64,
+) -> Response {
+    use axum::body::Body;
+    let stream = ReaderStream::new(reader);
+    let body = Body::from_stream(stream);
+    let mut resp = (status, body).into_response();
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
+    resp.headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    resp.headers_mut().insert(
+        header::CONTENT_RANGE,
+        HeaderValue::from_str(content_range)
+            .unwrap_or_else(|_| HeaderValue::from_static("bytes */*")),
+    );
+    resp
 }
 
 async fn media(
@@ -1682,16 +1761,18 @@ async fn media(
                         .into_response();
                 }
                 Some((start, end)) => {
-                    match read_local_range(&local_path, start, end).await {
-                        Ok((buf, total)) => {
-                            let first = start;
-                            let last = start + buf.len() as u64 - 1;
-                            return range_response(
+                    // 高 #3:用 seek + ReaderStream 流式切片,而不是 read_exact
+                    // 把整段读到 Vec。GB 级视频拖进度条时峰值从 GB 降到 KB。
+                    match read_local_range_stream(&local_path, start, end).await {
+                        Ok((async_reader, total)) => {
+                            let last = end.unwrap_or(total - 1);
+                            return stream_range_response(
                                 StatusCode::PARTIAL_CONTENT,
                                 ct,
                                 cache,
-                                &format!("bytes {first}-{last}/{total}"),
-                                buf,
+                                &format!("bytes {start}-{last}/{total}"),
+                                async_reader,
+                                total,
                             );
                         }
                         Err(_) => {
@@ -1737,18 +1818,18 @@ async fn media(
                     let s3r = s3.clone();
                     let key_r = owned.clone();
                     let res = tokio::task::spawn_blocking(move || {
-                        s3r.get_object_range(&key_r, start, end)
+                        s3r.get_object_range_stream(&key_r, start, end)
                     })
                     .await;
-                    if let Ok(Ok((buf, _total))) = res {
-                        let first = start;
-                        let last = start + buf.len() as u64 - 1;
-                        return range_response(
+                    if let Ok(Ok((stream, total))) = res {
+                        let last = end.unwrap_or(total - 1);
+                        return stream_range_response(
                             StatusCode::PARTIAL_CONTENT,
                             ct,
                             cache,
-                            &format!("bytes {first}-{last}/{total}"),
-                            buf,
+                            &format!("bytes {start}-{last}/{total}"),
+                            stream,
+                            total,
                         );
                     }
                     // Range GET 失败(可能 rustfs 不支持):降级全量 GET(下方)。
@@ -1857,16 +1938,50 @@ async fn download_zip(
     let mut zip = crate::zip::ZipWriter::new();
     let mut manifest_frames: Vec<serde_json::Value> = Vec::new();
 
+    // 中 #9:download_zip 之前 `zip.finish()` 把全部 entry 一次进 Vec;视频 job
+    // 几百帧 + 几千裁剪会到 GB 级。加全局字节上限,超过就跳过剩余 entry 并
+    // 在 manifest 里写明,前端可看到 truncated。
+    const ZIP_MAX_BYTES: usize = 256 * 1024 * 1024; // 256 MiB 软上限
+    let mut total_written: usize = 0;
+    let mut skipped_after_limit: usize = 0;
+    let push_entry = |zip: &mut crate::zip::ZipWriter,
+                      name: &str,
+                      bytes: &[u8],
+                      total_written: &mut usize,
+                      skipped: &mut usize|
+     -> bool {
+        // ZipWriter 内部 guard:entry 超 4 GiB 拒收,这里再前置一道字节预算。
+        let entry_size = bytes.len();
+        if *total_written + entry_size > ZIP_MAX_BYTES {
+            *skipped += 1;
+            return false;
+        }
+        if zip.add_file(name, bytes).is_err() {
+            return false;
+        }
+        *total_written += entry_size;
+        true
+    };
+
     // 原始媒体。
     if let Some(key) = &original_media {
         if let Ok(bytes) = read_media_object(&state, key).await {
             let ext = key_extension(key);
-            let _ = zip.add_file(&format!("original/original.{ext}"), &bytes);
+            let _ = push_entry(
+                &mut zip,
+                &format!("original/original.{ext}"),
+                &bytes,
+                &mut total_written,
+                &mut skipped_after_limit,
+            );
         }
     }
 
     // 标注帧 + 人脸裁剪。
     for fr in &frames {
+        if skipped_after_limit > 0 {
+            break;
+        }
         let Some(ann_key) = &fr.annotated_key else {
             continue;
         };
@@ -1874,16 +1989,31 @@ async fn download_zip(
             continue;
         };
         let frame_name = format!("annotated/frame_{:06}.png", fr.index);
-        if zip.add_file(&frame_name, &ann_bytes).is_err() {
+        if !push_entry(
+            &mut zip,
+            &frame_name,
+            &ann_bytes,
+            &mut total_written,
+            &mut skipped_after_limit,
+        ) {
             continue;
         }
         let mut face_files: Vec<serde_json::Value> = Vec::new();
         for (i, f) in fr.faces.iter().enumerate() {
+            if skipped_after_limit > 0 {
+                break;
+            }
             let Ok(crop) = read_media_object(&state, &f.key).await else {
                 continue;
             };
             let face_name = format!("faces/frame_{:06}_face_{:02}.png", fr.index, i);
-            if zip.add_file(&face_name, &crop).is_ok() {
+            if push_entry(
+                &mut zip,
+                &face_name,
+                &crop,
+                &mut total_written,
+                &mut skipped_after_limit,
+            ) {
                 face_files.push(serde_json::json!({
                     "file": face_name,
                     "x": f.x, "y": f.y, "w": f.w, "h": f.h, "score": f.score,
@@ -1912,6 +2042,9 @@ async fn download_zip(
         "stats": stats,
         "frames": manifest_frames,
         "exported_ms": exported_ms,
+        // 中 #9:字节超限时被跳过的 entry 数,前端可见。
+        "truncated_entries": skipped_after_limit,
+        "size_bytes": total_written,
     });
     let _ = zip.add_file("manifest.json", manifest.to_string().as_bytes());
 
@@ -2041,48 +2174,58 @@ fn url_encode_path(s: &str) -> String {
     out
 }
 
+/// ffmpeg 拉远端视频的硬上限:中 #4 防 disk-fill DoS。
+/// 默认 = `MAX_FRAMES_VIDEO` 配的视频字节上限,可通过 cfg.video_limit_bytes 覆盖。
+const DEFAULT_VIDEO_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// 用 ffmpeg 把远程 http(s) URL 一次性拉到本地 mp4(支持 HLS/DASH/MP4/WEBM)。
 /// 返回本地文件路径 + 落盘字节数。
 ///
 /// 与 `run_job` 的 `spawn_ffmpeg_to_local` 不同:这里要等 ffmpeg 跑完才能
 /// 让 core 拿确定性大小的文件去解码,所以同步 `child.wait()`。
+/// 中 #4:加 `-fs` 上限 + `run_ffmpeg_wait_with_timeout`,防无尽 HLS 灌爆
+/// tmp 磁盘、占死一个并发槽位。
 fn fetch_remote_video_to_local(
     url: &str,
     work_dir: &std::path::Path,
+    max_bytes: u64,
 ) -> std::io::Result<(std::path::PathBuf, u64)> {
     use std::process::{Command, Stdio};
     let out_path = work_dir.join("input.mp4");
-    let status = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_delay_max",
-            "5",
-            "-timeout",
-            "30000000", // 30s 单连接超时(微秒)
-            "-i",
-            url,
-            "-c",
-            "copy", // 优先 copy(快),失败时 ffmpeg 自动回退转码
-            "-f",
-            "mp4",
-            "-movflags",
-            "+faststart",
-        ])
-        .arg(&out_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| std::io::Error::other(format!("ffmpeg spawn: {e}")))?;
+    let status = run_ffmpeg_wait_with_timeout(
+        Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-reconnect",
+                "1",
+                "-reconnect_streamed",
+                "1",
+                "-reconnect_delay_max",
+                "5",
+                "-timeout",
+                "30000000", // 30s 单连接超时(微秒)
+                "-i",
+                url,
+                "-c",
+                "copy", // 优先 copy(快),失败时 ffmpeg 自动回退转码
+                "-f",
+                "mp4",
+                "-movflags",
+                "+faststart",
+            ])
+            .args(["-fs", &max_bytes.to_string()]) // 超 max_bytes 立即停止写入
+            .arg(&out_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+        DEFAULT_VIDEO_FETCH_TIMEOUT,
+    )
+    .map_err(|e| std::io::Error::other(format!("ffmpeg spawn: {e}")))?;
     if !status.success() {
         return Err(std::io::Error::other(
-            "ffmpeg video fetch failed (remote URL not retrievable or unsupported format)",
+            "ffmpeg video fetch failed (remote URL not retrievable, unsupported format, or exceeded size limit)",
         ));
     }
     if !out_path.is_file() {
@@ -2093,6 +2236,37 @@ fn fetch_remote_video_to_local(
         return Err(std::io::Error::other("ffmpeg produced 0-byte file"));
     }
     Ok((out_path, size))
+}
+
+/// `std::process::Command` 包装版:与 `run_ffmpeg_with_timeout_blocking` 同
+/// 思路,但走 `Stdio` 已设的 Command,只负责 wait 循环 + 超时 kill。
+/// 抽出它是因为 import_video_url 走自己配的 stdin/stdout/stderr。
+fn run_ffmpeg_wait_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut child = cmd.spawn()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("ffmpeg wait timeout after {timeout:?}"),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(e);
+            }
+        }
+    }
 }
 
 /// `POST /api/import/video` — multipart upload,直接传视频文件。
@@ -2125,7 +2299,11 @@ async fn import_video(
     };
     // 原始文件还没落 S3 时(run_job 还没跑到那一步),URL 为 null;
     // 前端可在轮询 `/api/import/{id}/urls` 拿最新值。
-    let key = job.original_media_key.lock().unwrap().clone();
+    let key = job
+        .original_media_key
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     import_response(&id, JobKind::Video, key.as_deref(), None, job.status())
 }
 
@@ -2184,7 +2362,10 @@ async fn import_video_url(
     let (path, size) = match tokio::task::spawn_blocking({
         let url = url.clone();
         let work = work_dir.clone();
-        move || fetch_remote_video_to_local(&url, &work)
+        // 中 #4:把视频上限字节传给 ffmpeg `-fs`,防止无尽 HLS / 直播源
+        // 把 tmp 磁盘灌满 + 占死一个并发槽位。沿用上传大小限制做默认值。
+        let max_bytes = state.cfg.video_limit_bytes;
+        move || fetch_remote_video_to_local(&url, &work, max_bytes)
     })
     .await
     {
@@ -2242,7 +2423,11 @@ async fn import_urls(
     let Some(job) = state.get(&id) else {
         return error_response(StatusCode::NOT_FOUND, "no such job");
     };
-    let original = job.original_media_key.lock().unwrap().clone();
+    let original = job
+        .original_media_key
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     // 找第一张标注帧作 cover_key(供 /api/jobs 已有的 SSE 流复用)。
     let cover = job
         .frames
@@ -2260,7 +2445,7 @@ async fn import_urls(
         "cover_url": media_lan_url(cover.as_deref()),
         "media_path": media_lan_path(original.as_deref()),
         "stream_url": format!("/api/jobs/{}/events", id),
-        "frame_count": job.frames.lock().unwrap().len(),
+        "frame_count": job.frames.lock().unwrap_or_else(|e| e.into_inner()).len(),
         "is_terminal": matches!(
             job.status(),
             JobStatus::Done | JobStatus::Cancelled | JobStatus::Error
@@ -2368,7 +2553,72 @@ fn is_blocked_host(host: &str) -> bool {
     if h.starts_with("169.254.") {
         return true;
     }
+    // 中 #7:数字式 IPv4 表示(2130706433, 0x7f000001, 0177.0.0.1 等),
+    // 上面字符串匹配看不到,要在解析层挡。统一展开成四段数字后照同样规则。
+    if let Some(octets) = parse_numeric_ipv4(&h) {
+        // 中 #7:数字式 IPv4 (2130706433, 0x7f000001, 0177.0.0.1 等) 表达
+        // 只挡"绕回本机 / link-local / metadata":10/172/192.168 走的是产品
+        // 显式用例(LAN 摄像头),放行;127/169.254/0.0.0.0/::1 仍然挡。
+        return match octets[0] {
+            0 => true,               // 0.0.0.0/8
+            127 => true,             // 127.0.0.0/8 loopback
+            169 => octets[1] == 254, // 169.254.0.0/16 link-local + metadata
+            _ => false,
+        };
+    }
     false
+}
+
+/// 把数字形式 IPv4 (`2130706433`, `0x7f000001`, `0177.0.0.1`) 解析成
+/// `[u8; 4]`;非数字形式返回 None;只接受"全数字"或"x.. hex"或"0.. octal"
+/// 表示法,常规 `127.0.0.1` 由 starts_with 链处理。
+fn parse_numeric_ipv4(host: &str) -> Option<[u8; 4]> {
+    if !host
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'x' || b == b'X')
+    {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    let mut i = 0;
+    if host.contains('.') {
+        // 点分(可能首段是 hex / octal / dec):逐段解析。
+        for seg in host.split('.') {
+            if i >= 4 || seg.is_empty() {
+                return None;
+            }
+            let v = parse_int_segment(seg)?;
+            if v > 0xff {
+                return None;
+            }
+            octets[i] = v as u8;
+            i += 1;
+        }
+        if i != 4 {
+            return None;
+        }
+        Some(octets)
+    } else {
+        // 单数字:32 位整数拆字节。
+        let v = parse_int_segment(host)?;
+        octets[0] = ((v >> 24) & 0xff) as u8;
+        octets[1] = ((v >> 16) & 0xff) as u8;
+        octets[2] = ((v >> 8) & 0xff) as u8;
+        octets[3] = (v & 0xff) as u8;
+        Some(octets)
+    }
+}
+
+/// `0x7f` → 0x7f (hex);`0177` → 0x7f (octal,前导 0 视为 octal);
+/// 其它 → u8 dec。
+fn parse_int_segment(seg: &str) -> Option<u32> {
+    if seg.len() > 1 && (seg.starts_with("0x") || seg.starts_with("0X")) {
+        u32::from_str_radix(&seg[2..], 16).ok()
+    } else if seg.len() > 1 && seg.starts_with('0') && seg.bytes().all(|b| b.is_ascii_digit()) {
+        u32::from_str_radix(seg, 8).ok()
+    } else {
+        seg.parse::<u32>().ok()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2762,17 +3012,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_range_read_returns_exact_slice() {
+    async fn local_range_stream_returns_exact_slice() {
+        use tokio::io::AsyncReadExt;
         let dir = std::env::temp_dir().join("rsface-api-test-range");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("r.bin");
         let data: Vec<u8> = (0u8..=255).collect(); // 256 bytes
         std::fs::write(&path, &data).unwrap();
-        let (buf, total) = read_local_range(&path, 10, Some(20)).await.unwrap();
+        let (mut reader, total) = read_local_range_stream(&path, 10, Some(20)).await.unwrap();
         assert_eq!(total, 256);
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).await.unwrap();
         assert_eq!(buf, &data[10..=20]);
         // 开放区间到 EOF
-        let (buf2, _) = read_local_range(&path, 250, None).await.unwrap();
+        let (mut reader2, _) = read_local_range_stream(&path, 250, None).await.unwrap();
+        let mut buf2 = Vec::new();
+        reader2.read_to_end(&mut buf2).await.unwrap();
         assert_eq!(buf2, &data[250..]);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -35,6 +35,8 @@ pub struct Config {
     pub max_face_crops: usize,
     /// 检测器最小人脸尺寸(px)。
     pub min_face_size: usize,
+    /// 视频 URL 导入的最大字节数(给 ffmpeg `-fs` 上限,防 disk-fill DoS)。
+    pub video_limit_bytes: u64,
     /// 本地媒体缓存目录(S3 失败时兜底,前端仍可访问)。
     pub local_media_dir: PathBuf,
     /// PostgreSQL DSN,空字符串则纯内存。
@@ -101,6 +103,11 @@ impl Config {
                 .unwrap_or(30),
             max_face_crops: env_or("MAX_FACE_CROPS", "2000").parse().unwrap_or(2000),
             min_face_size: env_or("MIN_FACE_SIZE", "24").parse().unwrap_or(24),
+            // 中 #4:视频导入字节上限;保守 2 GB,与上传上限对齐。0 = 不限
+            // (生产环境不要设 0;留给测试)。
+            video_limit_bytes: env_or("VIDEO_LIMIT_BYTES", "2147483648")
+                .parse()
+                .unwrap_or(2_147_483_648),
             local_media_dir: PathBuf::from(env_or("LOCAL_MEDIA_DIR", "/tmp/rsface-media")),
             database_url: env_or("DATABASE_URL", ""),
             max_concurrent_jobs: env_or("MAX_CONCURRENT_JOBS", "2")

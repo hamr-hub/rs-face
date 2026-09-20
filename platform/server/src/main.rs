@@ -75,7 +75,18 @@ async fn main() {
 
     // PostgreSQL 持久化(可选;连接失败则降级为内存模式)
     let db = if !cfg.database_url.is_empty() {
-        let db = persist::Db::connect(&cfg.database_url).await;
+        // 低 #13:DATABASE_URL 设置 → connect 失败也 fail-fast,与 migrate
+        // 失败一致:对着一个连不上的 PG 跑内存模式,会静默丢全部持久化,
+        // 比启动失败更危险。空字符串则保留原"纯内存"降级路径。
+        let db = match persist::Db::connect(&cfg.database_url).await {
+            d if d.pool.is_none() => {
+                eprintln!(
+                    "[rsface-platform] FATAL: DATABASE_URL set but PG connect failed (set empty DATABASE_URL to run memory-only)"
+                );
+                std::process::exit(1);
+            }
+            d => d,
+        };
         // 迁移失败不降级:库在但 schema 残缺时,降级会静默丢所有持久化。
         // fail-fast 让容器进入 crash loop,运维能立刻看到。
         if let Err(e) = db.migrate().await {
