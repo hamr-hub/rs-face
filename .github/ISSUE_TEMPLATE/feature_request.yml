@@ -1,0 +1,27 @@
+name: Feature / proposal
+description: Suggest an improvement (read STRUCTURE.md before proposing a new dep or top-level dir)
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: |
+        Note the hard constraints in STRUCTURE.md:
+        - core library is zero-dep; new deps go behind a cargo feature flag.
+        - no new top-level directory; no Makefile; no scratch/plan docs in git.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence / alternatives
+      description: Measured benefit or prior art; what else was considered.
+    validations:
+      required: false

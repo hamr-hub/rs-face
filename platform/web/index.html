@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN" data-theme="auto"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>rs-face Platform</title><link rel="stylesheet" href="/style.css">
+<title>rs-face Platform</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/theme.css">
 </head><body>
 <header class="topbar" id="topbar" role="banner">
   <div class="tb-left">
@@ -143,7 +143,10 @@
   <div class="pv-detail hidden" id="pv-detail">
     <div class="pv-head">
       <div class="pv-title-row"><span class="pv-dot" id="pv-dot"></span><h2 id="pv-title" class="pv-title">…</h2><span class="pv-status" id="pv-status">…</span></div>
-      <div class="pv-meta"><span id="pv-kind" class="pv-tag">…</span><span id="pv-frames" class="pv-meta-item">0 帧</span><span id="pv-faces" class="pv-meta-item">0 张脸</span><span id="pv-fps" class="pv-meta-item pv-fps">— fps</span><span id="pv-elapsed" class="pv-meta-item">—</span><span id="pv-time" class="pv-meta-item"></span><span id="pv-id" class="pv-meta-item mono">#…</span></div>
+      <div class="pv-meta"><span id="pv-kind" class="pv-tag">…</span><span id="pv-frames" class="pv-meta-item">0 帧</span><span id="pv-faces" class="pv-meta-item">0 张脸</span><span id="pv-fps" class="pv-meta-item pv-fps">— fps</span><span id="pv-elapsed" class="pv-meta-item">—</span><span id="pv-time" class="pv-meta-item"></span><span id="pv-id" class="pv-meta-item mono">#…</span>
+        <button id="pv-copy-lan" class="pv-meta-item pv-lan-btn hidden" title="复制 S3 LAN 链接到剪贴板" aria-label="复制 LAN 链接">🔗 复制 LAN URL</button>
+        <a id="pv-open-lan" class="pv-meta-item pv-lan-link hidden" target="_blank" rel="noopener" title="新窗口播放">↗ 在新窗口打开</a>
+      </div>
       <div class="pv-dispatch" id="pv-dispatch" aria-label="GPU/CPU dispatch 拆分">
         <span class="pv-dispatch-algo" id="pv-dispatch-algo">—</span>
         <div class="pv-dispatch-bar" title="GPU 占比">
@@ -260,7 +263,8 @@
         <input type="file" id="file-video" accept="video/*" hidden>
         <div class="dz-inner"><div class="dz-icon" aria-hidden="true">🎬</div><p>点击选择 / 拖入视频文件</p><p class="hint">MP4 / MOV / MKV / WEBM</p></div>
       </div>
-      <div class="url-row"><input id="video-url" type="text" placeholder="或视频 URL(http/https/rtsp)"><button id="video-url-go" class="pv-btn primary">识别</button></div>
+      <div class="url-row"><input id="video-url" type="text" placeholder="或视频 URL(http/https/m3u8)"><button id="video-url-go" class="pv-btn primary">导入并识别</button></div>
+      <p class="hint">处理完成后返回 S3 局域网链接,浏览器可直链播放。</p>
     </div>
     <div class="new-pane hidden" id="pane-stream">
       <div class="url-row"><input id="stream-url" type="text" placeholder="rtsp:// 或 http(s):// 流地址"><button id="stream-go" class="pv-btn primary">开始</button></div>
@@ -343,7 +347,11 @@
       <h3>最近 24 小时任务数(每小时)</h3>
       <div id="dash-timeline" role="img" aria-label="最近 24 小时时间线"></div>
     </div>
-    <p class="hint" id="dash-meta">数据源:内存中的 /api/jobs</p>
+    <div class="dash-section" id="dash-telemetry-section" hidden>
+      <h3>用户行为埋点 <span class="dash-section-meta" id="dash-telemetry-meta">最近 24h</span></h3>
+      <div id="dash-telemetry" class="dash-bars" role="region" aria-label="埋点事件计数"></div>
+    </div>
+    <p class="hint" id="dash-meta">数据源:内存中的 /api/jobs + 服务端 /api/telemetry/summary</p>
   </div>
 </div>
 
@@ -429,10 +437,14 @@
 <!-- 移动端侧栏抽屉遮罩 -->
 <div class="drawer-backdrop hidden" id="drawer-backdrop" aria-hidden="true"></div>
 
-<!-- 拆分模块(顺序敏感:依赖 utils/state 的模块必须在 app.js 前定义) -->
-<script src="/toast.js"></script>
-<script src="/modal.js"></script>
-<script src="/dashboard.js"></script>
-<script src="/visibility.js"></script>
-<script src="/app.js"></script>
+<!-- 拆分模块(顺序敏感:依赖 utils/state 的模块必须在 app.js 前定义)
+     全部 defer:解析期间并行下载,DOMContentLoaded 前执行,避免阻塞首屏渲染。
+     顺序由 defer 队列保持(浏览器按出现顺序执行)。-->
+<script defer src="/toast.js"></script>
+<script defer src="/modal.js"></script>
+<script defer src="/dashboard.js"></script>
+<script defer src="/visibility.js"></script>
+<script defer src="/compare.js"></script>
+<script defer src="/telemetry.js"></script>
+<script defer src="/app.js"></script>
 </body></html>

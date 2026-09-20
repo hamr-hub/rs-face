@@ -45,10 +45,11 @@ rsface-demo/
 data
 __pycache__/
 
-# ---- External skill (unrelated to rs-face) ----
-# noah-lever-drama-trans-download is a separate short-video download
-# tool, kept in the worktree but not part of the rs-face project.
-noah-lever-drama-trans-download/
+# ---- External skills (unrelated to rs-face) ----
+# Skills installed via skillhub live under .claude/skills/ (e.g.
+# kwai-lever-drama-transport-download, pulled from domain
+# 929d85b1-8c16-40af-b837-086589417f5e). The `.claude/` entry above already
+# covers them; this block is documentation only.
 
 # ---- Platform test fixtures: large binaries only ----
 # Small reference images (lena/two-people/biden jpgs) are checked in;
@@ -56,11 +57,14 @@ noah-lever-drama-trans-download/
 platform/testdata/*.mp4
 platform/testdata/hls-loop/
 
-# ---- node_modules ----
-# The web/app.js uses no npm deps at runtime — the platform/web folder
-# never runs `npm install`. node_modules/ here is leftover from a one-off
-# docs build and is intentionally not tracked.
+# ---- node_modules / vite build output ----
+# `pnpm install` populates node_modules/ for the dev-only Vite proxy
+# (package.json + vite.config.js at the repo root, root: platform/web).
+# Production ships platform/web/ directly inside the rsface-server image —
+# this is purely for `make web-dev` hot-reload iteration.
 node_modules/
+web-dist/
+.vite/
 
 # ---- Local model weights (fetch via tools/fetch_models.sh) ----
 models/
@@ -70,3 +74,17 @@ models/
 ._.DS_Store
 **/._.DS_Store
 .DS_Store
+
+# ---- Personal task tracking (not part of the project) ----
+TASK_PLAN.md
+*_plan.md
+
+# ---- Personal / one-off scratch tooling (NOT project code) ----
+# Personal jsdom + screenshot scripts hardcoded to local nvm / playwright
+# caches. Local validation scripts only — they reference absolute paths
+# (`/mnt/ssd/cache/...`, `/home/hyx/.cache/...`) and never run on CI.
+platform/scripts/web-accept.cjs
+platform/scripts/web-shots.cjs
+# Intermediate screenshot / DOM artifact from the above tools
+platform/web/.__light.html
+/tmp/rsface-shots/

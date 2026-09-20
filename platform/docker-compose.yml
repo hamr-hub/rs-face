@@ -10,6 +10,14 @@ services:
   rustfs:
     image: rustfs/rustfs:latest
     container_name: rsface-rustfs
+    # 以 hyx (UID:GID = 1000:1000) 运行,这样 bind mount 到 ../data/rustfs/
+    # 创建的对象在宿主侧也是 hyx:hyx,无需 root 写。镜像默认以 root 运行
+    # 会让 data/rustfs/ 出现 root-owned 目录,后续 hyx 跑 `rm` / `du` 都会
+    # 触发 Permission denied。
+    # 注意:已有的 root-owned data/rustfs/ 内容需要先
+    #   sudo chown -R 1000:1000 data/rustfs
+    # 否则容器启动后会拒读旧对象。
+    user: "1000:1000"
     environment:
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rsface}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rsface-secret}
@@ -18,7 +26,8 @@ services:
       - "19000:9000"
       - "19001:9001"
     volumes:
-      - rustfs-data:/data
+      # bind mount 到 data/rustfs/ (项目内,跟随代码可见)。
+      - ../data/rustfs:/data
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
       interval: 5s
@@ -37,7 +46,9 @@ services:
     ports:
       - "15432:5432"
     volumes:
-      - pg-data:/var/lib/postgresql/data
+      # bind mount 到 data/pg/pgdata/ (项目内,跟随代码可见)。
+      # 首次启动为空目录 → postgres 自动 initdb;dump 还原走 `make docker-restore-pg`
+      - ../data/pg/pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rsface -d rsface"]
       interval: 5s
@@ -86,10 +97,11 @@ services:
       # 跨域前端(留空 = 同源部署,不开 CORS)
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-}
     volumes:
-      - rsface-media:/var/rsface-media
+      # bind mount 到 data/media/ (项目内,跟随代码可见)。
+      - ../data/media:/var/rsface-media
     healthcheck:
-      # host 网络模式下容器内 curl 打自己端口。
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:20080/api/health || exit 1"]
+      # host 网络模式下容器内 wget 打自己端口(alpine 镜像没装 curl)。
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:20080/api/health >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -103,7 +115,10 @@ services:
     stop_grace_period: ${SERVER_STOP_GRACE:-2m30s}
     restart: unless-stopped
 
-volumes:
-  rustfs-data:
-  pg-data:
-  rsface-media:
+# 注意:本 compose 全部使用 bind mount,无 docker named volume。
+# 数据目录(都在项目根 data/ 下,跟随代码可见,便于备份):
+#   data/rustfs/    - rustfs S3 对象存储
+#   data/pg/pgdata/ - postgres 数据库 (首次启动会 initdb)
+#   data/media/     - 上传媒体 + 检测结果
+# 数据恢复:把 rsface_dump.sqlc 放到 data/pg/ 后,执行:
+#   docker exec -i rsface-postgres pg_restore -U rsface -d rsface --no-owner --role=rsface < data/pg/rsface_dump.sqlc

@@ -52,6 +52,7 @@
 //! - [`lbph`]                : uniform Local Binary Patterns histograms + chi-square distance.
 //! - [`lbph_store`]          : zero-dep binary gallery persistence (save/load across restarts, no crops needed).
 //! - [`subspace_store`]      : trained-model persistence for eigenfaces/fisherfaces (mean, axes, projections).
+//! - [`video_id`]            : video-level identification — IoU tracker + single-linkage clusterer + cross-video re-id. Plugs any (detector, recogniser) pair via the [`video_id::Identify`] trait; example wires the zero-dep haar + LBPH path.
 //!
 //! ### Recognition (ONNX, opt-in)
 //! - [`arcface`]             : ArcFace R50 / MobileFaceNet pre/post-processing (alignment, L2-norm).
@@ -221,6 +222,7 @@ pub mod scrfd;
 pub mod scrfd_detector;
 pub mod source;
 pub mod subspace_store;
+pub mod video_id;
 
 pub use detector::{Detection, Detector};
 pub use face_detector::{FaceDetector, HaarDetector};

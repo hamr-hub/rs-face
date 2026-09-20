@@ -32,6 +32,7 @@ Recognition (zero-dep, no external weights):
 - [`docs/recognition-eigenface.md`](recognition-eigenface.md) — PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`, strict per-probe LOO retraining; 58/68 = the measured PCA ceiling.
 - [`docs/recognition-fisherface.md`](recognition-fisherface.md) — Fisherfaces/LDA (Belhumeur 1997): n−C PCA reduction then ≤ C−1 class-discriminant axes, pseudo-inverse whitening; 59/68 rank-1 and the best zero-dep pair EER (≈ 12.8 %).
 - [`docs/gallery-persistence.md`](gallery-persistence.md) — zero-dep binary persistence: the LBPH gallery (`RSLB` v2, bit-exact f32 descriptors) and trained eigenfaces/Fisherfaces models (`RSEF`/`RSLD` v1); full decode validation, atomic save; survive restarts without the original crops.
+- [`docs/recognition-video.md`](recognition-video.md) — **video-level identification** across one or many videos: tracker + single-linkage clusterer + cross-video re-id (`src/video_id.rs`, `examples/identify_short_drama.rs`).
 
 Detection (zero-dep):
 
@@ -86,7 +87,6 @@ web UI for comparing the six detectors side by side.
 - [`platform/MINIMUM_CONFIG.md`](../platform/MINIMUM_CONFIG.md) — smallest viable box.
 - [`platform/DOCKER_SIZING.md`](../platform/DOCKER_SIZING.md) — sizing for the bundled compose stack.
 - [`platform/PROFILE.md`](../platform/PROFILE.md) — performance profile from real load tests.
-- [`platform/CHANGELOG_CNN.md`](../platform/CHANGELOG_CNN.md) — CNN-related platform changes.
 
 ---
 

@@ -94,6 +94,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Fisherfaces); cross-feeding an `RSEF` blob to the Fisherfaces decoder (or any
   other permutation) fails with `BadMagic`.
 
+### Added — project governance (enforced, not just documented)
+- **`.github/workflows/ci.yml` strengthened**: the existing CI covered
+  build/test/zero-dep but had no `fmt`/`clippy` gate and never built the
+  platform crate. Now both crates run fmt + clippy `-D warnings`; the core
+  job keeps the zero-dep build/test, full build, and synthetic smoke test;
+  a new platform job builds + tests `platform/` (ubuntu + macOS matrix kept).
+- **Local gates under `tools/`** installed via `bash tools/install-hooks.sh`:
+  `pre-push.sh` runs the same checks as CI on both crates; `commit-msg.sh`
+  enforces `<type>(<scope>): <summary>`.
+- **`GOVERNANCE.md`** — single source of truth for branches, the gate,
+  commit rules, zero-dep/structure hard rules, accuracy-evidence
+  requirements, and a scope-of-authority table: **bots/agents push branches
+  and open PRs, they do not push to `main`**; only the owner merges.
+- PR + issue templates under `.github/`.
+- One-shot `style: cargo fmt` baseline commit so the new fmt gate starts green.
+
+### Fixed
+- **S3 SigV4 signature mismatch** (`platform/server/src/s3.rs`): the signed
+  canonical headers included `host` and every `extra_headers` entry
+  (content-type, range), but the actual ureq request did not send an explicit
+  `Host` and skipped non-content-type extras — the server then rejected
+  requests with `SignatureDoesNotMatch`. The request now sends `Host`
+  (non-default port included) and all signed extra headers, so the sent
+  headers always match what was signed. Added a `host_of` regression test.
+- **SSRF allowlist bypass via full-form IPv6 link-local**
+  (`platform/server/src/api.rs`, `is_blocked_host`): the link-local check was
+  a `strip_prefix("fe") + len == 1` string hack that only matched the
+  compressed spelling `fe8::1` and let `[fe80::1]` / `febf::…` through.
+  Replaced with a proper fe80::/10 test on the first hextet's top 10 bits;
+  added cases for fe80..febf full forms and negative cases (fc00::/7,
+  global IPv6).
+
+### Housekeeping — repo audit + directory standards
+- **Removed orphan planning docs**: `TASK_PLAN.md` (root) and
+  `core/MULTI_ALGO.md` (along with the empty `core/` directory). Both were
+  internal Chinese working documents from earlier fix passes; their content
+  is superseded by `docs/algorithms.md`, `docs/architecture.md`, and the
+  commit history. Repository convention now explicit: working planning
+  docs do not belong at the repo root or under `core/`.
+- **Wired up the dormant `platform/web/compare.js`**: the "algorithm
+  compare mode" frontend module (289 lines) was complete but never loaded.
+  Added `<script defer src="/compare.js">` to `platform/web/index.html`
+  (between `visibility.js` and `telemetry.js`); updated the file's header
+  comment to reflect the actual loading contract. The matching backend
+  endpoint `POST /api/jobs/{id}/compare` is already in production.
+- **Moved frontend dev tooling back to the repo root** to fix an
+  inconsistency in commit 8add57a (`chore(structure): move vite/pnpm
+  tooling to platform/web-dev/`): the commit's commit-message claimed the
+  five files moved to `platform/web-dev/`, but the actual `git ls-tree -r`
+  shows them at the repo root. The `Makefile web-*` targets introduced in
+  8add57a called `cd platform/web-dev && pnpm <cmd>` against a directory
+  that did not exist, breaking `pnpm install` / `pnpm dev` /
+  `web-build`. The fix: keep the dev files at the root (where they
+  always were), drop the `WEB_DEV_DIR` Makefile variable, call `pnpm`
+  directly. `vite.config.js` paths updated: `root: '../web'` →
+  `root: 'platform/web'`, `outDir: '../../web-dist'` →
+  `outDir: 'web-dist'`.
+- **`CONTRIBUTING.md § Project layout`**: full directory tree + per-file
+  responsibilities + 7 conventions ("top-level dirs are sparse by design",
+  "no planning docs at the root", "`src/bin/` is for `[[bin]]` targets",
+  "`platform/web/` is zero-build", "`platform/testdata/` is split", etc.).
+  Previously the section was a one-liner pointing at the README.
+- **`README.md § Project layout`**: rewritten to show the full tree
+  (with platform/ sub-tree, tests/, benches/, examples/, docs/, tools/,
+  data/) and point at `CONTRIBUTING.md` for the canonical version.
+
+### Fixed — platform deploy permissions
+- **`platform/docker-compose.yml` — rustfs 容器锁定 UID:GID = 1000:1000**:
+  rustfs 镜像默认以 root 运行,绑定 `../data/rustfs` 后容器创建的对象
+  在宿主侧是 `root:root`,hyx 用户后续 `rm` / `du` / `rsync` 等操作会
+  Permission denied。锁定 `user: "1000:1000"` 后内外一致。迁移期
+  已有 root-owned 的 `data/rustfs/` 内容需要 `sudo chown -R 1000:1000`
+  才能被新容器读到(详见 compose 注释 + DOCKER.md troubleshooting)。
+
+### Housekeeping — structure audit + frontend package simplification
+- **Removed `platform/CHANGELOG_CNN.md` and `platform/CHANGELOG_PERF.md`**
+  — STRUCTURE.md §2.3 forbids `CHANGELOG_*.md` under `platform/`. Release
+  history lives in the root `CHANGELOG.md`. The `docs/INDEX.md` entry that
+  pointed at `platform/CHANGELOG_CNN.md` is removed.
+- **Removed `platform/web/CHANGELOG_DOUBAO.md`,
+  `CHANGELOG_ENHANCE.md`, `CHANGELOG_FIXES.md`** — same rule applies
+  under `platform/web/`.
+- **Frontend package management simplified**: dropped
+  `pnpm-workspace.yaml` (placeholder content, no actual workspace
+  defined) and `.npmrc` (broken `onlyBuiltDependencies[]=` syntax).
+  Frontend dev workflow is now `pnpm install && pnpm dev` with a single
+  `package.json` declaring one `devDependency` (`vite`).
+- **Fixed `vite.config.js` comments** that referenced `make docker-up` /
+  `make web-dev` — STRUCTURE.md §2.8 forbids a Makefile; the comments
+  now point at the canonical `docker compose` / `pnpm dev` commands.
+- **Documented `src/weights/`** in `STRUCTURE.md` §1.1 lookup table as
+  the home for bundled zero-dep binary weights (`include_bytes!`-loaded).
+- **Cleaned up generated / cached files**: removed `.meta.yaml` and
+  `cascade.rfcf` from the working tree (both `.gitignore`d; re-generated
+  on demand by their respective tools).
+
+### Documentation — Docker is the canonical deployment story
+- **`CLAUDE.md` at the repo root codifies the rule**: platform services
+  (rustfs + postgres + rsface-server) are deployed / started / integration-tested
+  **only** via Docker; algorithm-core `cargo test` / `clippy` / `bench` keep their
+  native-cargo fast-iter path (CI remains cargo, ubuntu + macOS matrix).
+- **New authoritative ops guide `platform/DOCKER.md`** covers deploy / start /
+  verify / e2e-test / PG backup & restore / data migration from old named
+  volumes / troubleshooting / cleanup. `platform/README.md` slimmed down to an
+  entry-point that links to it.
+- **`README.md` gains a "Run as a service (Docker)" section** in the 5-minute
+  walkthrough, plus the canonical `docker compose -f platform/docker-compose.yml up -d --build` one-liner.
+- **`CONTRIBUTING.md` gains two new sections**: "Working with the platform
+  services (Docker)" (the only allowed way to run `rsface-server`) and
+  "Frontend development (pnpm dev + hot reload)" (Vite dev server with proxy
+  to the Docker backend).
+- **`Makefile` gains 7 docker-* targets and 3 web-* targets** as thin wrappers
+  around `docker compose -f platform/docker-compose.yml` and `pnpm`:
+  `docker-up / docker-down / docker-ps / docker-logs / docker-test /
+  docker-restore-pg / docker-clean` and `web-install / web-dev / web-build`.
+  *(Subsequently removed in 2026-09; commands are now documented inline.)*
+- **`platform/scripts/docker-smoke.sh`** is the new e2e smoke body —
+  `/api/health` → rustfs health → postgres `pg_isready` + jobs count → optional
+  image upload.
+- **`platform/docker-compose.yml` broken reference fixed**: the inline comment
+  pointing at a non-existent `./migrate-pg.sh` now correctly directs users to
+  `docker exec -i rsface-postgres pg_restore ...`.
+- **`data/` bind mounts confirmed as the canonical data path**:
+  `data/{rustfs,pg/pgdata,media}/` next to the repo, visible + rsync-friendly.
+  The old docker named volumes `platform_rsface-media / platform_pg-data /
+  platform_rustfs-data` (introduced in v0.1) are retired; the migration recipe
+  lives in `platform/DOCKER.md`.
 ### Added — zero-dependency LBPH gallery persistence
 - **LBPH galleries now survive restarts without the original crops**
   (`src/lbph_store.rs`, new module): `LbphRecognizer::to_bytes` /
@@ -151,6 +278,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   report. `tools/lbph_prep.sh` gains it as stage 5.
 - `recognise_fisherface` example (`cargo run --example recognise_fisherface`):
   train-once gallery + identify / rank / verify on synthetic crops, no downloads.
+
 
 ### Added — larger real-face evaluation gallery
 - **Eval gallery expanded from 35 crops / 8 identities to 77 crops / 21

@@ -320,7 +320,10 @@ fn main() {
             }
         }
     };
-    let known: &[&str] = &["haar", "cnn", "luminance"];
+    // yunet / mtcnn / hog were placeholder detectors and have been removed;
+    // scrfd / arcface names stay recognised so users get a precise fallback
+    // message pointing at the ONNX feature-gated example rather than a typo hint.
+    let known: &[&str] = &["haar", "cnn", "luminance", "scrfd", "arcface"];
     if !known.contains(&algo_name.as_str()) {
         let suggestion = did_you_mean(&algo_name, known);
         match suggestion {
@@ -477,6 +480,14 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        "scrfd" | "arcface" => {
+            eprintln!(
+                "--algo {} needs an ONNX feature (ort-backend / tract-backend); \
+                 see examples/detect_scrfd_arcface.rs for the supported entry point",
+                algo_name
+            );
+            std::process::exit(2);
         }
         other => {
             eprintln!("unknown --algo: {} (use haar|cnn|luminance)", other);

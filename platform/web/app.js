@@ -11,7 +11,17 @@
 'use strict';
 
 const api = {
-  listJobs:    () => fetch('/api/jobs').then(r => r.ok ? r.json().then(j => j.jobs || []) : Promise.reject(new Error(r.status))),
+  // 列表带 200ms 内存缓存:同一 tab 内 SSE 帧事件 + sidebar 刷新可能连发 2-3 次。
+  // 命中路径 0 次 HTTP,0 次 JSON parse。
+  listJobs() {
+    const cached = apiCache.listJobs;
+    if (cached && Date.now() - cached.at < 200) return Promise.resolve(cached.value);
+    return fetch('/api/jobs').then(r => r.ok ? r.json().then(j => {
+      const jobs = j.jobs || [];
+      apiCache.listJobs = { at: Date.now(), value: jobs };
+      return jobs;
+    }) : Promise.reject(new Error(r.status)));
+  },
   getJob:      id => fetch('/api/jobs/' + encodeURIComponent(id)).then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
   cancelJob:   id => fetch('/api/jobs/' + encodeURIComponent(id) + '/cancel', { method: 'POST' }),
   deleteJob:   id => fetch('/api/jobs/' + encodeURIComponent(id), { method: 'DELETE' }).then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
@@ -30,8 +40,35 @@ const api = {
     return fetch('/api/jobs/video', { method: 'POST', body: fd }).then(r => r.json());
   },
   postStream:  (url, algo) => fetch('/api/jobs/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, algo: algo || undefined }) }).then(r => r.json()),
+  // 导入端点 — 返回 S3 LAN URL,浏览器可直接 <video src> 播放
+  importVideo:    (file, algo) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    if (algo) fd.append('algo', algo);
+    return fetch('/api/import/video', { method: 'POST', body: fd }).then(r => r.json());
+  },
+  importVideoUrl: (url, algo) => fetch('/api/import/video-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, algo: algo || undefined }),
+  }).then(r => r.json()),
+  importUrls:     id => fetch('/api/import/' + encodeURIComponent(id) + '/urls').then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
   getConfig:   () => fetch('/api/config').then(r => r.ok ? r.json() : null).catch(() => null),
-  metrics:     () => fetch('/api/metrics').then(r => r.ok ? r.json() : null).catch(() => null),
+  metrics:     (signal) => fetch('/api/metrics', { signal }).then(r => r.ok ? r.json() : null).catch(() => null),
+  // 埋点摘要(供 dashboard 面板)
+  telemetrySummary: (windowSecs = 86400) => fetch('/api/telemetry/summary?window_secs=' + windowSecs).then(r => r.ok ? r.json() : { enabled: false, buckets: [] }).catch(() => ({ enabled: false, buckets: [] })),
+};
+
+/**
+ * 前端内存缓存层 — 镜像后端 TTL 的轻量版。
+ * 注意:不能作为唯一真相源(其它 tab / 容器会改),SSE / 主动操作后必须
+ * 调下面的 `bust()` 失效。
+ */
+const apiCache = {
+  listJobs: null, // {at, value}
+  config:   null,
+  bust(key) { if (key) this[key] = null; },
+  bustAll() { this.listJobs = null; this.config = null; },
 };
 
 const utils = (() => {
@@ -91,6 +128,7 @@ const state = {
   // KPI 拉取缓存(避免每 200ms 重画)
   _kpi: null,
   _kpiAt: 0,
+  _kpiAbort: null,
 };
 
 // 持久化 face filter & anno toggle 到 localStorage(避免刷新重置)
@@ -282,8 +320,14 @@ const kpi = (() => {
   }
 
   async function refresh() {
-    const m = await api.metrics().catch(() => null);
-    if (!m) return;
+    // AbortController 取消上一次 in-flight 请求,避免慢响应 + 2s 轮询
+    // 把请求堆在浏览器队列里。命中缓存时 /api/metrics ~0ms,但页面里
+    // 多个 fetch 并发不会让旧结果覆盖新结果。
+    if (state._kpiAbort) { try { state._kpiAbort.abort(); } catch {} }
+    state._kpiAbort = new AbortController();
+    const signal = state._kpiAbort.signal;
+    const m = await api.metrics(signal).catch(() => null);
+    if (!m || signal.aborted) return;
     state._kpi = m;
     state._kpiAt = Date.now();
 
@@ -379,7 +423,7 @@ const sidebar = (() => {
       state.search = (search.value || '').trim();
       utils.$('#tb-search-clear').classList.toggle('hidden', !state.search);
       render();
-    }, 120);
+    }, 80);
     search.addEventListener('input', onSearch);
     utils.$('#tb-search-clear').addEventListener('click', () => {
       search.value = ''; state.search = '';
@@ -505,7 +549,7 @@ const sidebar = (() => {
       if (!vp.querySelector('.sb-empty')) {
         const e = document.createElement('div');
         e.className = 'sb-empty';
-        e.innerHTML = '<div class="sb-empty-mark">◐</div><div>暂无任务</div><div style="margin-top:8px">点 + 新建开始识别</div>';
+        e.innerHTML = '<div class="sb-empty-mark">🗂️</div><div>暂无任务</div><div style="margin-top:8px">点 + 新建开始识别</div>';
         vp.appendChild(e);
       }
     } else { const e = vp.querySelector('.sb-empty'); if (e) e.remove(); }
@@ -753,6 +797,7 @@ const preview = (() => {
     state.currentJobId = null; state.currentJob = null;
     lastFrameIdx = -1; _lastAnnoFrameIdx = -1;
     sse.detach(); showEmpty(); resetMedia(); sidebar.setActive(null);
+    setLanUrl(null); // 清掉 LAN URL 按钮,避免脏状态
     if (typeof hashRouter !== 'undefined') hashRouter.clear();
   }
 
@@ -841,6 +886,9 @@ const preview = (() => {
     else if (job.kind === 'video') renderVideo(job);
     else renderStream(job);
     renderProgress(job); renderBreakdown(job); renderFaceGrid(job);
+    // 已经存在的任务(刷新 / 切换 / 直链):如果 original_key 已经落 S3,直接显示 LAN URL。
+    if (job.original_key) setLanUrl(utils.mediaUrl(job.original_key));
+    else setLanUrl(null);
   }
 
   /**
@@ -1325,7 +1373,11 @@ const preview = (() => {
       return;
     }
     const useClusters = state.faceSort === 'time';
-    grid.innerHTML = '';
+    // DocumentFragment 批插入:避免 N 次 layout reflow。
+    // 100 张脸卡的场景下,逐 appendChild 触发 ~100 次 style recalc;
+    // 用 fragment 只触发 1 次。
+    const frag = document.createDocumentFragment();
+    const cards = [];
     if (useClusters) {
       for (const cl of clusters) {
         const rep = cl.rep;
@@ -1333,7 +1385,7 @@ const preview = (() => {
         card.addEventListener('click', () => seekToFrame(rep.frame));
         // 双击打开 lightbox(单双击共存:单击跳视频,双击看大图)
         card.addEventListener('dblclick', () => lightbox.open(rep.frame));
-        grid.appendChild(card);
+        frag.appendChild(card); cards.push(card);
       }
     } else {
       // 按其他排序时不聚类(否则代表帧错位),逐条渲染
@@ -1341,10 +1393,17 @@ const preview = (() => {
         const card = makeFaceCard(f, 1);
         card.addEventListener('click', () => seekToFrame(f.frame));
         card.addEventListener('dblclick', () => lightbox.open(f.frame));
-        grid.appendChild(card);
+        frag.appendChild(card); cards.push(card);
       }
     }
-    grid.querySelectorAll('img[data-src]').forEach(img => state.faceCardObserver.observe(img));
+    grid.replaceChildren(frag); // 单次 reflow
+    // IntersectionObserver 一次性 observe,不要再走 querySelectorAll
+    if (state.faceCardObserver) {
+      for (const c of cards) {
+        const img = c.querySelector('img[data-src]');
+        if (img) state.faceCardObserver.observe(img);
+      }
+    }
   }
 
   function makeFaceCard(rep, members) {
@@ -1427,7 +1486,29 @@ const preview = (() => {
     if (state.currentJob) render(state.currentJob);
   }
 
-  return { open, close, render, toggleAnno, showEmpty, showDetail, initSharedControls, initDivider, initFaceFilters, updatePerfMetrics, renderDispatch };
+  /**
+   * 更新 preview 的 LAN URL 状态。用于视频 URL 导入后等 run_job 落 S3 的过程:
+   * upload.submitVideoUrl → pollLanUrl() → 命中时调本函数。
+   * LAN URL 是 `/media/<encoded key>` 形式,浏览器在同网段访问 20080 即可播放。
+   */
+  function setLanUrl(url) {
+    state.currentLanUrl = url || null;
+    const btn = utils.$('#pv-copy-lan');
+    const link = utils.$('#pv-open-lan');
+    if (url) {
+      if (btn) btn.classList.remove('hidden');
+      if (link) {
+        link.href = url;
+        link.classList.remove('hidden');
+      }
+      if (window.__track) window.__track('lan_url_ready', { kind: 'video' });
+    } else {
+      if (btn) btn.classList.add('hidden');
+      if (link) link.classList.add('hidden');
+    }
+  }
+
+  return { open, close, render, toggleAnno, showEmpty, showDetail, setLanUrl, initSharedControls, initDivider, initFaceFilters, updatePerfMetrics, renderDispatch };
 })();
 
 const upload = (() => {
@@ -1445,7 +1526,7 @@ const upload = (() => {
     utils.$('#video-url-go').addEventListener('click', () => {
       const url = utils.$('#video-url').value.trim();
       if (!url) return toast.warn('请输入视频 URL');
-      submitStream(url); closeAllModals();
+      submitVideoUrl(url); closeAllModals();
     });
     utils.$('#video-url').addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); utils.$('#video-url-go').click(); }
@@ -1457,6 +1538,22 @@ const upload = (() => {
     });
     utils.$('#stream-url').addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); utils.$('#stream-go').click(); }
+    });
+    // 复制 LAN URL 按钮(预览面板)
+    utils.$('#pv-copy-lan').addEventListener('click', async () => {
+      const url = state.currentLanUrl;
+      if (!url) return;
+      try {
+        await navigator.clipboard.writeText(url);
+        toast.success('已复制 LAN 链接');
+      } catch {
+        // 退化:用临时 textarea
+        const ta = document.createElement('textarea');
+        ta.value = url; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); toast.success('已复制 LAN 链接'); }
+        catch { toast.error('复制失败,请手动复制'); }
+        document.body.removeChild(ta);
+      }
     });
     utils.$('#tb-search-opts').addEventListener('click', () => {
       utils.$('#modal-search-opts').classList.remove('hidden');
@@ -1618,35 +1715,112 @@ const upload = (() => {
   async function submitImage(file) {
     try {
       toast.info(`上传 ${file.name}…`);
+      const t0 = Date.now();
       const data = await api.postImage(file, getAlgoChoice());
-      if (data.error) return toast.error('上传失败: ' + data.error);
+      if (data.error) {
+        if (window.__track) window.__track('upload_failed', { kind: 'image', size_kb: Math.round(file.size / 1024) });
+        return toast.error('上传失败: ' + data.error);
+      }
+      if (window.__track) window.__track('upload_submitted', {
+        kind: 'image', size_kb: Math.round(file.size / 1024), algo: getAlgoChoice() || null,
+        round_trip_ms: Date.now() - t0,
+      });
       toast.success('已提交 #' + (data.job_id || '').slice(0, 8));
       try {
         const job = await api.getJob(data.job_id);
         sidebar.upsertJob(job); preview.open(job.id);
       } catch {}
-    } catch (e) { toast.error('上传失败: ' + e.message); }
+    } catch (e) {
+      if (window.__track) window.__track('upload_exception', { kind: 'image', message: String(e.message || e).slice(0, 128) });
+      toast.error('上传失败: ' + e.message);
+    }
   }
   async function submitVideo(file) {
     try {
       toast.info(`上传 ${file.name}…`);
-      const data = await api.postVideo(file, getAlgoChoice());
-      if (data.error) return toast.error('上传失败: ' + data.error);
+      const t0 = Date.now();
+      // 用 /api/import/video(语义清晰,响应里带 LAN URL)。
+      const data = await api.importVideo(file, getAlgoChoice());
+      if (data.error) {
+        if (window.__track) window.__track('upload_failed', { kind: 'video', size_kb: Math.round(file.size / 1024) });
+        return toast.error('上传失败: ' + data.error);
+      }
+      if (window.__track) window.__track('upload_submitted', {
+        kind: 'video', size_kb: Math.round(file.size / 1024), algo: getAlgoChoice() || null,
+        round_trip_ms: Date.now() - t0,
+      });
+      apiCache.bustAll(); // 新任务出现,失效列表缓存
       toast.success('已提交 #' + (data.job_id || '').slice(0, 8));
       const job = await api.getJob(data.job_id);
       sidebar.upsertJob(job); preview.open(job.id);
-    } catch (e) { toast.error('上传失败: ' + e.message); }
+    } catch (e) {
+      if (window.__track) window.__track('upload_exception', { kind: 'video', message: String(e.message || e).slice(0, 128) });
+      toast.error('上传失败: ' + e.message);
+    }
+  }
+  /** 视频 URL 导入:服务端 ffmpeg 拉取 + 一次性 Video job,处理完返回 S3 LAN URL。 */
+  async function submitVideoUrl(url) {
+    try {
+      const t0 = Date.now();
+      toast.info(`正在拉取 ${url.slice(0, 60)}…`);
+      const data = await api.importVideoUrl(url, getAlgoChoice());
+      if (data.error) {
+        if (window.__track) window.__track('upload_failed', { kind: 'video_url' });
+        return toast.error('导入失败: ' + data.error);
+      }
+      if (window.__track) window.__track('upload_submitted', {
+        kind: 'video_url', algo: getAlgoChoice() || null,
+        round_trip_ms: Date.now() - t0, fetched_bytes: data.fetched_bytes || 0,
+      });
+      apiCache.bustAll();
+      toast.success('已拉取,开始识别 #' + (data.job_id || '').slice(0, 8));
+      const job = await api.getJob(data.job_id);
+      sidebar.upsertJob(job); preview.open(job.id);
+      // 在 preview 打开后,定时轮询 /api/import/{id}/urls 直到 original_url 非空,
+      // 这样可以拿到 S3 LAN URL 然后显示"复制/打开"按钮。
+      pollLanUrl(data.job_id);
+    } catch (e) {
+      if (window.__track) window.__track('upload_exception', { kind: 'video_url', message: String(e.message || e).slice(0, 128) });
+      toast.error('导入失败: ' + e.message);
+    }
+  }
+  /** 轮询 LAN URL 端点(轻量,只查内存);拿到后更新 preview。 */
+  function pollLanUrl(jobId) {
+    let tries = 0;
+    const max = 60; // 60s 内
+    const t = setInterval(async () => {
+      tries++;
+      if (tries > max) { clearInterval(t); return; }
+      try {
+        const u = await api.importUrls(jobId);
+        if (u && u.original_url) {
+          preview.setLanUrl(u.original_url);
+          if (u.is_terminal) clearInterval(t);
+        }
+      } catch {}
+    }, 1000);
   }
   async function submitStream(url) {
     try {
       const data = await api.postStream(url, getAlgoChoice());
-      if (data.error) return toast.error('启动失败: ' + data.error);
+      if (data.error) {
+        if (window.__track) window.__track('upload_failed', { kind: 'stream' });
+        return toast.error('启动失败: ' + data.error);
+      }
+      if (window.__track) window.__track('upload_submitted', { kind: 'stream', algo: getAlgoChoice() || null });
+      apiCache.bustAll();
       toast.success('已启动流 #' + (data.job_id || '').slice(0, 8));
       const job = await api.getJob(data.job_id);
       sidebar.upsertJob(job); preview.open(job.id);
-    } catch (e) { toast.error('启动失败: ' + e.message); }
+    } catch (e) {
+      if (window.__track) window.__track('upload_exception', { kind: 'stream', message: String(e.message || e).slice(0, 128) });
+      toast.error('启动失败: ' + e.message);
+    }
   }
-  return { init, openModal, openSettings, submitImage: f => submitImage(f), submitStream: u => submitStream(u) };
+  return { init, openModal, openSettings,
+           submitImage: f => submitImage(f),
+           submitVideoUrl: u => submitVideoUrl(u),
+           submitStream: u => submitStream(u) };
 })();
 
 const sse = (() => {

@@ -1,0 +1,48 @@
+name: Bug report
+description: Something in rs-face does not behave as documented
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The actual behavior, and what you expected instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Output of `git rev-parse --short HEAD` or the release tag.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Exact command + full stderr (RUST_BACKTRACE=1 if it panicked).
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - core library / detection
+        - recognition (LBPH / eigenface / ArcFace)
+        - platform server (API / jobs / S3 / DB)
+        - web UI
+        - build / toolchain / Docker
+        - other
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight
+      options:
+        - label: This is not a "no detections" caused by min-score / cascade choice (see README known limitation)
+          required: false
+        - label: I searched existing issues
+          required: true

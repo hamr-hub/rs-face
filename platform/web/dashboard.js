@@ -79,6 +79,35 @@ const dashboard = (() => {
       `<svg viewBox="0 0 ${W} ${H + 6}" class="dash-svg" preserveAspectRatio="none">${bars}${labels}</svg>`;
   }
 
+  /** 用户行为埋点摘要(异步,无 DB 时降级)。 */
+  async function renderTelemetry() {
+    const sec = utils.$('#dash-telemetry-section');
+    const wrap = utils.$('#dash-telemetry');
+    const meta = utils.$('#dash-telemetry-meta');
+    if (!sec || !wrap) return;
+    try {
+      const r = await api.telemetrySummary(86400);
+      if (!r || !r.enabled || !Array.isArray(r.buckets) || r.buckets.length === 0) {
+        sec.hidden = true;
+        return;
+      }
+      sec.hidden = false;
+      const total = r.total || 0;
+      if (meta) meta.textContent = `最近 24h · ${total} 条`;
+      const buckets = r.buckets;
+      const max = Math.max(1, ...buckets.map(b => b.count || 0));
+      wrap.innerHTML = buckets.map(b => {
+        const pct = ((b.count || 0) / max * 100).toFixed(1);
+        return `<div class="dash-bar-row">
+          <div class="dash-bar-label" title="${utils.escapeHtml(b.name)}">${utils.escapeHtml(b.name)}</div>
+          <div class="dash-bar"><div class="dash-bar-fill" style="width:${pct}%"></div><span class="dash-bar-val">${b.count || 0}</span></div>
+        </div>`;
+      }).join('');
+    } catch {
+      sec.hidden = true;
+    }
+  }
+
   async function open() {
     utils.$('#modal-dashboard').classList.remove('hidden');
     utils.$('#dash-stats').innerHTML = '<div class="hint">加载中…</div>';
@@ -86,6 +115,8 @@ const dashboard = (() => {
       const d = await compute();
       renderStats(d); renderAlgos(d); renderTimeline(d);
       utils.$('#dash-meta').textContent = `数据源:内存中的 /api/jobs · 任务总数 ${d.total} · 刷新于 ${new Date().toLocaleTimeString()}`;
+      // 埋点摘要独立加载(无 DB 也不阻塞主面板)
+      renderTelemetry();
     } catch (e) {
       utils.$('#dash-stats').innerHTML = '<div class="hint">加载失败: ' + utils.escapeHtml(e.message) + '</div>';
     }

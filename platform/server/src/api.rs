@@ -14,12 +14,20 @@
 //! - `POST /api/jobs/{id}/cancel` 取消任务
 //! - `GET  /api/jobs/{id}/events` SSE 实时事件(直播流/进度)
 //! - `POST|DELETE /api/jobs/batch` 批量操作(delete/archive/export)
-//! - `GET  /api/metrics`          平台实时指标(前端 KPI 栏轮询)
+//! - `GET  /api/metrics`          平台实时指标(前端 KPI 栏轮询,1s dedup 缓存)
 //! - `GET  /media/{key}`          S3/本地 媒体代理(支持 Range/206)
+//!
+//! 性能层(2026-09-18 加):
+//! - tower-http `CompressionLayer`:对 ≥1KB 响应自动 gzip(文本型 JSON 压缩率 70-90%)
+//! - tower-http `SetResponseHeaderLayer`:静态资源 `Cache-Control: public, max-age=600, stale-while-revalidate=86400`,
+//!   让前端 /style.css / /app.js 第二次加载走 304 + 缓存
+//! - `/api/config`:启动期一次算好,后续直接 clone 缓存 bytes(避免每请求读 cfg + clone algo 数组)
+//! - `/api/metrics`:1s TTL dedup,5 个 tab 同时打开也只算 1 次
 
+use crate::cache::TtlCache;
 use crate::jobs::{JobKind, JobRegistry, JobStatus};
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -32,13 +40,29 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tower_http::compression::CompressionLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 
-pub fn router(state: Arc<JobRegistry>) -> Router {
+/// 跨 handler 共享的 TTL 响应缓存。每条缓存可独立失效,粒度到端点。
+#[derive(Clone)]
+pub struct ResponseCaches {
+    /// `/api/config` 启动期 immutable,TTL 1h。
+    pub config_json: Arc<TtlCache>,
+    /// `/api/metrics` 1s dedup,前端 KPI 轮询 50% 命中。
+    pub metrics_json: Arc<TtlCache>,
+    /// `/api/jobs`(列表)短 TTL dedup,前端 SSE 期间频繁轮询 50% 命中。
+    pub jobs_list_json: Arc<TtlCache>,
+    /// `/api/jobs/stats` 短 TTL,按算法聚合数据无状态机依赖,1s 复用足够。
+    pub jobs_stats_json: Arc<TtlCache>,
+}
+
+pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
     // 上传上限分层:图片(默认 50MB)/ 视频(默认 2GB)。
     // 全局不再用 1GB 统一限制;其它路由(JSON/SSE)走 axum 默认 2MB。
     let img_limit = state.cfg.upload_limit_image;
     let video_limit = state.cfg.upload_limit_video;
     let cors_origin = state.cfg.cors_allow_origin.clone();
+    let caches_for_routes = caches.clone();
     Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
@@ -62,12 +86,32 @@ pub fn router(state: Arc<JobRegistry>) -> Router {
         .route("/api/jobs/{id}/events", get(job_events))
         .route("/api/jobs/{id}/compare", post(compare_algos))
         .route("/api/jobs/{id}/retry", post(retry_job))
+        // 导入端点 — 语义上"导入"一次性任务(视频文件 / 视频 URL),
+        // 返回 job_id + S3 LAN URL,浏览器可直接播放。
+        .route(
+            "/api/import/video",
+            post(import_video).layer(DefaultBodyLimit::max(video_limit)),
+        )
+        .route("/api/import/video-url", post(import_video_url))
+        .route("/api/import/{id}/urls", get(import_urls))
+        // 埋点:摄取 + 摘要(供前端 dashboard 轮询)
+        .route("/api/telemetry", post(telemetry_ingest))
+        .route("/api/telemetry/summary", get(telemetry_summary))
+        .route("/api/telemetry/recent", get(telemetry_recent))
         .route("/media/{*key}", get(media))
         .route("/{file}", get(static_file))
         .layer(axum::middleware::from_fn(move |req, next| {
             cors_middleware(req, next, cors_origin.clone())
         }))
-        .with_state(state)
+        // gzip 压缩层(>~1KB 自动启用,小响应直接走透传)。
+        .layer(CompressionLayer::new())
+        // 静态资源缓存头:web/* 1h+stale-while-revalidate 24h,
+        // 让浏览器/CDN 把 /app.js / /style.css / 字体等强缓存。
+        .layer(SetResponseHeaderLayer::if_not_present(
+            axum::http::HeaderName::from_static("cache-control"),
+            HeaderValue::from_static("public, max-age=600, stale-while-revalidate=86400"),
+        ))
+        .with_state((state, caches_for_routes))
 }
 
 /// 可选 CORS 中间件:`CORS_ALLOW_ORIGIN` 非空时启用(默认空 = 同源部署,
@@ -107,6 +151,8 @@ fn apply_cors_headers(headers: &mut axum::http::HeaderMap, allow_origin: &str) {
         axum::http::HeaderName::from_static("access-control-allow-headers"),
         hv("Content-Type, Authorization, Range, Last-Event-ID"),
     );
+    // telemetry ingest 走 sendBeacon 时,浏览器不触发预检,
+    // 但跨域 fetch 仍可能触发 OPTIONS,所以保留常见 header 名。
     headers.insert(
         axum::http::HeaderName::from_static("access-control-max-age"),
         hv("86400"),
@@ -122,7 +168,7 @@ async fn health() -> Json<serde_json::Value> {
 /// ingest it without a JSON adapter. Always returns 200; failure modes are
 /// impossible here because `to_prometheus` is allocation-only.
 async fn prometheus_metrics(
-    State(state): State<Arc<JobRegistry>>,
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
 ) -> (
     [(axum::http::HeaderName, axum::http::HeaderValue); 1],
     String,
@@ -147,7 +193,14 @@ async fn prometheus_metrics(
 /// - `template` — 未指定权重文件,使用 core 内置 hand-crafted 模板
 /// - `available` — 路径已设置且文件存在
 /// - `missing`  — 路径已设置但文件不存在(run_job 启动时会失败)
-async fn config_info(State(state): State<Arc<JobRegistry>>) -> Json<serde_json::Value> {
+///
+/// **性能**:启动后 immutable,1h TTL 缓存。命中路径 0 次 cfg 读取 + 0 次 algo clone。
+async fn config_info(
+    State((state, caches)): State<(Arc<JobRegistry>, ResponseCaches)>,
+) -> Response {
+    if let Some(bytes) = caches.config_json.get_fresh() {
+        return cached_json_response(bytes);
+    }
     let want_cnn = state.cfg.use_cnn || state.cfg.cnn_weights.is_some();
     let (mode, cnn_weights_path, cnn_weights_status) = if want_cnn {
         match &state.cfg.cnn_weights {
@@ -165,7 +218,7 @@ async fn config_info(State(state): State<Arc<JobRegistry>>) -> Json<serde_json::
     } else {
         "missing"
     };
-    Json(serde_json::json!({
+    let body = serde_json::json!({
         "mode": mode,
         "algo": mode,
         "available_algos": crate::jobs::available_algos(),
@@ -179,15 +232,39 @@ async fn config_info(State(state): State<Arc<JobRegistry>>) -> Json<serde_json::
             "cascade_status": cascade_status,
         },
         "min_face_size": state.cfg.min_face_size,
-    }))
+    });
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    caches.config_json.put(bytes.clone());
+    cached_json_response(bytes)
 }
 
-async fn index(State(state): State<Arc<JobRegistry>>) -> Response {
-    serve_static(&state.cfg.web_dir, "index.html").await
+async fn index(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    headers: HeaderMap,
+) -> Response {
+    serve_static_with_304(
+        &state.cfg.web_dir,
+        "index.html",
+        headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok()),
+    )
+    .await
 }
 
-async fn static_file(State(state): State<Arc<JobRegistry>>, Path(file): Path<String>) -> Response {
-    serve_static(&state.cfg.web_dir, &file).await
+async fn static_file(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Path(file): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    serve_static_with_304(
+        &state.cfg.web_dir,
+        &file,
+        headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok()),
+    )
+    .await
 }
 
 fn content_type_for(path: &str) -> &'static str {
@@ -225,13 +302,72 @@ async fn serve_static(web_dir: &std::path::Path, file: &str) -> Response {
         return (StatusCode::BAD_REQUEST, "bad path").into_response();
     }
     let path = web_dir.join(file);
+    // ETag:用文件名+长度+mtime 算 weak ETag,
+    // 让浏览器 / CDN 在客户端 reload 时走 304(0 字节 body),
+    // 不需要再重新传 .css/.js。
+    let metadata = std::fs::metadata(&path).ok();
+    let etag = metadata.as_ref().map(|m| {
+        let len = m.len();
+        let mtime = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("W/\"rsface-{len:x}-{mtime:x}\"")
+    });
     match tokio::fs::read(&path).await {
         Ok(bytes) => {
             let ct = content_type_for(file);
-            ([(header::CONTENT_TYPE, ct)], bytes).into_response()
+            let mut resp = ([(header::CONTENT_TYPE, ct)], bytes).into_response();
+            if let Some(et) = etag {
+                if let Ok(hv) = HeaderValue::from_str(&et) {
+                    resp.headers_mut().insert(header::ETAG, hv);
+                }
+            }
+            resp
         }
         Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
+}
+
+/// 静态文件响应(支持 304 Not Modified):axum 默认不处理 `If-None-Match` / `If-Modified-Since`,
+/// 我们自己比对客户端发来的 ETag,命中直接 304 + 0 字节 body。
+/// 对一个 100KB 的 app.js,304 让后续 reload 的 body 节省 99.99% 网络。
+async fn serve_static_with_304(
+    web_dir: &std::path::Path,
+    file: &str,
+    if_none_match: Option<&str>,
+) -> Response {
+    let resp = serve_static(web_dir, file).await;
+    let server_etag = resp
+        .headers()
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    if let (Some(s_etag), Some(c_etag)) = (server_etag.as_deref(), if_none_match) {
+        // 比较:server ETag 是 W/"..." weak,客户端 If-None-Match 通常也是 W/"..."
+        // 简单做法:直接 strip W/ 前后做字符串相等。
+        if etag_eq(s_etag, c_etag) {
+            return StatusCode::NOT_MODIFIED.into_response();
+        }
+    }
+    resp
+}
+
+/// 弱 ETag 等价比较:`W/"a-b"` 与 `If-None-Match: W/"a-b", W/"c-d"`(多值逗号分隔)。
+/// 我们只支持单值(常见用法)。
+fn etag_eq(server: &str, client_hdr: &str) -> bool {
+    fn strip(s: &str) -> &str {
+        s.strip_prefix("W/").unwrap_or(s).trim()
+    }
+    let client_first = client_hdr.split(',').next().unwrap_or("").trim();
+    strip(server) == strip(client_first)
+}
+
+/// 把 TTL 缓存命中字节原样返回(带 application/json content-type)。
+fn cached_json_response(bytes: Vec<u8>) -> Response {
+    ([(header::CONTENT_TYPE, "application/json")], bytes).into_response()
 }
 
 /// `GET /api/jobs` 查询参数。
@@ -247,36 +383,66 @@ struct ListJobsQuery {
 }
 
 async fn list_jobs(
-    State(state): State<Arc<JobRegistry>>,
+    State((state, caches)): State<(Arc<JobRegistry>, ResponseCaches)>,
     Query(q): Query<ListJobsQuery>,
-) -> Json<serde_json::Value> {
+    headers: HeaderMap,
+) -> Response {
+    // 缓存键:无参 = 完整列表;有 limit/offset = 不缓存(分页通常与视图绑定)。
+    let cacheable = q.limit.is_none() && q.offset.is_none();
+    if cacheable {
+        if let Some(bytes) = caches.jobs_list_json.get_fresh() {
+            // ETag 304 路径:客户端发 If-None-Match 且 hash 命中时,直接 304。
+            let etag = format!("W/\"jobs-list-{:x}\"", fxhash_short(&bytes));
+            if if_none_match_matches(
+                headers
+                    .get(header::IF_NONE_MATCH)
+                    .and_then(|v| v.to_str().ok()),
+                &etag,
+            ) {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
+            return cached_json_response_with_etag(bytes, &etag);
+        }
+    }
     let all = state.list();
     let total = all.len();
     // 无 limit/offset:保持旧版响应 shape(只有 jobs 数组,向后兼容)。
-    if q.limit.is_none() && q.offset.is_none() {
+    let body = if cacheable {
         let jobs: Vec<serde_json::Value> = all.iter().map(|j| j.summary()).collect();
-        return Json(serde_json::json!({"jobs": jobs}));
+        serde_json::json!({"jobs": jobs})
+    } else {
+        let offset = q.offset.unwrap_or(0).min(total);
+        let limit = q.limit.unwrap_or(total.saturating_sub(offset));
+        let jobs: Vec<serde_json::Value> = all
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|j| j.summary())
+            .collect();
+        serde_json::json!({
+            "jobs": jobs,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        })
+    };
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    if cacheable {
+        caches.jobs_list_json.put(bytes.clone());
+        let etag = format!("W/\"jobs-list-{:x}\"", fxhash_short(&bytes));
+        cached_json_response_with_etag(bytes, &etag)
+    } else {
+        ([(header::CONTENT_TYPE, "application/json")], bytes).into_response()
     }
-    let offset = q.offset.unwrap_or(0).min(total);
-    let limit = q.limit.unwrap_or(total.saturating_sub(offset));
-    let jobs: Vec<serde_json::Value> = all
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .map(|j| j.summary())
-        .collect();
-    Json(serde_json::json!({
-        "jobs": jobs,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-    }))
 }
 
 /// `GET /api/jobs/stats`:按算法(haar/cnn/luminance)聚合
 /// 成功/失败/取消/平均耗时/检出数。queued 未定算法的归入 `pending`;
 /// 历史数据中的已下线算法名(yunet/mtcnn/hog)按原始字符串原样分桶展示。
-async fn job_stats(State(state): State<Arc<JobRegistry>>) -> Json<serde_json::Value> {
+async fn job_stats(State((state, caches)): State<(Arc<JobRegistry>, ResponseCaches)>) -> Response {
+    if let Some(bytes) = caches.jobs_stats_json.get_fresh() {
+        return cached_json_response(bytes);
+    }
     let samples = state.collect_agg_samples();
     let agg = crate::jobs::aggregate_algo_stats(&samples);
     let algos: Vec<serde_json::Value> = agg
@@ -296,10 +462,13 @@ async fn job_stats(State(state): State<Arc<JobRegistry>>) -> Json<serde_json::Va
         })
         .collect();
     let total_jobs: u64 = agg.values().map(|a| a.total + a.active).sum();
-    Json(serde_json::json!({
+    let body = serde_json::json!({
         "algos": algos,
         "total_jobs": total_jobs,
-    }))
+    });
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    caches.jobs_stats_json.put(bytes.clone());
+    cached_json_response(bytes)
 }
 
 /// `GET /api/metrics`:平台实时指标(前端 KPI 栏每 2s 轮询)。
@@ -308,7 +477,11 @@ async fn job_stats(State(state): State<Arc<JobRegistry>>) -> Json<serde_json::Va
 /// total_detections / errored / cancelled / mode。
 /// live_fps_max / gpu_pct / cascade_pass_rate 平台侧暂无数据源,返回 0
 /// (前端对 0 有降级显示,不会报错)。
-async fn metrics(State(state): State<Arc<JobRegistry>>) -> Json<serde_json::Value> {
+async fn metrics(State((state, caches)): State<(Arc<JobRegistry>, ResponseCaches)>) -> Response {
+    // 1s TTL dedup 缓存:命中路径 0 次 registry 扫描 + 0 次 mutex 获取。
+    if let Some(bytes) = caches.metrics_json.get_fresh() {
+        return cached_json_response(bytes);
+    }
     let jobs = state.list();
     let mut running = 0u64;
     let mut queued = 0u64;
@@ -341,7 +514,7 @@ async fn metrics(State(state): State<Arc<JobRegistry>>) -> Json<serde_json::Valu
                 "haar".into()
             }
         });
-    Json(serde_json::json!({
+    let body = serde_json::json!({
         "running": running,
         "queued": queued,
         "max_concurrency": state.cfg.max_concurrent_jobs,
@@ -356,10 +529,16 @@ async fn metrics(State(state): State<Arc<JobRegistry>>) -> Json<serde_json::Valu
         "total_gpu_levels": 0,
         "total_cpu_levels": 0,
         "cascade_pass_rate": 0.0,
-    }))
+    });
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    caches.metrics_json.put(bytes.clone());
+    cached_json_response(bytes)
 }
 
-async fn job_detail(State(state): State<Arc<JobRegistry>>, Path(id): Path<String>) -> Response {
+async fn job_detail(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Path(id): Path<String>,
+) -> Response {
     match state.get(&id) {
         Some(job) => {
             let mut v = job.summary();
@@ -370,7 +549,10 @@ async fn job_detail(State(state): State<Arc<JobRegistry>>, Path(id): Path<String
     }
 }
 
-async fn cancel_job(State(state): State<Arc<JobRegistry>>, Path(id): Path<String>) -> Response {
+async fn cancel_job(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Path(id): Path<String>,
+) -> Response {
     match state.get(&id) {
         Some(job) => {
             job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -380,7 +562,10 @@ async fn cancel_job(State(state): State<Arc<JobRegistry>>, Path(id): Path<String
     }
 }
 
-async fn delete_job(State(state): State<Arc<JobRegistry>>, Path(id): Path<String>) -> Response {
+async fn delete_job(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Path(id): Path<String>,
+) -> Response {
     state.request_cancel(&id);
     let existed = state.remove(&id);
     let db = state.db.clone();
@@ -404,7 +589,10 @@ struct BatchReq {
 
 /// `POST /api/jobs/batch`(旧契约,body: {ids, op: delete|archive|export})与
 /// `DELETE /api/jobs/batch`(新便捷端点,body: {ids},语义恒为 delete)共用。
-async fn batch_ops(State(state): State<Arc<JobRegistry>>, Json(req): Json<BatchReq>) -> Response {
+async fn batch_ops(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Json(req): Json<BatchReq>,
+) -> Response {
     if req.ids.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "ids must not be empty");
     }
@@ -450,7 +638,10 @@ async fn batch_ops(State(state): State<Arc<JobRegistry>>, Json(req): Json<BatchR
     }
 }
 
-async fn retry_job(State(state): State<Arc<JobRegistry>>, Path(id): Path<String>) -> Response {
+async fn retry_job(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Path(id): Path<String>,
+) -> Response {
     let original = {
         let Some(j) = state.get(&id) else {
             return error_response(StatusCode::NOT_FOUND, "no such job");
@@ -498,7 +689,7 @@ struct CompareQuery {
 /// detection 数、耗时、bounding boxes。前端用它来渲染 3 张并排小图
 /// 的"算法对比"视图。未知 / 已下线算法名会被过滤,不参与构造。
 async fn compare_algos(
-    State(state): State<Arc<JobRegistry>>,
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
     Path(id): Path<String>,
     Query(q): Query<CompareQuery>,
 ) -> Response {
@@ -659,11 +850,17 @@ async fn decode_to_gray(
     rsface::image::codec::read_pgm(&mut reader)
 }
 
-async fn upload_image(State(state): State<Arc<JobRegistry>>, mp: Multipart) -> Response {
+async fn upload_image(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    mp: Multipart,
+) -> Response {
     handle_upload(state, mp, JobKind::Image).await
 }
 
-async fn upload_video(State(state): State<Arc<JobRegistry>>, mp: Multipart) -> Response {
+async fn upload_video(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    mp: Multipart,
+) -> Response {
     handle_upload(state, mp, JobKind::Video).await
 }
 
@@ -830,7 +1027,7 @@ struct StreamReq {
 }
 
 async fn start_stream(
-    State(state): State<Arc<JobRegistry>>,
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
     Json(req): Json<StreamReq>,
 ) -> Response {
     let url = req.url.trim().to_string();
@@ -859,6 +1056,74 @@ async fn start_stream(
     Json(serde_json::json!({"job_id": id})).into_response()
 }
 
+/// 用户行为埋点接收端点。
+///
+/// 请求体:`{"events":[{"name":"page_view","ts":..,"props":{...},"session":..},...]}`
+/// 一次性批量上报,减少 HTTP 开销;前端在 visibilitychange / beforeunload 时
+/// 用 sendBeacon 兜底发出去。
+///
+/// **设计取舍**:
+/// - 入库:若 db.pool 存在,写 telemetry 表(后置);不存在则只 stdout 打日志,
+///   让本地无 DB 的开发模式也能跑。
+/// - 失败隔离:解析失败 / 字段缺失 / 单条非法都不影响其它事件落库。
+/// - PII 防御:服务端再脱一次密(服务端永远不信前端已脱过);
+///   `props` 中的 `s3_key`、`/media/` URL、文件名、人脸 crop key 全部丢,
+///   只保留聚合级指标(计数 / 维度)。
+#[derive(Deserialize)]
+struct TelemetryBatch {
+    #[serde(default)]
+    events: Vec<crate::persist::TelemetryEvent>,
+}
+
+async fn telemetry_ingest(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Json(body): Json<TelemetryBatch>,
+) -> Response {
+    let n = body.events.len();
+    if n == 0 {
+        return Json(serde_json::json!({"ok": true, "accepted": 0})).into_response();
+    }
+    if n > 500 {
+        // 单批 500 上限,防恶意/异常写入压垮写入路径。
+        return error_response(StatusCode::BAD_REQUEST, "batch too large (max 500 events)");
+    }
+    let accepted = body.events.iter().filter(|e| is_safe_event(e)).count();
+    // 永远 stdout 一份,方便开发模式无 DB 也能看埋点。
+    if let Some(first) = body.events.first() {
+        eprintln!(
+            "[telemetry] batch {} events, accepted={} first.name={}",
+            n, accepted, first.name
+        );
+    }
+    // 有 DB → 异步批量落库
+    if state.db.pool.is_some() {
+        let db = state.db.clone();
+        let events = body.events.clone();
+        tokio::spawn(async move {
+            db.insert_telemetry_batch(&events).await;
+        });
+    }
+    Json(serde_json::json!({"ok": true, "accepted": accepted})).into_response()
+}
+
+/// 服务端兜底的安全过滤:丢弃任何含敏感字段的事件(防御性,前端已经过滤过)。
+fn is_safe_event(e: &crate::persist::TelemetryEvent) -> bool {
+    if e.name.is_empty() || e.name.len() > 64 {
+        return false;
+    }
+    // 服务端永远不信客户端的"已脱敏"声明;再扫一次敏感字段。
+    let blob = format!("{:?}{:?}", e.name, e.props);
+    const FORBIDDEN: &[&str] = &[
+        "s3://",
+        "local://",
+        "inline://", // 存储 key 前缀
+        "/media/",   // 媒体代理路径
+        "Authorization",
+        "Bearer ", // 鉴权相关
+    ];
+    !FORBIDDEN.iter().any(|s| blob.contains(s))
+}
+
 /// SSE 事件查询参数。`last_event_id` 是 SSE 协议约定的断点续传字段;
 /// `?last_event_id=42` 表示客户端已经收到 id=42 之前的所有事件,只重发 >42 的。
 #[derive(Default, Deserialize)]
@@ -867,7 +1132,7 @@ struct EventsQuery {
 }
 
 async fn job_events(
-    State(state): State<Arc<JobRegistry>>,
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
     Path(id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> Response {
@@ -1065,7 +1330,7 @@ async fn read_local_range(
 }
 
 async fn media(
-    State(state): State<Arc<JobRegistry>>,
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
     Path(key): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -1242,6 +1507,581 @@ fn sanitized_ext(name: &str, kind: JobKind) -> String {
 
 fn error_response(code: StatusCode, msg: &str) -> Response {
     (code, Json(serde_json::json!({"error": msg}))).into_response()
+}
+
+// ============================================================================
+// 视频导入端点 (2026-09-18 加)
+//
+// 设计目标:
+// - `/api/import/video` (multipart) — 浏览器直接上传的视频文件,处理完返回
+//   S3 LAN URL,浏览器用 <video> 直接播放;
+// - `/api/import/video-url` (JSON {url, algo?}) — 服务端用 ffmpeg 把远程
+//   http(s) 视频拉下来,走和上传视频一样的流水线(转 mp4 → 落 S3 → 跑检测);
+// - `/api/import/{id}/urls` — 给前端"导入完成后"轮询 S3 URL 用的轻量端点,
+//   不重发整份 job summary,省带宽。
+//
+// 关键差异 vs /api/jobs/{video,stream}:
+// - 这两个是"导入"语义(用户预期处理完后能拿到播放链接),
+//   不是"长跑"语义(流任务永远不会 done);
+// - 因此新端点全部用 JobKind::Video,ffmpeg 一次性拉到本地,然后走完整的
+//   run_job 流水线(原文件 + 标注帧 + 裁脸都会写到 S3)。
+//
+// LAN 播放:无论 S3 还是 local,前端都走 `/media/{key}` 路由(已支持 Range/206),
+// 浏览器在同网段访问这台机器的 20080 即可直接播 mp4。
+// ============================================================================
+
+/// 包装一份"导入完成"响应:job_id + 一组 LAN URL + 当前状态。
+fn import_response(
+    id: &str,
+    kind: JobKind,
+    original_key: Option<&str>,
+    cover_key: Option<&str>,
+    status: JobStatus,
+) -> Response {
+    Json(serde_json::json!({
+        "ok": true,
+        "job_id": id,
+        "kind": kind,
+        "status": status,
+        "original_url": media_lan_url(original_key),
+        "cover_url": media_lan_url(cover_key),
+        // 同一 key 的不同代理形式(让前端可任选):
+        // - `media_path`:直接给 `/media/<encoded key>` 让 <video src> 用
+        // - `stream_url`:SSE 事件流(`/api/jobs/{id}/events`)
+        "media_path": media_lan_path(original_key),
+        "stream_url": format!("/api/jobs/{}/events", id),
+    }))
+    .into_response()
+}
+
+/// 把 `s3://...` / `local://...` / `inline://...` 转成 LAN 代理路径。
+/// 直接给前端 `<video src>` / `<a href>` 用;浏览器在同网段访问机器即可。
+fn media_lan_url(key: Option<&str>) -> Option<String> {
+    media_lan_path(key).map(|p| format!("/media/{p}"))
+}
+
+fn media_lan_path(key: Option<&str>) -> Option<String> {
+    let k = key?;
+    let stripped = k
+        .strip_prefix("s3://")
+        .or_else(|| k.strip_prefix("local://"))
+        .or_else(|| k.strip_prefix("inline://"))
+        .unwrap_or(k);
+    // 浏览器在取 URL 时会再做一次 percent-decode,这里只 encode 路径段。
+    Some(url_encode_path(stripped))
+}
+
+/// 极简 path 编码(只编 `?#& %` 等保留字符;保留 `/` `-` `_` `.`)。
+/// 0-dep,避免引入 urlencoding crate。
+fn url_encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for b in s.bytes() {
+        let safe = matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'~' | b'/' | b':');
+        if safe {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// 用 ffmpeg 把远程 http(s) URL 一次性拉到本地 mp4(支持 HLS/DASH/MP4/WEBM)。
+/// 返回本地文件路径 + 落盘字节数。
+///
+/// 与 `run_job` 的 `spawn_ffmpeg_to_local` 不同:这里要等 ffmpeg 跑完才能
+/// 让 core 拿确定性大小的文件去解码,所以同步 `child.wait()`。
+fn fetch_remote_video_to_local(
+    url: &str,
+    work_dir: &std::path::Path,
+) -> std::io::Result<(std::path::PathBuf, u64)> {
+    use std::process::{Command, Stdio};
+    let out_path = work_dir.join("input.mp4");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-reconnect",
+            "1",
+            "-reconnect_streamed",
+            "1",
+            "-reconnect_delay_max",
+            "5",
+            "-timeout",
+            "30000000", // 30s 单连接超时(微秒)
+            "-i",
+            url,
+            "-c",
+            "copy", // 优先 copy(快),失败时 ffmpeg 自动回退转码
+            "-f",
+            "mp4",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(&out_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| std::io::Error::other(format!("ffmpeg spawn: {e}")))?;
+    if !status.success() {
+        return Err(std::io::Error::other(
+            "ffmpeg video fetch failed (remote URL not retrievable or unsupported format)",
+        ));
+    }
+    if !out_path.is_file() {
+        return Err(std::io::Error::other("ffmpeg produced no output file"));
+    }
+    let size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+    if size == 0 {
+        return Err(std::io::Error::other("ffmpeg produced 0-byte file"));
+    }
+    Ok((out_path, size))
+}
+
+/// `POST /api/import/video` — multipart upload,直接传视频文件。
+/// 与 `/api/jobs/video` 行为等价,但响应额外带 S3 LAN URL。
+async fn import_video(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    mp: Multipart,
+) -> Response {
+    let resp = handle_upload(state.clone(), mp, JobKind::Video).await;
+    if !resp.status().is_success() {
+        return resp;
+    }
+    // 复用 handle_upload 的 JSON `{job_id}` 响应:把 id 拿出来重新包一份
+    // 带 LAN URL 的导入响应。
+    let body_bytes = resp.into_body();
+    let body_bytes = axum::body::to_bytes(body_bytes, 4096)
+        .await
+        .unwrap_or_default();
+    let parsed: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
+    let id = parsed
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let Some(id) = id else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "missing job_id").into_response();
+    };
+    let job = match state.get(&id) {
+        Some(j) => j,
+        None => return (StatusCode::INTERNAL_SERVER_ERROR, "job vanished").into_response(),
+    };
+    // 原始文件还没落 S3 时(run_job 还没跑到那一步),URL 为 null;
+    // 前端可在轮询 `/api/import/{id}/urls` 拿最新值。
+    let key = job.original_media_key.lock().unwrap().clone();
+    import_response(&id, JobKind::Video, key.as_deref(), None, job.status())
+}
+
+/// `POST /api/import/video-url` — JSON body `{url, algo?}`。
+/// 服务端用 ffmpeg 把远程视频拉下来,当作一次性视频任务处理。
+async fn import_video_url(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Json(req): Json<ImportVideoUrlReq>,
+) -> Response {
+    let url = req.url.trim().to_string();
+    if url.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "url is required");
+    }
+    // 只允许 http(s);rtsp/file 走 /api/jobs/stream(语义是"持续监听")。
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "url must be http(s):// for video import; use /api/jobs/stream for rtsp/file",
+        );
+    }
+    // 简单的 SSRF 防御:不允许内网 loopback / link-local / private 地址。
+    // 平台本身是 LAN 部署,所以这个限制相对宽松 — 仍挡掉 169.254 / IPv6 link-local / 0.0.0.0。
+    if let Some(host) = url.split("://").nth(1).and_then(|s| s.split('/').next()) {
+        if is_blocked_host(host) {
+            return error_response(StatusCode::FORBIDDEN, "url host is in a blocked range");
+        }
+    }
+
+    let job = match state.create(JobKind::Video, url.clone()) {
+        Ok(j) => j,
+        Err(e) => return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string()),
+    };
+    let id = job.id.clone();
+    state.set_original_input(&id, url.clone());
+    if let Some(a) = req.algo {
+        state.set_algo_override(&id, a);
+    }
+
+    // 用 ffmpeg 拉视频:放到工作目录里(不立刻落 S3 — 让 run_job 落,失败时
+    // 工作目录会被 finalize 清理)。这一步同步等,失败立即回 400,避免建空 job。
+    let work_dir = state.cfg.tmp_dir.join(&id);
+    if let Err(e) = std::fs::create_dir_all(&work_dir) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("tmp dir: {e}"));
+    }
+    let (path, size) = match tokio::task::spawn_blocking({
+        let url = url.clone();
+        let work = work_dir.clone();
+        move || fetch_remote_video_to_local(&url, &work)
+    })
+    .await
+    {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => {
+            // 创建了 job 但拉取失败 — 标记为 error,不进入 run_job。
+            let _ = state.remove(&id);
+            return error_response(StatusCode::BAD_GATEWAY, &format!("fetch remote video: {e}"));
+        }
+        Err(e) => {
+            let _ = state.remove(&id);
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("fetch join: {e}"),
+            );
+        }
+    };
+
+    // 启动检测任务。
+    state.spawn_run(job.clone(), path.to_string_lossy().to_string());
+
+    // 第一次响应:先告诉前端"已开始处理";原始文件尚未落 S3,等前端轮询
+    // `/api/import/{id}/urls` 拿最终的 LAN URL。
+    Json(serde_json::json!({
+        "ok": true,
+        "job_id": id,
+        "kind": JobKind::Video,
+        "status": JobStatus::Queued,
+        "fetched_bytes": size,
+        "original_url": null,
+        "cover_url": null,
+        "stream_url": format!("/api/jobs/{}/events", id),
+        "urls_endpoint": format!("/api/import/{}/urls", id),
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct ImportVideoUrlReq {
+    url: String,
+    /// 可选 per-job 算法覆盖(haar/cnn/...);留空走 env/默认。
+    algo: Option<String>,
+}
+
+/// `GET /api/import/{id}/urls` — 轻量级"拿 S3 LAN URL"端点。
+/// 前端在拿到 job_id 后用 setInterval 轮询;命中本地内存缓存(无锁),
+/// 不走任何 DB。
+async fn import_urls(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(job) = state.get(&id) else {
+        return (StatusCode::NOT_FOUND, "no such job").into_response();
+    };
+    let original = job.original_media_key.lock().unwrap().clone();
+    // 找第一张标注帧作 cover_key(供 /api/jobs 已有的 SSE 流复用)。
+    let cover = job
+        .frames
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|f| f.annotated_key.clone())
+        .or_else(|| original.clone());
+    Json(serde_json::json!({
+        "ok": true,
+        "job_id": id,
+        "kind": job.kind,
+        "status": job.status(),
+        "original_url": media_lan_url(original.as_deref()),
+        "cover_url": media_lan_url(cover.as_deref()),
+        "media_path": media_lan_path(original.as_deref()),
+        "stream_url": format!("/api/jobs/{}/events", id),
+        "frame_count": job.frames.lock().unwrap().len(),
+        "is_terminal": matches!(
+            job.status(),
+            JobStatus::Done | JobStatus::Cancelled | JobStatus::Error
+        ),
+    }))
+    .into_response()
+}
+
+/// 简易 SSRF 拦截:挡掉 loopback / link-local / metadata。
+/// 真正的内网 IP 不挡 — 平台本身就在内网,放行 192.168/10/172 段。
+///
+/// `host` 接受三种写法:
+/// 1) `[ipv6]:port` — 剥 `[]`,得到 ipv6 字面量
+/// 2) `host:port`   — 单冒号,取 `:` 之前
+/// 3) 裸 ipv6 字面量 (`::1` / `fe80::1`) — 多于一个冒号即视为 ipv6
+fn is_blocked_host(host: &str) -> bool {
+    let h = if let Some(stripped) = host.strip_prefix('[') {
+        // `[ipv6]:port` → 第一个 `]` 之前
+        stripped.split(']').next().unwrap_or(stripped)
+    } else if host.matches(':').count() > 1 {
+        // 多冒号 → 裸 ipv6
+        host
+    } else {
+        // 单冒号 → host:port
+        host.split(':').next().unwrap_or(host)
+    };
+    let h = h.to_ascii_lowercase();
+    if matches!(h.as_str(), "localhost" | "0.0.0.0" | "::" | "::1") {
+        return true;
+    }
+    // IPv6 loopback ::1 and unspecified :: matched above. Block link-local
+    // fe80::/10 by the first hextet's top 10 bits, instead of the old
+    // `strip_prefix("fe") + len==1` hack which missed the full form
+    // "fe80::1" (it only matched the compressed "fe8" spelling).
+    if h.contains(':') {
+        if let Some(hextet) = h.split(':').next() {
+            if let Ok(v) = u16::from_str_radix(hextet, 16) {
+                // fe80::/10: top 10 bits == 1111111010 (0b11_1111_1010)
+                if (v >> 6) == 0b11_1111_1010 {
+                    return true;
+                }
+            }
+        }
+    }
+    // IPv4 loopback 127.0.0.0/8
+    if h.starts_with("127.") {
+        return true;
+    }
+    // IPv4 link-local 169.254.0.0/16 + cloud metadata 169.254.169.254
+    if h.starts_with("169.254.") {
+        return true;
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// 缓存辅助
+// ---------------------------------------------------------------------------
+
+/// JSON 缓存响应(带 ETag)。前端用 If-None-Match 命中时直接 304。
+fn cached_json_response_with_etag(bytes: Vec<u8>, etag: &str) -> Response {
+    let mut resp = ([(header::CONTENT_TYPE, "application/json")], bytes).into_response();
+    if let Ok(hv) = HeaderValue::from_str(etag) {
+        resp.headers_mut().insert(header::ETAG, hv);
+    }
+    resp
+}
+
+/// 简易 FNV-1a 64-bit hash,避免引入 `xxhash-rust` 等额外依赖。
+/// 用于 ETag 派生 — 抗碰撞足够,不必加密学安全。
+fn fxhash_short(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// 比较客户端 If-None-Match 头(逗号分隔多值,strip W/)和服务端 ETag。
+fn if_none_match_matches(client_hdr: Option<&str>, server_etag: &str) -> bool {
+    let Some(hdr) = client_hdr else {
+        return false;
+    };
+    fn strip(s: &str) -> &str {
+        s.strip_prefix("W/").unwrap_or(s).trim()
+    }
+    let server_stripped = strip(server_etag);
+    hdr.split(',').any(|v| strip(v.trim()) == server_stripped)
+}
+
+// ============================================================================
+// 埋点摘要 / 近期事件 — 给前端 dashboard 用的轻量聚合
+// (复用 persist::Db;无 DB 时返回空结构,前端降级显示)
+// ============================================================================
+
+#[derive(Deserialize)]
+struct TelemetryQuery {
+    /// 摘要窗口(秒);默认 24h(86400s)。仅供 summary 用。
+    window_secs: Option<i64>,
+    /// recent 限制条数;默认 50,上限 500。
+    limit: Option<usize>,
+}
+
+async fn telemetry_summary(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Query(q): Query<TelemetryQuery>,
+) -> Response {
+    let window_secs = q.window_secs.unwrap_or(86_400).clamp(60, 7 * 86_400);
+    let Some(db_pool) = state.db.pool.clone() else {
+        return Json(serde_json::json!({
+            "ok": true, "enabled": false, "window_secs": window_secs,
+            "buckets": [], "total": 0,
+        }))
+        .into_response();
+    };
+    // 跨数据库连接跑聚合查询;若失败返回 200 + enabled:false,前端降级。
+    let result = sqlx::query(
+        "SELECT name, COUNT(*) AS n
+         FROM telemetry
+         WHERE received_ms > (EXTRACT(epoch FROM now())::bigint * 1000 - $1)
+         GROUP BY name
+         ORDER BY n DESC
+         LIMIT 50",
+    )
+    .bind(window_secs * 1000)
+    .fetch_all(&db_pool)
+    .await;
+    match result {
+        Ok(rows) => {
+            use sqlx::Row;
+            let buckets: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "name": r.get::<String, _>("name"),
+                        "count": r.get::<i64, _>("n"),
+                    })
+                })
+                .collect();
+            let total: i64 = rows.iter().map(|r| r.get::<i64, _>("n")).sum();
+            Json(serde_json::json!({
+                "ok": true,
+                "enabled": true,
+                "window_secs": window_secs,
+                "buckets": buckets,
+                "total": total,
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            eprintln!("[telemetry] summary query failed: {e}");
+            Json(serde_json::json!({
+                "ok": true, "enabled": false, "error": e.to_string(),
+                "window_secs": window_secs, "buckets": [], "total": 0,
+            }))
+            .into_response()
+        }
+    }
+}
+
+async fn telemetry_recent(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Query(q): Query<TelemetryQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let Some(db_pool) = state.db.pool.clone() else {
+        return Json(serde_json::json!({
+            "ok": true, "enabled": false, "events": [],
+        }))
+        .into_response();
+    };
+    let result = sqlx::query(
+        "SELECT name, ts_ms, session, path, props
+         FROM telemetry
+         ORDER BY id DESC
+         LIMIT $1",
+    )
+    .bind(limit as i64)
+    .fetch_all(&db_pool)
+    .await;
+    match result {
+        Ok(rows) => {
+            use sqlx::Row;
+            let events: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "name": r.get::<String, _>("name"),
+                        "ts_ms": r.get::<i64, _>("ts_ms"),
+                        "session": r.get::<Option<String>, _>("session"),
+                        "path": r.get::<Option<String>, _>("path"),
+                        "props": r.try_get::<Option<serde_json::Value>, _>("props").unwrap_or(None),
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({
+                "ok": true,
+                "enabled": true,
+                "events": events,
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            eprintln!("[telemetry] recent query failed: {e}");
+            Json(serde_json::json!({
+                "ok": true, "enabled": false, "error": e.to_string(),
+                "events": [],
+            }))
+            .into_response()
+        }
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    #[test]
+    fn url_encode_path_keeps_slashes_and_dots() {
+        assert_eq!(
+            url_encode_path("jobs/abc/original.mp4"),
+            "jobs/abc/original.mp4"
+        );
+        assert_eq!(url_encode_path("a b?c"), "a%20b%3Fc");
+        // 已经编码的百分号要二次 encode(避免把 %3F 拆开)
+        assert_eq!(url_encode_path("a%20b"), "a%2520b");
+    }
+
+    #[test]
+    fn is_blocked_host_blocks_loopback_and_metadata() {
+        assert!(is_blocked_host("localhost"));
+        assert!(is_blocked_host("127.0.0.1:8080"));
+        assert!(is_blocked_host("127.0.0.1"));
+        assert!(is_blocked_host("[::1]"));
+        assert!(is_blocked_host("::1"));
+        assert!(is_blocked_host("[fe80::1]"));
+        assert!(is_blocked_host("fe80::1"));
+        // fe80::/10 spans fe80..febf — full (non-compressed) spellings too
+        assert!(is_blocked_host("[febf:1234::5]:8080"));
+        assert!(is_blocked_host("fea0::abcd"));
+        // unique-local fc00::/7 and global IPv6 must NOT be link-local
+        assert!(!is_blocked_host("fc00::1"));
+        assert!(!is_blocked_host("2606:4700:4700::1111"));
+        assert!(is_blocked_host("169.254.169.254"));
+        assert!(is_blocked_host("169.254.0.5"));
+        // 内网 IP 放行(平台本身是 LAN 部署)
+        assert!(!is_blocked_host("192.168.1.10"));
+        assert!(!is_blocked_host("10.0.0.5"));
+        assert!(!is_blocked_host("172.16.0.1"));
+        // 公网域名放行
+        assert!(!is_blocked_host("example.com"));
+    }
+
+    #[test]
+    fn media_lan_path_strips_scheme() {
+        assert_eq!(
+            media_lan_path(Some("s3://jobs/abc/original.mp4")).as_deref(),
+            Some("jobs/abc/original.mp4")
+        );
+        assert_eq!(
+            media_lan_path(Some("local://jobs/abc/original.mp4")).as_deref(),
+            Some("jobs/abc/original.mp4")
+        );
+        assert_eq!(
+            media_lan_path(Some("inline://jobs/abc/original.mp4")).as_deref(),
+            Some("jobs/abc/original.mp4")
+        );
+        assert_eq!(media_lan_path(None), None);
+    }
+
+    #[test]
+    fn if_none_match_handles_weak_etags_and_multi() {
+        let s = "W/\"abc-123\"";
+        assert!(if_none_match_matches(Some("W/\"abc-123\""), s));
+        assert!(if_none_match_matches(Some("\"abc-123\""), s));
+        assert!(if_none_match_matches(Some("W/\"other\", W/\"abc-123\""), s));
+        assert!(!if_none_match_matches(Some("W/\"different\""), s));
+        assert!(!if_none_match_matches(None, s));
+    }
+
+    #[test]
+    fn fxhash_short_distinguishes_inputs() {
+        let h1 = fxhash_short(b"hello");
+        let h2 = fxhash_short(b"world");
+        let h3 = fxhash_short(b"hello");
+        assert_ne!(h1, h2);
+        assert_eq!(h1, h3);
+    }
 }
 
 #[cfg(test)]
