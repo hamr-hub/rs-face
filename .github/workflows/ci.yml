@@ -64,6 +64,14 @@ jobs:
           cargo build --release --all-targets
           cargo test --lib
 
+      - name: integration tests (every tests/*.rs target)
+        # The lib-test step above only covers `src/**` unit tests; this runs
+        # every `[[test]]` entry in Cargo.toml (nms_edge_cases, iou_edge_cases,
+        # integral_image_tests, resize_tests, algo_compat, ...).
+        # One failure here is the same severity as a lib-test failure, so it
+        # gates the merge.
+        run: cargo test --tests
+
       - name: Smoke test on synthetic input
         run: |
           ./target/release/rs-face test://5 --out /tmp/rsface-smoke
@@ -101,6 +109,43 @@ jobs:
           cargo test --release --lib
           --no-default-features
           --features "${{ matrix.features }}"
+
+  benches:
+    # Every [[bench]] entry must compile across every supported feature
+    # combination. This catches required-features drift (e.g. a bench
+    # silently pulling in an undeclared module) before it can land broken.
+    # `--no-run` keeps CI under a minute; actual timing data is the
+    # developer's job (custom harness, deterministic inputs).
+    name: bench compile matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            build: cargo bench --no-run
+            test: cargo test --no-run
+          - name: detector-haar-only
+            build: cargo bench --no-run --no-default-features --features detector-haar
+            test: cargo test --no-run --no-default-features --features detector-haar
+          - name: detector-luminance
+            build: cargo bench --no-run --no-default-features --features detector-luminance
+            test: cargo test --no-run --no-default-features --features detector-luminance
+          - name: detector-cnn-only
+            build: cargo bench --no-run --no-default-features --features detector-cnn
+            test: cargo test --no-run --no-default-features --features detector-cnn
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Also build every integration test target so an accidentally broken
+      # required-features gate surfaces here, not on a contributor's first PR.
+      - name: bench + test --no-run (${{ matrix.name }})
+        run: |
+          set -euxo pipefail
+          ${{ matrix.build }}
+          ${{ matrix.test }}
 
   platform:
     name: platform server (ubuntu)
