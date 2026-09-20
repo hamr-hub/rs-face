@@ -182,8 +182,6 @@ rs-face/
 ├── pnpm-lock.yaml      # committed for reproducible dev installs
 ├── vite.config.js       # vite dev server with /api + /events proxy → :20080
 │
-├── Makefile            # convenience entrypoints (docker-up, docker-test, web-dev, ...)
-│
 └── data/               # bind-mounted runtime state (gitignored; created by docker compose)
     ├── rustfs/         # object store contents (jobs/, frames/, thumbnails/, ...)
     ├── pg/pgdata/      # postgres data directory
@@ -215,8 +213,12 @@ rs-face/
   `*.pgm`, `*.ppm`) are checked in; large binaries (`*.mp4`, HLS loop
   segments) are gitignored and downloaded on demand.
 - **`data/` is gitignored and ephemeral.** It's created by
-  `make docker-up` and lives as a bind mount under the repo root so
-  backups are `rsync`-friendly. Don't commit anything under `data/`.
+  `docker compose -f platform/docker-compose.yml up -d --build` and lives
+  as a bind mount under the repo root so backups are `rsync`-friendly.
+  Don't commit anything under `data/`.
+- **No Makefile by convention.** Build / dev / deploy commands are inline
+  cargo / docker compose / pnpm invocations in the docs, or shell scripts
+  under `platform/scripts/` and `tools/`. Don't reintroduce a Makefile.
 
 ### Module split
 
@@ -242,12 +244,14 @@ The platform server (`platform/server/`) and its sidecars (rustfs, postgres) are
 ffmpeg + an S3 endpoint + a running Postgres, all of which compose handles.
 
 ```bash
-make docker-up        # start the 3-service stack (rustfs + postgres + rsface-server)
-make docker-logs      # tail logs from all 3 services
-make docker-ps        # container status + health
-make docker-test      # e2e smoke (/api/health + image upload + PG count)
-make docker-down      # stop (keeps data/ bind mounts intact)
-make docker-restore-pg  # restore PG from data/pg/rsface_dump.sqlc
+docker compose -f platform/docker-compose.yml up -d --build   # start rustfs + postgres + rsface-server
+docker compose -f platform/docker-compose.yml logs -f --tail=100   # tail logs from all 3 services
+docker compose -f platform/docker-compose.yml ps              # container status + health
+bash platform/scripts/docker-smoke.sh                          # e2e smoke (/api/health + image upload + PG count) — needs the stack up first
+docker compose -f platform/docker-compose.yml down             # stop (keeps data/ bind mounts intact)
+docker exec -i rsface-postgres pg_restore \
+    -U rsface -d rsface --clean --if-exists --no-owner --role=rsface \
+    < data/pg/rsface_dump.sqlc                                # restore PG from data/pg/rsface_dump.sqlc
 ```
 
 Data lives in `data/{rustfs,pg/pgdata,media}/` (bind-mounted from the repo root,
@@ -263,8 +267,8 @@ served by the Rust server in production, but for iteration we run it under
 `index.html` / `style.css` is reflected instantly via Vite HMR:
 
 ```bash
-make docker-up        # backend must be running first
-make web-dev          # vite dev server on http://localhost:5173/ → proxies /api to :20080
+docker compose -f platform/docker-compose.yml up -d --build   # backend must be running first
+pnpm dev                                                       # vite dev server on http://localhost:5173/ → proxies /api to :20080
 ```
 
 Vite root is `platform/web/`; proxy routes `/api/*` and `/events` to

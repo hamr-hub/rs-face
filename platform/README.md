@@ -16,7 +16,7 @@ S3(rustfs)存储,Postgres 持久化,Docker 一键部署。
 **权威文档** [`DOCKER.md`](DOCKER.md) — 部署 / 启动 / 验证 / e2e / 备份 / 故障排查。
 
 ```bash
-make docker-up   # 或 docker compose -f platform/docker-compose.yml up -d --build
+docker compose -f platform/docker-compose.yml up -d --build
 curl http://localhost:20080/api/health
 ```
 
@@ -39,9 +39,9 @@ docker compose -f platform/docker-compose.yml up -d --build server
 后端走 Docker,前端**不要**重新 build 镜像——用 Vite dev server + HMR 即可:
 
 ```bash
-make docker-up        # 后端必须先在 :20080 跑着
-make web-install      # 一次性:pnpm install(只装 vite)
-make web-dev          # pnpm dev → http://localhost:5173/,改 platform/web/ 下任意文件立刻 HMR
+docker compose -f platform/docker-compose.yml up -d --build   # 后端必须先在 :20080 跑着
+pnpm install                                              # 一次性:只装 vite 作 dev server
+pnpm dev                                                  # vite :5173,改 platform/web/ 下任意文件立刻 HMR
 ```
 
 - vite root 是 `platform/web/`,proxy 把 `/api/*` 和 `/events` 转到 `localhost:20080`

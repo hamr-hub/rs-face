@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **S3 SigV4 signature mismatch** (`platform/server/src/s3.rs`): the signed
+  canonical headers included `host` and every `extra_headers` entry
+  (content-type, range), but the actual ureq request did not send an explicit
+  `Host` and skipped non-content-type extras — the server then rejected
+  requests with `SignatureDoesNotMatch`. The request now sends `Host`
+  (non-default port included) and all signed extra headers, so the sent
+  headers always match what was signed. Added a `host_of` regression test.
+- **SSRF allowlist bypass via full-form IPv6 link-local**
+  (`platform/server/src/api.rs`, `is_blocked_host`): the link-local check was
+  a `strip_prefix("fe") + len == 1` string hack that only matched the
+  compressed spelling `fe8::1` and let `[fe80::1]` / `febf::…` through.
+  Replaced with a proper fe80::/10 test on the first hextet's top 10 bits;
+  added cases for fe80..febf full forms and negative cases (fc00::/7,
+  global IPv6).
+
 ### Housekeeping — repo audit + directory standards
 - **Removed orphan planning docs**: `TASK_PLAN.md` (root) and
   `core/MULTI_ALGO.md` (along with the empty `core/` directory). Both were
@@ -26,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   five files moved to `platform/web-dev/`, but the actual `git ls-tree -r`
   shows them at the repo root. The `Makefile web-*` targets introduced in
   8add57a called `cd platform/web-dev && pnpm <cmd>` against a directory
-  that did not exist, breaking `make web-install` / `web-dev` /
+  that did not exist, breaking `pnpm install` / `pnpm dev` /
   `web-build`. The fix: keep the dev files at the root (where they
   always were), drop the `WEB_DEV_DIR` Makefile variable, call `pnpm`
   directly. `vite.config.js` paths updated: `root: '../web'` →
@@ -51,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   volumes / troubleshooting / cleanup. `platform/README.md` slimmed down to an
   entry-point that links to it.
 - **`README.md` gains a "Run as a service (Docker)" section** in the 5-minute
-  walkthrough, plus the canonical `make docker-up` one-liner.
+  walkthrough, plus the canonical `docker compose -f platform/docker-compose.yml up -d --build` one-liner.
 - **`CONTRIBUTING.md` gains two new sections**: "Working with the platform
   services (Docker)" (the only allowed way to run `rsface-server`) and
   "Frontend development (pnpm dev + hot reload)" (Vite dev server with proxy
@@ -60,12 +76,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   around `docker compose -f platform/docker-compose.yml` and `pnpm`:
   `docker-up / docker-down / docker-ps / docker-logs / docker-test /
   docker-restore-pg / docker-clean` and `web-install / web-dev / web-build`.
-- **`platform/scripts/docker-smoke.sh`** is the new `make docker-test` body —
+  *(Subsequently removed in 2026-09; commands are now documented inline.)*
+- **`platform/scripts/docker-smoke.sh`** is the new e2e smoke body —
   `/api/health` → rustfs health → postgres `pg_isready` + jobs count → optional
   image upload.
 - **`platform/docker-compose.yml` broken reference fixed**: the inline comment
   pointing at a non-existent `./migrate-pg.sh` now correctly directs users to
-  `make docker-restore-pg`.
+  `docker exec -i rsface-postgres pg_restore ...`.
 - **`data/` bind mounts confirmed as the canonical data path**:
   `data/{rustfs,pg/pgdata,media}/` next to the repo, visible + rsync-friendly.
   The old docker named volumes `platform_rsface-media / platform_pg-data /

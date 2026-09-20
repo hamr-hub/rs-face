@@ -1804,13 +1804,17 @@ fn is_blocked_host(host: &str) -> bool {
     if matches!(h.as_str(), "localhost" | "0.0.0.0" | "::" | "::1") {
         return true;
     }
-    // IPv6 link-local `fe80::/10`(lowercase 后 `fe8*` `fe9*` `fea*` `feb*`)
-    if let Some(rest) = h.strip_prefix("fe") {
-        if rest.len() == 1 {
-            // '8'..='b' 上是 link-local
-            let c = rest.as_bytes()[0];
-            if matches!(c, b'8'..=b'b') {
-                return true;
+    // IPv6 loopback ::1 and unspecified :: matched above. Block link-local
+    // fe80::/10 by the first hextet's top 10 bits, instead of the old
+    // `strip_prefix("fe") + len==1` hack which missed the full form
+    // "fe80::1" (it only matched the compressed "fe8" spelling).
+    if h.contains(':') {
+        if let Some(hextet) = h.split(':').next() {
+            if let Ok(v) = u16::from_str_radix(hextet, 16) {
+                // fe80::/10: top 10 bits == 1111111010 (0b11_1111_1010)
+                if (v >> 6) == 0b11_1111_1010 {
+                    return true;
+                }
             }
         }
     }
@@ -2009,6 +2013,12 @@ mod import_tests {
         assert!(is_blocked_host("::1"));
         assert!(is_blocked_host("[fe80::1]"));
         assert!(is_blocked_host("fe80::1"));
+        // fe80::/10 spans fe80..febf — full (non-compressed) spellings too
+        assert!(is_blocked_host("[febf:1234::5]:8080"));
+        assert!(is_blocked_host("fea0::abcd"));
+        // unique-local fc00::/7 and global IPv6 must NOT be link-local
+        assert!(!is_blocked_host("fc00::1"));
+        assert!(!is_blocked_host("2606:4700:4700::1111"));
         assert!(is_blocked_host("169.254.169.254"));
         assert!(is_blocked_host("169.254.0.5"));
         // 内网 IP 放行(平台本身是 LAN 部署)

@@ -201,12 +201,13 @@ impl S3Client {
             .agent
             .request(method, &url)
             .set("Authorization", &authorization)
+            .set("Host", &host)
             .set("x-amz-date", &amz_date)
             .set("x-amz-content-sha256", &payload_hash);
+        // extra_headers 必须完整发出 —— 签名时它们已经在 canonical_headers 里,
+        // 实际请求漏发任何一项都会触发 SignatureDoesNotMatch。
         for (k, v) in extra_headers {
-            if !k.eq_ignore_ascii_case("content-type") {
-                req = req.set(k, v);
-            }
+            req = req.set(k, v);
         }
 
         let result = if body_bytes.is_empty() && method != "PUT" {
@@ -344,5 +345,17 @@ mod tests {
     #[test]
     fn hex_shape() {
         assert_eq!(hex(&[0xde, 0xad]), "dead");
+    }
+
+    #[test]
+    fn host_of_keeps_port_and_strips_path() {
+        // SigV4 canonical `host` must equal the authority actually sent,
+        // non-default port included — this is what the Host-header fix signs.
+        assert_eq!(host_of("http://127.0.0.1:9000/bucket/key"), "127.0.0.1:9000");
+        assert_eq!(host_of("https://s3.example.com/b/k?x=1"),
+                   "s3.example.com");
+        assert_eq!(host_of("http://rustfs:9000/"), "rustfs:9000");
+        // no scheme fallback: whole string up to the first '/'
+        assert_eq!(host_of("localhost:9000/x"), "localhost:9000");
     }
 }

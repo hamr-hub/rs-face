@@ -13,8 +13,11 @@ by design — if a new top-level dir is being proposed, that's a smell.
 
 ```
 rs-face/
-├── Cargo.toml / Cargo.lock / clippy.toml / rustfmt.toml / Makefile
-│   Cargo workspace metadata + tooling entrypoints. **No code here.**
+├── Cargo.toml / Cargo.lock / clippy.toml / rustfmt.toml
+│   Cargo workspace metadata + tooling config. **No code here.**
+│   **There is no Makefile** — convenience wrappers are inline cargo /
+│   docker compose / pnpm commands in the docs, or shell scripts under
+│   `platform/scripts/` and `tools/`.
 ├── README.md / CHANGELOG.md / CONTRIBUTING.md / STRUCTURE.md / LICENSE / CLAUDE.md
 │   Public-facing + agent-facing documentation. One file per concern:
 │   - README.md          — what rs-face is, quick start, accuracy tables
@@ -129,26 +132,28 @@ enforces this and will fail on a default-build dep.
 ### 2.5 Do NOT edit `platform/web/` inside the Docker container
 
 The Docker image bundles `platform/web/` at build time. **All frontend work
-happens on the host** under `platform/web/`, with Vite HMR via `make web-dev`.
-Edits to `/app/web/` inside the container are wiped on the next
-`docker compose up -d --build`.
+happens on the host** under `platform/web/`, with Vite HMR via `pnpm dev`
+(repo root, since `package.json` lives there). Edits to `/app/web/` inside
+the container are wiped on the next `docker compose up -d --build`.
 
 ### 2.6 Do NOT run `cargo run` for `rsface-server` on the host
 
 The platform server needs ffmpeg + a running S3 endpoint + a running Postgres,
-all of which the compose stack wires together. Use `make docker-up` →
-`make docker-test`. `cargo run -p rsface-server` is **not** a supported path.
+all of which the compose stack wires together. Use
+`docker compose -f platform/docker-compose.yml up -d --build` then
+`bash platform/scripts/docker-smoke.sh`. `cargo run -p rsface-server` is **not**
+a supported path.
 
 ### 2.7 Do NOT break the zero-dep build
 
 If your patch adds a `use` statement for a non-std crate at the top of a
 `src/*.rs` file, gate it behind `#[cfg(feature = "...")]`. CI verifies.
 
-### 2.8 Do NOT add a file path constant to the Makefile without backing files in git
+### 2.8 Do NOT introduce a Makefile back into the repo
 
-`WEB_DEV_DIR`, `COMPOSE_FILE`, and friends must point at tracked directories.
-If `make <target>` fails with "No such file or directory", that's a
-documentation/git drift signal — fix the path or delete the target.
+This repo deliberately has no Makefile. Convenience wrappers live as plain
+shell scripts under `platform/scripts/`, `tools/`, or as inline `docker compose`
+/ `cargo` / `pnpm` commands in the docs. If a Makefile reappears, delete it.
 
 ---
 

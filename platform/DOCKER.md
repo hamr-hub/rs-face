@@ -7,8 +7,6 @@
 
 ```bash
 docker compose -f platform/docker-compose.yml up -d --build
-# 或等价写法
-make docker-up
 
 # 验证
 curl http://localhost:20080/api/health
@@ -36,14 +34,14 @@ curl http://localhost:20080/api/health
 
 | 操作 | 命令 |
 |---|---|
-| 启动(首次会 build 镜像,5–10 分钟;之后秒起) | `make docker-up` 或 `docker compose -f platform/docker-compose.yml up -d --build` |
+| 启动(首次会 build 镜像,5–10 分钟;之后秒起) | `docker compose -f platform/docker-compose.yml up -d --build` |
 | 启动(已 build,跳过镜像重建) | `docker compose -f platform/docker-compose.yml up -d` |
-| 状态 + 健康 | `make docker-ps` 或 `docker compose -f platform/docker-compose.yml ps` |
-| 实时日志(3 服务) | `make docker-logs` 或 `docker compose -f platform/docker-compose.yml logs -f --tail=100` |
+| 状态 + 健康 | `docker compose -f platform/docker-compose.yml ps` |
+| 实时日志(3 服务) | `docker compose -f platform/docker-compose.yml logs -f --tail=100` |
 | 单服务日志 | `docker logs -f rsface-server` |
-| 优雅停止(SIGTERM 等 2m30s) | `make docker-down` 或 `docker compose -f platform/docker-compose.yml down` |
+| 优雅停止(SIGTERM 等 2m30s) | `docker compose -f platform/docker-compose.yml down` |
 | 强制停止(立即 SIGKILL) | `docker compose -f platform/docker-compose.yml kill rsface-server` |
-| **完全清理(数据会丢,慎用)** | `make docker-clean` |
+| **完全清理(数据会丢,慎用)** | `docker compose -f platform/docker-compose.yml down && rm -rf data/rustfs data/pg/pgdata data/media` |
 
 ## 验证服务健康
 
@@ -72,7 +70,7 @@ docker exec rsface-postgres psql -U rsface -d rsface -c "SELECT count(*) FROM jo
 ### 一键 smoke
 
 ```bash
-make docker-test
+bash platform/scripts/docker-smoke.sh
 ```
 
 会跑:`/api/health` → `/api/jobs/image` 上传 → PG jobs 计数。
@@ -122,8 +120,6 @@ dump 是 postgres 自定义格式(-F c),压缩、二进制,适合 `pg_restore`�
 **`pgdata` 非空** 时 `pg_restore --clean` 会先把现有 jobs/frames/faces 清掉再灌。
 
 ```bash
-make docker-restore-pg
-# 等价于:
 docker exec -i rsface-postgres pg_restore \
     -U rsface -d rsface --clean --if-exists --no-owner --role=rsface \
     < data/pg/rsface_dump.sqlc
@@ -152,8 +148,10 @@ docker compose down
 docker volume rm platform_rsface-media platform_pg-data platform_rustfs-data
 
 # 5. 重启新栈(用 bind mount)+ 还原 PG
-make docker-up
-make docker-restore-pg
+docker compose -f platform/docker-compose.yml up -d --build
+docker exec -i rsface-postgres pg_restore \
+    -U rsface -d rsface --clean --if-exists --no-owner --role=rsface \
+    < data/pg/rsface_dump.sqlc
 ```
 
 完成后 `data/` 目录结构:
@@ -176,13 +174,11 @@ data/
 | `ensure_bucket failed: Connection refused`(S3) | `docker logs rsface-rustfs \| tail -10` | rustfs 没起;看 healthcheck 是否 `healthy` |
 | bind mount `Permission denied` | `ls -la data/` | 旧目录是 `root:root 0755`(典型:之前用 docker volume);重命名 `data → data.old`,新建 `data/{rustfs,pg/pgdata,media}/`(当前用户拥有) |
 | 容器起不来,日志报 `port already in use` | `ss -tlnp \| grep -E '20080\|15432\|1900[01]'` | 另一个进程占了端口;在 compose 里改 HOST 端口 |
-| `cargo build` 失败但 `make docker-up` 不重 build | `docker images \| grep rsface-server` | 旧镜像被缓存;`docker compose build --no-cache server` |
+| `cargo build` 失败但 `docker compose up -d --build` 不重 build | `docker images \| grep rsface-server` | 旧镜像被缓存;`docker compose build --no-cache server` |
 
 ## 完全清理(数据会丢)
 
 ```bash
-make docker-clean
-# 等价于:
 docker compose -f platform/docker-compose.yml down
 rm -rf data/rustfs data/pg/pgdata data/media
 ```

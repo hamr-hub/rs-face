@@ -10,7 +10,7 @@ platform 服务(rustfs + postgres + rsface-server)**必须**通过 `docker compo
 
 - **权威文档**:`platform/DOCKER.md`(部署 / 启动 / 测试 / 备份 / 故障排查)
 - **Compose 文件**:`platform/docker-compose.yml`(CPU,host 网络,bind mount)
-- **Makefile 入口**:`make docker-up` / `docker-down` / `docker-logs` / `docker-test` / `docker-restore-pg` / `docker-clean`
+- **常用命令**:`docker compose -f platform/docker-compose.yml up -d --build` / `down` / `logs -f --tail=100` / `ps`;`bash platform/scripts/docker-smoke.sh` 跑 e2e
 - **数据位置**(bind mount,跟随代码,可见可备份):`data/{rustfs,pg/pgdata,media}/`
 
 ## 前端开发(`platform/web/`)→ pnpm dev 直连 docker 后端
@@ -18,9 +18,9 @@ platform 服务(rustfs + postgres + rsface-server)**必须**通过 `docker compo
 前端是**零依赖 vanilla JS**(5181 行,无 build tool)。开发流程:
 
 ```bash
-make docker-up        # 后端先起,listen 0.0.0.0:20080
-make web-install      # 一次性:pnpm install(只装 vite 作 dev server)
-make web-dev          # pnpm dev → vite :5173,proxy /api → docker :20080,改代码立即 HMR
+docker compose -f platform/docker-compose.yml up -d --build  # 后端先起,listen 0.0.0.0:20080
+pnpm install          # 一次性:只装 vite 作 dev server
+pnpm dev              # vite :5173,proxy /api → docker :20080,改代码立即 HMR
 ```
 
 - **入口**:`package.json` + `vite.config.js` 在仓库根(`root: 'platform/web'`)
@@ -30,7 +30,7 @@ make web-dev          # pnpm dev → vite :5173,proxy /api → docker :20080,改
 
 ## 算法核心 (`src/`) → cargo 直接跑,不需要 Docker
 
-`cargo test`、`cargo clippy`、`cargo bench`、`make test`、`make lint` 等都走原生 cargo
+`cargo test`、`cargo clippy`、`cargo bench` 等都走原生 cargo
 路径,这是开发期的 fast-iter 工具。CI 也用 cargo(ubuntu + macOS matrix,见
 `.github/workflows/ci.yml`)。
 
@@ -41,8 +41,9 @@ Docker 的核心价值是统一 platform 服务的运行时环境(ffmpeg + postg
 ## 数据迁移提醒
 
 - `data/` 目录在仓库根,**显式 bind mount**,不用 docker named volume。
-- 首次 `make docker-up` 时,如果 `data/pg/pgdata/` 是空目录,postgres 容器会自动
-  initdb 一个空库——没有任何表,需用 `make docker-restore-pg` 还原 dump。
+- 首次 `docker compose -f platform/docker-compose.yml up -d --build` 时,
+  如果 `data/pg/pgdata/` 是空目录,postgres 容器会自动 initdb 一个空库——
+  没有任何表,需用 `docker exec -i rsface-postgres pg_restore ...` 还原 dump。
 - 旧版本(named volume: `platform_rsface-media` / `platform_pg-data` /
   `platform_rustfs-data`)在 2026-09-18 已退役;新部署只用 `data/` bind mount。
 

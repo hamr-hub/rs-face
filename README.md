@@ -60,7 +60,6 @@ deploy the platform side of `rs-face` (see [`CLAUDE.md`](CLAUDE.md)):
 
 ```bash
 docker compose -f platform/docker-compose.yml up -d --build
-# or:  make docker-up
 ```
 
 | endpoint | URL |
@@ -73,8 +72,9 @@ docker compose -f platform/docker-compose.yml up -d --build
 Data is bind-mounted into `data/{rustfs,pg/pgdata,media}/` next to the repo —
 visible, greppable, rsync-friendly. Full ops guide: [`platform/DOCKER.md`](platform/DOCKER.md)
 (deploy / start / verify / e2e / backup / restore / troubleshoot / cleanup).
-Quick targets: `make docker-up`, `docker-down`, `docker-logs`, `docker-test`,
-`docker-restore-pg`, `docker-clean`.
+Quick commands: `docker compose -f platform/docker-compose.yml up -d --build` /
+`down` / `logs -f --tail=100` / `ps`;`bash platform/scripts/docker-smoke.sh` for
+e2e; PG restore via `docker exec -i rsface-postgres pg_restore ...`.
 
 If you need a real cascade (OpenCV's `haarcascade_frontalface_default.xml`):
 ```bash
@@ -487,7 +487,6 @@ rs-face/
 │   ├── Dockerfile        # rsface-server image (non-root, ffmpeg, static binary)
 │   └── docker-compose.yml # rustfs + postgres + rsface-server
 ├── package.json + vite.config.js # frontend dev (vite only, root: platform/web)
-├── Makefile              # docker-up / docker-test / web-dev / ...
 └── data/                 # gitignored bind-mounted runtime state
 ```
 
