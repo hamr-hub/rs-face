@@ -502,6 +502,36 @@ impl SquaredIntegralImage {
             sum_sq_part >= sum_part + rhs
         })
     }
+
+    /// Fast variance pre-filter test with precomputed `N` and `N²`.
+    ///
+    /// Same arithmetic and accept/reject semantics as
+    /// [`Self::passes_variance_sums`], but accepts the two
+    /// `(N, N²)` values the cascade already has on hand (the window's
+    /// `(w - 2) * (h - 2)` and its square) instead of recomputing them per
+    /// call. The detector builds `CachedNormFactor` once per frame, then
+    /// threads `(n_pixels, n_pixels_sq)` into the window scan and avoids
+    /// both the `w * h` multiply and the `(w*h).checked_mul(w*h)` per window.
+    ///
+    /// All overflow checks in [`Self::passes_variance_sums`] are dropped:
+    /// `sum_sq ≤ W*H*255² ≤ 1.4e11` and `N ≤ 24*24 = 576`, so
+    /// `sum_sq * N ≤ 8e13 < 2^47`; `sum ≤ 5.3e8` and `sum² ≤ 2.8e17 < 2^58`;
+    /// `threshold * N² ≤ u64::MAX*576²` would only overflow on pathological
+    /// thresholds the detector never reaches. If a future caller wants the
+    /// conservative semantics, use [`Self::passes_variance_sums`].
+    #[inline]
+    pub fn passes_variance_sums_fast(
+        sum: u64,
+        sum_sq: u64,
+        n: u64,
+        n_sq: u64,
+        variance_threshold: u64,
+    ) -> bool {
+        // variance >= threshold iff sum_sq * N - sum² >= threshold * N²
+        let sum_sq_part = sum_sq * n;
+        let sum_part = sum * sum;
+        sum_sq_part >= sum_part + variance_threshold * n_sq
+    }
 }
 
 impl Drop for SquaredIntegralImage {
