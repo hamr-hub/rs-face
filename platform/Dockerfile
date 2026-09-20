@@ -54,6 +54,7 @@ RUN mkdir -p src platform/server/src \
     && echo 'pub fn _stub(){}' > src/lib.rs \
     && echo 'fn main(){}' > src/main.rs \
     && echo 'fn main(){}' > platform/server/src/main.rs \
+    && touch platform/server/src/lib.rs \
     && mkdir -p examples tests benches src/bin \
     && for p in $(grep -A3 '^\[\[bin\]\]\|^\[\[bench\]\]' Cargo.toml \
                     | sed -n 's/^path = "\(.*\)"/\1/p'); do \
