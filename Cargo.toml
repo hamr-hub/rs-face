@@ -60,6 +60,7 @@ required-features = [
     "source-ffmpeg",
     "output",
     "pipeline",
+    "batch",
 ]
 
 [[bin]]
@@ -177,6 +178,10 @@ required-features = ["detector-haar"]
 # Integration tests — same rationale as examples.
 # ---------------------------------------------------------------------------
 [[test]]
+name = "batch_dir"
+required-features = ["pipeline"]
+
+[[test]]
 name = "bench_components"
 required-features = ["detector-haar"]
 
@@ -253,6 +258,7 @@ default = [
     "source-ffmpeg",
     "output",
     "pipeline",
+    "batch",
     "video-id",
 ]
 
@@ -286,6 +292,14 @@ source-ffmpeg = ["source"]
 output = []
 pipeline = ["detector-haar", "source", "output"]
 video-id = ["source", "output"]
+
+# ---------------------------------------------------------------------------
+# Batch directory processor — walks a directory of images and emits per-image
+# annotated PNGs plus a combined manifest. Lives behind `pipeline` so the
+# zero-dep build stays zero-dep; no extra dependencies, just a thin wrapper
+# over `detector::Detector` + `image::png`.
+# ---------------------------------------------------------------------------
+batch = ["pipeline"]
 
 # Metal/CUDA are haar GPU backends, so they pull detector-haar with them.
 metal-backend = ["dep:metal", "detector-haar"]
