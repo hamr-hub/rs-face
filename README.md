@@ -78,10 +78,12 @@ Quick commands: `docker compose -f platform/docker-compose.yml up -d --build` /
 `down` / `logs -f --tail=100` / `ps`;`bash platform/scripts/docker-smoke.sh` for
 e2e; PG restore via `docker exec -i rsface-postgres pg_restore ...`.
 
-If you need a real cascade (OpenCV's `haarcascade_frontalface_default.xml`):
+The CLI runs Haar out of the box — the OpenCV frontalface cascade is embedded
+from `src/weights/haarcascade_frontalface_default.rfcf`. To rebuild it from the
+shipped OpenCV XML (or a custom cascade of your own):
 ```bash
-python3 tools/convert_opencv_xml.py haarcascade_frontalface_default.xml haarcascade.rfcf
-./target/release/rs-face video.mp4 --out ./out --cascade haarcascade.rfcf
+python3 tools/convert_opencv_xml.py src/weights/haarcascade_frontalface_default.xml /tmp/haarcascade.rfcf
+./target/release/rs-face video.mp4 --out ./out --cascade /tmp/haarcascade.rfcf
 ```
 
 If you need industrial accuracy (SCRFD + ArcFace):

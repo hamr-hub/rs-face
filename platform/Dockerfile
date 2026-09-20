@@ -54,13 +54,35 @@ RUN mkdir -p src platform/server/src \
     && echo 'pub fn _stub(){}' > src/lib.rs \
     && echo 'fn main(){}' > src/main.rs \
     && echo 'fn main(){}' > platform/server/src/main.rs \
+    && mkdir -p examples tests benches src/bin \
+    && for p in $(grep -A3 '^\[\[bin\]\]\|^\[\[bench\]\]' Cargo.toml \
+                    | sed -n 's/^path = "\(.*\)"/\1/p'); do \
+           [ -e "$p" ] || { mkdir -p "$(dirname "$p")" && : > "$p"; }; \
+       done \
+    && for n in $(grep -A3 '^\[\[example\]\]' Cargo.toml \
+                    | sed -n 's/^name = "\(.*\)"/\1/p'); do \
+           : > "examples/$n.rs"; \
+       done \
+    && for n in $(grep -A3 '^\[\[test\]\]' Cargo.toml \
+                    | sed -n 's/^name = "\(.*\)"/\1/p'); do \
+           : > "tests/$n.rs"; \
+       done \
     && cargo build --release --manifest-path platform/Cargo.toml \
          --target "$(cat /tmp/rust-target)" \
-    && rm -rf src platform/server/src
+    && rm -rf src platform/server/src examples tests benches
+
+# Cargo.toml 显式声明了大量 [[bin]]/[[bench]]/[[example]]/[[test]] 目标
+# (per-algorithm required-features 裁剪),cargo 加载 manifest 时就校验这些
+# 路径存在 —— 缓存层只 stub 了 lib/main,缺文件会直接报
+# "can't find `cascade_dump` example"。这些 target 属于 path dep,
+# 本层不会编译它们(只构建 core lib + platform bin),空占位文件即可。
 
 # 2) 真正源码
 COPY src ./src
 COPY platform ./platform
+COPY examples ./examples
+COPY benches ./benches
+COPY tests ./tests
 RUN touch src/lib.rs src/main.rs platform/server/src/main.rs \
     && cargo build --release --manifest-path platform/Cargo.toml \
          --target "$(cat /tmp/rust-target)" \
@@ -81,7 +103,11 @@ RUN apk add --no-cache ffmpeg ca-certificates tini curl \
 # 二进制 group=1000:root 让 UID 1000 进程可执行(root-owned 不可写,只可执行/读)
 COPY --chown=0:1000 --from=build /tmp/rsface-server /usr/local/bin/rsface-server
 COPY --chown=1000:1000 platform/web /app/web
-COPY --chown=1000:1000 cascade.rfcf /app/cascade.rfcf
+# 级联权重:仓库根的 cascade.rfcf 已移入 src/weights(随 core 嵌入式分发),
+# 镜像仍需磁盘文件 —— platform server 的 haar 任务用 Cascade::load 读它
+# (不是 core CLI 的嵌入式默认值)。路径必须随权重迁移同步,否则镜像构建在
+# 这一步 "not found" 失败。
+COPY --chown=1000:1000 src/weights/haarcascade_frontalface_default.rfcf /app/cascade.rfcf
 
 ENV BIND_ADDR=0.0.0.0:8080 \
     S3_ENDPOINT=http://rustfs:9000 \
