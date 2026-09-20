@@ -18,6 +18,7 @@ rsface = { package = "rs-face", path = ".." }
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "fs", "process", "io-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
