@@ -13,7 +13,7 @@
 //! * validates that `non_max_suppression` over identical boxes never panics
 //!   for any score (including NaN/inf in the integer path).
 
-use rsface::face::{Detection, FaceDetection, non_max_suppression};
+use rsface::face::{non_max_suppression, Detection, FaceDetection};
 
 fn int_box(x: usize, y: usize, w: usize, h: usize, score: f32) -> Detection {
     Detection { x, y, w, h, score }
@@ -93,13 +93,13 @@ fn modern_iou_symmetry_across_many_geometries() {
         (50.0, 50.0, 60.0, 60.0),
         (0.0, 0.0, 100.0, 100.0),
         (10.0, 10.0, 30.0, 30.0),
-        (9.0, 9.0, 11.0, 11.0), // tiny box overlapping a large
+        (9.0, 9.0, 11.0, 11.0),  // tiny box overlapping a large
         (10.0, 0.0, 10.0, 10.0), // zero-width
         (0.0, 5.0, 10.0, 5.0),   // zero-height
         (-20.0, -20.0, -5.0, -5.0),
         (-5.0, -5.0, 5.0, 5.0), // straddles origin
         (1e3, 1e3, 1e3 + 50.0, 1e3 + 50.0),
-        (0.0, 0.0, 1.0, 1.0),   // sub-pixel
+        (0.0, 0.0, 1.0, 1.0), // sub-pixel
     ];
     for &(x1, y1, x2, y2) in &seeds {
         let a = f32_box(x1, y1, x2, y2, 1.0);
@@ -127,7 +127,10 @@ fn modern_iou_in_unit_interval_for_overlapping_boxes() {
         let a = f32_box(ax1, ay1, ax2, ay2, 1.0);
         let b = f32_box(bx1, by1, bx2, by2, 1.0);
         let iou = a.iou(&b);
-        assert!((0.0..=1.0).contains(&iou), "IoU {iou} not in [0, 1] for a vs b");
+        assert!(
+            (0.0..=1.0).contains(&iou),
+            "IoU {iou} not in [0, 1] for a vs b"
+        );
     }
 }
 
