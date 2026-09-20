@@ -139,7 +139,10 @@ fn match_detections(dets: &[Detection], gt: &GroundTruth, iou_threshold: f32) ->
 ///
 /// `detect` is called once per image (so per-image measurements
 /// include the load step implicitly — i.e. everything from the
-/// already-decoded `GrayImage` to the `Vec<Detection>`).
+/// already-decoded `GrayImage` to the `Vec<Detection>`). When the
+/// entry's path is `None`, the `img_fn` closure produces the image
+/// instead of loading it from disk — used by the synthetic-face
+/// entry that is generated in-memory.
 fn run_algo<F>(name: &'static str, imgs: &[ImageEntry], mut detect: F) -> ScoreReport
 where
     F: FnMut(&GrayImage) -> Vec<Detection>,
@@ -150,7 +153,7 @@ where
     let mut fp = 0usize;
     let mut total_gt = 0usize;
     for entry in imgs {
-        let img = load_image(entry.path);
+        let img = load_entry(entry);
         let t0 = Instant::now();
         let dets = detect(&img);
         total_ms += t0.elapsed().as_secs_f32() * 1000.0;
@@ -178,11 +181,10 @@ where
     }
 }
 
-/// Run an algorithm but skip images larger than `max_pixels`. Used to
-/// keep the CNN's slow pure-Rust forward pass tractable on the
-/// full-height biden.ppm (970×2204). The skipped images contribute
-/// zero detections / zero time but the eval still walks every entry
-/// so the report's `tp/fp` accounting is consistent.
+/// Same as `run_algo` but skips images larger than `max_pixels` — used
+/// to keep the CNN's slow pure-Rust forward pass tractable on
+/// biden-class images. Skipped entries still contribute their GT box
+/// count to the recall denominator.
 fn run_algo_skip_large<F>(name: &'static str, imgs: &[ImageEntry], max_pixels: usize, mut detect: F) -> ScoreReport
 where
     F: FnMut(&GrayImage) -> Vec<Detection>,
@@ -193,10 +195,8 @@ where
     let mut fp = 0usize;
     let mut total_gt = 0usize;
     for entry in imgs {
-        let img = load_image(entry.path);
+        let img = load_entry(entry);
         if img.width() * img.height() > max_pixels {
-            // Image too large for this algorithm; treat as 0 detections
-            // but still credit any unclaimed GT as missed.
             total_gt += entry.gt.boxes.len();
             continue;
         }
@@ -227,8 +227,22 @@ where
     }
 }
 
+/// Load (or generate) the image for an entry. The synthetic entry has
+/// `path: None`; all others read from disk.
+fn load_entry(entry: &ImageEntry) -> GrayImage {
+    match entry.path {
+        Some(p) => load_image(p),
+        None => {
+            // Re-generate the synthetic face: the GT box position is
+            // hardcoded so this is a deterministic in-memory rebuild.
+            let (img, _) = synthetic_face();
+            img
+        }
+    }
+}
+
 struct ImageEntry {
-    path: &'static str,
+    path: Option<&'static str>,
     gt: GroundTruth,
 }
 
@@ -253,10 +267,11 @@ fn golden_eval_inspect() {
     });
 
     for entry in &imgs {
-        let img = load_image(entry.path);
+        let img = load_entry(entry);
+        let label = entry.path.unwrap_or("<synthetic>");
         println!(
             "\n== {} ({}x{}) GT={:?}",
-            entry.path,
+            label,
             img.width(),
             img.height(),
             entry.gt.boxes
@@ -284,9 +299,14 @@ fn golden_eval_inspect() {
 }
 
 fn golden_set() -> Vec<ImageEntry> {
-    // Three faces-positive fixtures covering the canonical coverage
-    // axes the eval cares about: single frontal (lena), two-person
-    // (two-people), tiny embedded portrait (demo_face_256).
+    // Four face-positive entries:
+    //  - single frontal (lena)
+    //  - two-person (two-people)
+    //  - tiny embedded portrait (demo_face_256)
+    //  - in-memory synthetic face (`None` path, rebuilt on demand)
+    //    where Haar is known to miss and only the band-signature
+    //    detector can fire — the canonical "Haar fails" case where
+    //    the ensemble has to add value.
     //
     // The 970×2204 biden.ppm is intentionally excluded — every
     // algorithm's per-image cost is dominated by it (Haar ~1 s,
@@ -295,18 +315,125 @@ fn golden_set() -> Vec<ImageEntry> {
     // still kept under tests/fixtures/golden/labels/ so future
     // longer-running evaluations (e.g. release-mode benchmarks) can
     // include it without changing the eval harness.
-    let pairs: &[(&str, &str)] = &[
+    let mut entries = Vec::new();
+    for (img, label) in &[
         ("tests/fixtures/lena.ppm", "lena"),
         ("tests/fixtures/two-people.ppm", "two-people"),
         ("tests/fixtures/demo_face_256.pgm", "demo_face_256"),
-    ];
-    pairs
-        .iter()
-        .map(|(img, label)| ImageEntry {
-            path: img,
+    ] {
+        entries.push(ImageEntry {
+            path: Some(img),
             gt: load_ground_truth(label),
-        })
-        .collect()
+        });
+    }
+    // Synthetic face: generated in-memory; single GT box at (75, 75, 50, 50).
+    entries.push(ImageEntry {
+        path: None,
+        gt: GroundTruth {
+            boxes: vec![(75, 75, 50, 50)],
+        },
+    });
+    entries
+}
+
+/// Generate a synthetic 200×200 face pattern in memory: bright
+/// forehead (top 40%), dark eye band (mid 30%), mid chin (bottom 30%),
+/// plus edge spots at the eyes and nose. Returns a `GrayImage` plus
+/// a single ground-truth box at (75, 75, 50, 50).
+///
+/// The pattern is intentionally tuned for the luminance detector's
+/// band gate: forehead ≈ 200, mid ≈ 40 (well below the 90 cap), bot
+/// ≈ 130, edge density high — so `score_window` returns Some(_) for
+/// the central window. The Haar cascade may or may not fire on it;
+/// the test exercises "what does the ensemble do when detectors
+/// disagree on a synthetic face?".
+#[allow(dead_code)]
+fn synthetic_face() -> (GrayImage, (usize, usize, usize, usize)) {
+    let mut img = GrayImage::new(200, 200);
+    for y in 0..80 {
+        for x in 0..200 {
+            let v = 200 + (((x * 7 + y * 11) ^ (x >> 3)) & 0xF) as i32 - 7;
+            img[(x, y)] = v.clamp(160, 230) as u8;
+        }
+    }
+    for y in 80..140 {
+        for x in 0..200 {
+            let mut v = 40;
+            if (60..90).contains(&x) || (110..140).contains(&x) {
+                v = 12;
+            }
+            if (95..105).contains(&x) && y > 90 && y < 130 {
+                v += 60;
+            }
+            img[(x, y)] = v;
+        }
+    }
+    for y in 140..200 {
+        for x in 0..200 {
+            let v = 130 + (((x * 5 + y * 3) ^ (y >> 4)) & 0x7) as i32 - 3;
+            img[(x, y)] = v.clamp(100, 160) as u8;
+        }
+    }
+    (img, (75, 75, 50, 50))
+}
+
+/// Pair every algorithm against the synthetic face and report which
+/// detectors fired. Used to demonstrate the ensemble's job: pick up
+/// the boxes that any single detector misses when the others fail.
+#[test]
+#[ignore]
+fn synthetic_face_detector_diagnostic() {
+    let (img, gt) = synthetic_face();
+    let haar_det = Detector::new(bundled_frontalface_cascade(), DetectorConfig::default());
+    let lum = LuminanceFaceDetector::new(LuminanceConfig {
+        stride: 4,
+        ..LuminanceConfig::default()
+    });
+    let cnn_cal = CnnDetector::new(CnnConfig {
+        stride: 16,
+        max_size: 64,
+        confidence_threshold: 0.99,
+        ..CnnConfig::default()
+    });
+
+    println!(
+        "synthetic_face: GT={:?}, img {}x{}",
+        gt,
+        img.width(),
+        img.height()
+    );
+    let haar_dets = haar_det.detect(&img);
+    println!("  haar ({}):", haar_dets.len());
+    for d in &haar_dets {
+        println!(
+            "    x={} y={} w={} h={} score={:.3}",
+            d.x, d.y, d.w, d.h, d.score
+        );
+    }
+    let lum_dets = lum.detect(&img);
+    println!("  luminance ({}):", lum_dets.len());
+    for d in &lum_dets {
+        println!(
+            "    x={} y={} w={} h={} score={:.3}",
+            d.x, d.y, d.w, d.h, d.score
+        );
+    }
+    let (w, h) = (img.width(), img.height());
+    let mut buf = vec![0.0f32; w * h];
+    for (i, &p) in img.as_slice().iter().enumerate() {
+        buf[i] = p as f32 / 255.0;
+    }
+    let cnn_dets = cnn_cal.detect(&buf, w, h);
+    println!("  cnn-cal ({}):", cnn_dets.len());
+    for d in cnn_dets.iter().take(5) {
+        println!(
+            "    x={} y={} w={} h={} conf={:.3}",
+            d.x, d.y, d.w, d.h, d.confidence
+        );
+    }
+    if cnn_dets.len() > 5 {
+        println!("    ... +{} more", cnn_dets.len() - 5);
+    }
 }
 
 /// Pretty-print the eval table. The format is intentionally compact
@@ -346,7 +473,7 @@ fn run_ensemble(
     let mut total_ms = 0.0f32;
     let mut fused_total = 0usize;
     for entry in imgs {
-        let img = load_image(entry.path);
+        let img = load_entry(entry);
         let t0 = Instant::now();
         let haar_dets = haar_det.detect(&img);
         let lum_dets = lum.detect(&img);
@@ -601,7 +728,7 @@ fn golden_eval_table() {
     let mut total_ms = 0.0f32;
     let mut fused_total = 0usize;
     for entry in &imgs {
-        let img = load_image(entry.path);
+        let img = load_entry(entry);
         let t0 = Instant::now();
         let haar_dets = haar_det.detect(&img);
         let lum_dets = lum_strict.detect(&img);
