@@ -231,9 +231,7 @@ impl HaarFeature {
                 // SAFETY: caller guarantees the rect fits the window,
                 // which fits the image; narrow contract follows from
                 // `!ii_is_wide`.
-                unsafe {
-                    ii.rect_sum_unchecked_narrow(rx, ry, rx + rw, ry + rh) as f64
-                }
+                unsafe { ii.rect_sum_unchecked_narrow(rx, ry, rx + rw, ry + rh) as f64 }
             };
             let contribution = sum_f64 * (r.weight as f64);
             total += contribution;
