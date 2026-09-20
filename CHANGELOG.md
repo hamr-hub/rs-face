@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+### Changed — code-quality sweep (no behaviour change)
+- **`src/main.rs`** — `run_cnn_pipeline` and `run_algo_pipeline` were
+  near-identical (~120 lines of duplicated frame-loop / RGB-fallback /
+  record-building / manifest-write code). Replaced by a single shared
+  `run_with_detector` driver; the CNN path now adapts its `&[f32]` /
+  `CnnDetection` contract to the shared `Fn(&GrayImage) -> Vec<Detection>`
+  signature via a small closure. Same manifest layout, same `--only-with-face`
+  semantics, same `--out` paths.
+
+### Fixed — error chain consistency
+- **`OnnxError::source()`** (`src/onnx/mod.rs`) now exposes the wrapped
+  `io::Error` as the error source. Previously only `Display` carried the
+  underlying message; `Error::source()` returned `None`, breaking any
+  generic error chainer that walks `source()`.
+
+### Added — edge-case tests
+- **`src/face.rs`** — `iou_nested_box` (a box fully contained in another
+  should give `area(inner)/area(outer)`) and `iou_is_symmetric`
+  (`a.iou(b) == b.iou(a)` across disjoint, partial-overlap and nested
+  cases). The pre-existing `iou_*` tests covered identical, disjoint
+  and half-overlap but not these.
+- **`src/detector.rs`** — `detector_with_zero_area_image_returns_no_detections`
+  covers `0×0`, `10×0`, `0×10` zero-area images so future pyramid /
+  scan refactors cannot regress the empty-source path.
+>>>>>>> ac37493 (docs(changelog): cover code-quality sweep (main refactor, onnx source, edge tests)
+
+< HEAD
 ### Security — platform server hardening
 - **Uploads now stream to a staging file instead of buffering in memory**
   (`platform/server/src/api.rs`, `stream_field_to_staging`): the multipart
@@ -85,6 +113,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.env.example` documents every knob including timeouts and memory limits.
 - `.dockerignore` rewritten to keep the build context small (target/data/
   models/web-dist excluded).
+=======
+### Changed — code-quality sweep (no behaviour change)
+- **`src/main.rs`** — `run_cnn_pipeline` and `run_algo_pipeline` were
+  near-identical (~120 lines of duplicated frame-loop / RGB-fallback /
+  record-building / manifest-write code). Replaced by a single shared
+  `run_with_detector` driver; the CNN path now adapts its `&[f32]` /
+  `CnnDetection` contract to the shared `Fn(&GrayImage) -> Vec<Detection>`
+  signature via a small closure. Same manifest layout, same `--only-with-face`
+  semantics, same `--out` paths.
+
+### Fixed — error chain consistency
+- **`OnnxError::source()`** (`src/onnx/mod.rs`) now exposes the wrapped
+  `io::Error` as the error source. Previously only `Display` carried the
+  underlying message; `Error::source()` returned `None`, breaking any
+  generic error chainer that walks `source()`.
+
+### Added — edge-case tests
+- **`src/face.rs`** — `iou_nested_box` (a box fully contained in another
+  should give `area(inner)/area(outer)`) and `iou_is_symmetric`
+  (`a.iou(b) == b.iou(a)` across disjoint, partial-overlap and nested
+  cases). The pre-existing `iou_*` tests covered identical, disjoint
+  and half-overlap but not these.
+- **`src/detector.rs`** — `detector_with_zero_area_image_returns_no_detections`
+  covers `0×0`, `10×0`, `0×10` zero-area images so future pyramid /
+  scan refactors cannot regress the empty-source path.
+
+
 
 ### Added — every algorithm is now a cargo trimmable
 - **Per-algorithm feature flags** turn the monolithic build into a pick-and-mix
