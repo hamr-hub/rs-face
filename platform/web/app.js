@@ -10,6 +10,22 @@
  */
 'use strict';
 
+/**
+ * POST/import 响应解析:先确认 r.ok,再解析 JSON。后端错误统一是 `{error:..}`;
+ * 个别历史路径仍可能返回纯文本,这里兼容两种(JSON 取不到退化为文本)。
+ * 否则 413/500/502 上 r.json() 抛 SyntaxError,toast 只能显示一个空失败,
+ * 用户看不到服务端真正的报错。
+ */
+function readApiJson(r) {
+  if (!r.ok) {
+    return r
+      .json()
+      .catch(() => r.text().then(t => ({ error: t || ('HTTP ' + r.status) })))
+      .then(j => Promise.reject(new Error(j.error || ('HTTP ' + r.status))));
+  }
+  return r.json();
+}
+
 const api = {
   // 列表带 200ms 内存缓存:同一 tab 内 SSE 帧事件 + sidebar 刷新可能连发 2-3 次。
   // 命中路径 0 次 HTTP,0 次 JSON parse。
@@ -31,27 +47,27 @@ const api = {
     const fd = new FormData();
     fd.append('file', file);
     if (algo) fd.append('algo', algo); // 空 / undefined = 不发送,后端走 env/默认
-    return fetch('/api/jobs/image', { method: 'POST', body: fd }).then(r => r.json());
+    return fetch('/api/jobs/image', { method: 'POST', body: fd }).then(readApiJson);
   },
   postVideo:   (file, algo) => {
     const fd = new FormData();
     fd.append('file', file);
     if (algo) fd.append('algo', algo);
-    return fetch('/api/jobs/video', { method: 'POST', body: fd }).then(r => r.json());
+    return fetch('/api/jobs/video', { method: 'POST', body: fd }).then(readApiJson);
   },
-  postStream:  (url, algo) => fetch('/api/jobs/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, algo: algo || undefined }) }).then(r => r.json()),
+  postStream:  (url, algo) => fetch('/api/jobs/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, algo: algo || undefined }) }).then(readApiJson),
   // 导入端点 — 返回 S3 LAN URL,浏览器可直接 <video src> 播放
   importVideo:    (file, algo) => {
     const fd = new FormData();
     fd.append('file', file);
     if (algo) fd.append('algo', algo);
-    return fetch('/api/import/video', { method: 'POST', body: fd }).then(r => r.json());
+    return fetch('/api/import/video', { method: 'POST', body: fd }).then(readApiJson);
   },
   importVideoUrl: (url, algo) => fetch('/api/import/video-url', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url, algo: algo || undefined }),
-  }).then(r => r.json()),
+  }).then(readApiJson),
   importUrls:     id => fetch('/api/import/' + encodeURIComponent(id) + '/urls').then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
   getConfig:   () => fetch('/api/config').then(r => r.ok ? r.json() : null).catch(() => null),
   metrics:     (signal) => fetch('/api/metrics', { signal }).then(r => r.ok ? r.json() : null).catch(() => null),
@@ -1784,21 +1800,29 @@ const upload = (() => {
       toast.error('导入失败: ' + e.message);
     }
   }
+  /** 当前 LAN URL 轮询句柄:切换/重复导入时先清掉旧的,避免多个定时器叠加。 */
+  let activeLanTimer = null;
   /** 轮询 LAN URL 端点(轻量,只查内存);拿到后更新 preview。 */
   function pollLanUrl(jobId) {
+    if (activeLanTimer) { clearInterval(activeLanTimer); activeLanTimer = null; }
     let tries = 0;
     const max = 60; // 60s 内
     const t = setInterval(async () => {
       tries++;
-      if (tries > max) { clearInterval(t); return; }
+      // 预览已关闭或切换到别的任务:立即停止,避免把 URL 写到无关任务上。
+      if (state.currentJobId !== jobId) {
+        clearInterval(t); activeLanTimer = null; return;
+      }
+      if (tries > max) { clearInterval(t); activeLanTimer = null; return; }
       try {
         const u = await api.importUrls(jobId);
         if (u && u.original_url) {
           preview.setLanUrl(u.original_url);
-          if (u.is_terminal) clearInterval(t);
+          if (u.is_terminal) { clearInterval(t); activeLanTimer = null; }
         }
       } catch {}
     }, 1000);
+    activeLanTimer = t;
   }
   async function submitStream(url) {
     try {

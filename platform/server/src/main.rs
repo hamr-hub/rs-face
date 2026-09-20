@@ -9,6 +9,7 @@ mod jobs;
 mod metrics;
 mod persist;
 mod s3;
+mod zip;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -64,11 +65,24 @@ async fn main() {
     if let Err(e) = std::fs::create_dir_all(&cfg.local_media_dir) {
         eprintln!("[rsface-platform] WARN: create local_media_dir failed: {e}");
     }
+    // 清理上次进程残留的上传暂存文件(客户端中断/崩溃会留下 .part)。
+    // 重启时不可能还有效,直接整目录清掉再重建。
+    let staging_dir = cfg.tmp_dir.join("staging");
+    let _ = std::fs::remove_dir_all(&staging_dir);
+    if let Err(e) = std::fs::create_dir_all(&staging_dir) {
+        eprintln!("[rsface-platform] WARN: create upload staging dir failed: {e}");
+    }
 
     // PostgreSQL 持久化(可选;连接失败则降级为内存模式)
     let db = if !cfg.database_url.is_empty() {
         let db = persist::Db::connect(&cfg.database_url).await;
-        db.migrate().await;
+        // 迁移失败不降级:库在但 schema 残缺时,降级会静默丢所有持久化。
+        // fail-fast 让容器进入 crash loop,运维能立刻看到。
+        if let Err(e) = db.migrate().await {
+            eprintln!("[rsface-platform] FATAL: database migration failed: {e}");
+            eprintln!("[rsface-platform] refusing to start against an unmigrated schema; fix the database and restart");
+            std::process::exit(1);
+        }
         Arc::new(db)
     } else {
         eprintln!("[rsface-platform] no DATABASE_URL — running in memory-only mode");

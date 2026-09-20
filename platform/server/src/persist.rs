@@ -47,29 +47,76 @@ impl Db {
         }
     }
 
-    pub async fn migrate(&self) {
+    /// 按文件名升序 apply 尚未记录的迁移,返回本次新应用的文件数。
+    ///
+    /// 每个文件整体放在一个事务里执行并在成功后写入 `schema_migrations`:
+    /// - 已应用的文件不再重跑(老逻辑每次启动全量重跑,依赖每条 DDL 幂等);
+    /// - 任何一条语句失败 → 整个文件回滚并把错误返回给调用方,不会留下
+    ///   半应用 schema(PG 里事务出错后后续语句也无法执行);
+    /// - 调用方对错误做 fail-fast,而不是像"PG 连不上"那样降级内存模式:
+    ///   对着一个残缺 schema 静默丢持久化比启动失败更危险。
+    pub async fn migrate(&self) -> Result<u64, String> {
         let Some(pool) = &self.pool else {
-            return;
+            return Ok(0);
         };
-        // 多迁移文件,按文件名升序逐个 apply。sqlx::query 不支持多语句,
-        // 每个文件内按 `;` 切分逐条执行。注意:split 之前必须先剥掉
-        // `-- ...` 行注释,否则注释里的 `;`(中文分号也常见)会被误切,
-        // 切出来的半截语句会让 PG 报 `syntax error at or near "<CJK>"`。
-        let files: [&str; 2] = [
-            include_str!("../../migrations/0001_init.sql"),
-            include_str!("../../migrations/0002_telemetry.sql"),
+        // 追踪表自身保持幂等、不纳入追踪(鸡生蛋问题)。
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (\n\
+             filename   TEXT PRIMARY KEY,\n\
+             applied_ms BIGINT NOT NULL\n\
+             )",
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| format!("ensure schema_migrations table: {e}"))?;
+
+        let files: &[(&str, &str)] = &[
+            (
+                "0001_init.sql",
+                include_str!("../../migrations/0001_init.sql"),
+            ),
+            (
+                "0002_telemetry.sql",
+                include_str!("../../migrations/0002_telemetry.sql"),
+            ),
         ];
-        for sql in files {
-            for stmt in strip_sql_line_comments(sql).split(';') {
-                let s = stmt.trim();
-                if s.is_empty() {
-                    continue;
-                }
-                if let Err(e) = sqlx::query(s).execute(pool).await {
-                    eprintln!("[persist] migration statement failed: {e}\n>> {s}");
-                }
+        let mut applied = 0u64;
+        for (name, sql) in files {
+            let already: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE filename = $1)",
+            )
+            .bind(*name)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("check applied migration {name}: {e}"))?;
+            if already {
+                continue;
             }
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| format!("begin tx for {name}: {e}"))?;
+            // sqlx 扩展协议不支持多语句;按顶层 `;` 切分,切分器识别
+            // 注释 / 字符串 / 美元引用,不会被字面量里的 `;` 误切。
+            for stmt in split_sql_statements(sql) {
+                sqlx::query(&stmt)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| format!("migration {name} statement failed: {e}\n>> {stmt}"))?;
+            }
+            sqlx::query("INSERT INTO schema_migrations(filename, applied_ms) VALUES ($1, $2)")
+                .bind(*name)
+                .bind(now_ms_u64() as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("record migration {name}: {e}"))?;
+            tx.commit()
+                .await
+                .map_err(|e| format!("commit migration {name}: {e}"))?;
+            applied += 1;
+            eprintln!("[persist] applied migration {name}");
         }
+        Ok(applied)
     }
 
     #[allow(dead_code)] // 保留:DB 恢复 / 健康自检 API 面
@@ -461,28 +508,189 @@ fn status_to_str(s: JobStatus) -> &'static str {
     }
 }
 
-/// 去掉 SQL 文本里的 `--` 行注释(从 `--` 到该行末尾)。这是 `migrate()`
-/// 的 split-by-`;` 之前的预处理:迁移文件里写中文注释很常见,而中文标点里
-/// 偶尔会出现 `;`(或英文 `;` 出现在描述里),如果先 split 后过滤,会把
-/// 一段注释切成两个 SQL 片段送进 PG,后者没有 `CREATE` 开头就会被报
-/// `syntax error at or near "<CJK>"`。正确做法是先剥注释再 split。
-///
-/// 仅处理 `--` 行注释;`/* ... */` 块注释和字符串字面量里的 `;` / `--`
-/// 不是我们的迁移文件关心的(都是纯 DDL),留给将来需要时再扩展。
-fn strip_sql_line_comments(sql: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    for line in sql.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("--") {
-            // 整行都是注释,丢掉
-            continue;
+/// 迁移切词器的词法状态。
+enum Lex {
+    Normal,
+    LineComment,
+    /// `/* */` 块注释;PG 允许嵌套,u32 记录嵌套深度。
+    Block(u32),
+    /// `'...'` 字符串;bool=true 表示 E'...' 风格,反斜杠转义下一字符。
+    Single(bool),
+    /// `"..."` 引用标识符。
+    Double,
+    /// `$tag$ ... $tag$` 美元引用(函数体常见),tag 可为空串。
+    Dollar(String),
+}
+
+/// 按顶层 `;` 把 SQL 脚本切成单条语句。与朴素的 `sql.split(';')` 不同,
+/// 切词器跟踪 PG 的词法结构,注释 / 字面量里的 `;` 不会误切:
+/// - `--` 行注释、`/* */` 嵌套块注释,
+/// - `'...'` 字符串(`''` 双写、E'...' 的 `\` 转义),
+/// - `"..."` 标识符(`""` 双写),
+/// - `$tag$...$tag$` 美元引用。
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let n = chars.len();
+    let mut stmts = Vec::new();
+    let mut cur = String::new();
+    let mut state = Lex::Normal;
+    let mut i = 0usize;
+    while i < n {
+        let c = chars[i];
+        let next = if i + 1 < n { Some(chars[i + 1]) } else { None };
+        match state {
+            Lex::Normal => {
+                if c == '-' && next == Some('-') {
+                    cur.push_str("--");
+                    i += 2;
+                    state = Lex::LineComment;
+                } else if c == '/' && next == Some('*') {
+                    cur.push_str("/*");
+                    i += 2;
+                    state = Lex::Block(1);
+                } else if c == '\'' {
+                    // E'...' / e'...' 前缀:前一个字符是 E 且再往前不是
+                    // 标识符字符,才按转义字符串处理。
+                    let prev_is_e =
+                        matches!(chars.get(i.wrapping_sub(1)), Some(&e) if e == 'E' || e == 'e');
+                    let before_is_ident = matches!(
+                        chars.get(i.wrapping_sub(2)),
+                        Some(&p) if p.is_ascii_alphanumeric() || p == '_'
+                    );
+                    let escaped = prev_is_e && !before_is_ident;
+                    cur.push(c);
+                    i += 1;
+                    state = Lex::Single(escaped);
+                } else if c == '"' {
+                    cur.push(c);
+                    i += 1;
+                    state = Lex::Double;
+                } else if c == '$' {
+                    if let Some((tag, end)) = dollar_tag_at(&chars, i) {
+                        for ch in &chars[i..end] {
+                            cur.push(*ch);
+                        }
+                        i = end;
+                        state = Lex::Dollar(tag);
+                    } else {
+                        cur.push(c);
+                        i += 1;
+                    }
+                } else if c == ';' {
+                    if !cur.trim().is_empty() {
+                        stmts.push(std::mem::take(&mut cur));
+                    }
+                    i += 1;
+                } else {
+                    cur.push(c);
+                    i += 1;
+                }
+            }
+            Lex::LineComment => {
+                cur.push(c);
+                i += 1;
+                if c == '\n' {
+                    state = Lex::Normal;
+                }
+            }
+            Lex::Block(depth) => {
+                if c == '/' && next == Some('*') {
+                    cur.push_str("/*");
+                    i += 2;
+                    state = Lex::Block(depth + 1);
+                } else if c == '*' && next == Some('/') {
+                    cur.push_str("*/");
+                    i += 2;
+                    state = if depth <= 1 {
+                        Lex::Normal
+                    } else {
+                        Lex::Block(depth - 1)
+                    };
+                } else {
+                    cur.push(c);
+                    i += 1;
+                }
+            }
+            Lex::Single(escaped) => {
+                if escaped && c == '\\' {
+                    if let Some(nc) = next {
+                        cur.push(c);
+                        cur.push(nc);
+                        i += 2;
+                    } else {
+                        cur.push(c);
+                        i += 1;
+                    }
+                } else if c == '\'' {
+                    if next == Some('\'') {
+                        cur.push_str("''");
+                        i += 2;
+                    } else {
+                        cur.push(c);
+                        i += 1;
+                        state = Lex::Normal;
+                    }
+                } else {
+                    cur.push(c);
+                    i += 1;
+                }
+            }
+            Lex::Double => {
+                if c == '"' && next == Some('"') {
+                    cur.push_str("\"\"");
+                    i += 2;
+                } else {
+                    cur.push(c);
+                    i += 1;
+                    if c == '"' {
+                        state = Lex::Normal;
+                    }
+                }
+            }
+            Lex::Dollar(ref tag) => {
+                if let Some((t, end)) = dollar_tag_at(&chars, i) {
+                    if &t == tag {
+                        for ch in &chars[i..end] {
+                            cur.push(*ch);
+                        }
+                        i = end;
+                        state = Lex::Normal;
+                        continue;
+                    }
+                }
+                cur.push(c);
+                i += 1;
+            }
         }
-        // 行内注释:从 `--` 开始截断(不在字符串内时)。简化:我们的迁移
-        // 不会在 DDL 行末加 `-- 备注`,所以这里不处理。
-        out.push_str(line);
-        out.push('\n');
     }
-    out
+    if !cur.trim().is_empty() {
+        stmts.push(cur);
+    }
+    stmts
+}
+
+/// 若 `start` 处是合法的美元引用开标签 `$tag$`,返回 (tag, 闭 `$` 后的下标)。
+/// tag 可空;非空时必须遵循未引用标识符规则(字母/下划线开头)。
+fn dollar_tag_at(chars: &[char], start: usize) -> Option<(String, usize)> {
+    if chars[start] != '$' {
+        return None;
+    }
+    let mut j = start + 1;
+    if j < chars.len() && !(chars[j].is_ascii_alphabetic() || chars[j] == '_') {
+        // 空 tag(紧接着闭 $)合法,否则首字符非法(如 $1 参数)。
+        if j < chars.len() && chars[j] == '$' {
+            return Some((String::new(), j + 1));
+        }
+        return None;
+    }
+    while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+        j += 1;
+    }
+    if j < chars.len() && chars[j] == '$' {
+        Some((chars[start + 1..j].iter().collect(), j + 1))
+    } else {
+        None
+    }
 }
 
 pub fn now_ms_u64() -> u64 {
@@ -490,4 +698,76 @@ pub fn now_ms_u64() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_sql_statements;
+
+    #[test]
+    fn splits_on_top_level_semicolons() {
+        let stmts = split_sql_statements("CREATE TABLE a (x INT); CREATE TABLE b (y INT);");
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("CREATE TABLE a"));
+        assert!(stmts[1].contains("CREATE TABLE b"));
+    }
+
+    #[test]
+    fn semicolon_in_string_literal_does_not_split() {
+        let stmts = split_sql_statements("INSERT INTO t VALUES ('a;b'); SELECT 1;");
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("'a;b'"));
+    }
+
+    #[test]
+    fn doubled_quote_keeps_semicolon_inside() {
+        let stmts = split_sql_statements("VALUES ('it''s; ok'); SELECT 1;");
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("'it''s; ok'"));
+    }
+
+    #[test]
+    fn e_string_backslash_does_not_terminate() {
+        let stmts = split_sql_statements(r"VALUES (E'x\';y'); SELECT 1;");
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains(r"E'x\';y'"));
+    }
+
+    #[test]
+    fn line_comment_semicolon_is_ignored() {
+        let stmts = split_sql_statements("-- x; y\nSELECT 1; SELECT 2;");
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].trim_start().starts_with("-- x; y"));
+    }
+
+    #[test]
+    fn nested_block_comments_have_one_statement() {
+        let stmts = split_sql_statements("/* a /* b */ c; */ SELECT 1;");
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].starts_with("/* a /* b */ c; */"));
+    }
+
+    #[test]
+    fn dollar_quoted_body_keeps_semicolons() {
+        let sql = "CREATE FUNCTION f() RETURNS int AS $$ BEGIN\nRETURN 1;\nEND $$ LANGUAGE plpgsql; SELECT 2;";
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("RETURN 1;"));
+    }
+
+    #[test]
+    fn tagged_dollar_quote_matches_only_same_tag() {
+        let sql = "DO $body$ BEGIN PERFORM ';'; END $body$; SELECT 1;";
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("$body$"));
+    }
+
+    #[test]
+    fn bundled_migrations_split_to_expected_statements() {
+        let init = split_sql_statements(include_str!("../../migrations/0001_init.sql"));
+        assert_eq!(init.len(), 7);
+        let telemetry = split_sql_statements(include_str!("../../migrations/0002_telemetry.sql"));
+        assert_eq!(telemetry.len(), 1);
+    }
 }

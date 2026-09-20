@@ -7,6 +7,7 @@ use hmac::{Hmac, Mac};
 use sha2::Digest;
 use ureq::Agent;
 
+#[derive(Clone)]
 pub struct S3Client {
     agent: Agent,
     endpoint: String, // http://host:port,无尾斜杠
@@ -47,9 +48,9 @@ impl S3Client {
 
     /// 桶不存在则创建;存在则跳过。
     pub fn ensure_bucket(&self) -> Result<(), S3Error> {
-        match self.request("HEAD", "/", &[], None) {
+        match self.request("HEAD", "/", &[], &[], None) {
             Ok(_) => Ok(()),
-            Err(_) => self.request("PUT", "/", &[], None).map(|_| ()),
+            Err(_) => self.request("PUT", "/", &[], &[], None).map(|_| ()),
         }
     }
 
@@ -58,6 +59,7 @@ impl S3Client {
         self.request(
             "PUT",
             &format!("/{key}"),
+            &[],
             &[("content-type", content_type)],
             body,
         )
@@ -65,7 +67,7 @@ impl S3Client {
     }
 
     pub fn get_object(&self, key: &str) -> Result<(Vec<u8>, String), S3Error> {
-        let resp = self.request("GET", &format!("/{key}"), &[], None)?;
+        let resp = self.request("GET", &format!("/{key}"), &[], &[], None)?;
         let ct = resp
             .header("content-type")
             .unwrap_or("application/octet-stream")
@@ -91,7 +93,7 @@ impl S3Client {
             None => format!("bytes={start}-"),
         };
         // range 作为 header 传给 request();签名时一并纳入 canonical headers。
-        let resp = self.request("GET", &format!("/{key}"), &[("range", &range)], None)?;
+        let resp = self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
         // 先取 header 再消费 reader(into_reader 之后 resp 已 move)。
         let cr_total = resp
             .header("content-range")
@@ -107,10 +109,54 @@ impl S3Client {
     /// HEAD object:取 Content-Length(不下载 body)。Range 请求需要先知道
     /// 对象总大小来构造 `Content-Range` 响应头。
     pub fn head_object(&self, key: &str) -> Result<u64, S3Error> {
-        let resp = self.request("HEAD", &format!("/{key}"), &[], None)?;
+        let resp = self.request("HEAD", &format!("/{key}"), &[], &[], None)?;
         resp.header("content-length")
             .and_then(|v| v.parse::<u64>().ok())
             .ok_or_else(|| S3Error("HEAD missing content-length".into()))
+    }
+
+    /// ListObjectsV2:列出 `prefix` 下全部对象 key(自动按 continuation-token
+    /// 翻页)。删除任务媒体时用来枚举对象。
+    pub fn list_objects(&self, prefix: &str) -> Result<Vec<String>, S3Error> {
+        let mut keys = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut query: Vec<(String, String)> = vec![
+                ("list-type".to_string(), "2".to_string()),
+                ("prefix".to_string(), prefix.to_string()),
+            ];
+            if let Some(t) = &token {
+                query.push(("continuation-token".to_string(), t.clone()));
+            }
+            let q_ref: Vec<(&str, &str)> = query
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let resp = self.request("GET", "/", &q_ref, &[], None)?;
+            let mut xml = String::new();
+            std::io::Read::read_to_string(&mut resp.into_reader(), &mut xml)
+                .map_err(|e| S3Error(e.to_string()))?;
+            keys.extend(extract_xml_tag_values(&xml, "Key"));
+            let truncated = extract_xml_tag_values(&xml, "IsTruncated")
+                .first()
+                .map(|s| s == "true")
+                .unwrap_or(false);
+            let next = extract_xml_tag_values(&xml, "NextContinuationToken")
+                .into_iter()
+                .next();
+            match (truncated, next) {
+                (true, Some(t)) => token = Some(t),
+                _ => break,
+            }
+        }
+        Ok(keys)
+    }
+
+    /// DELETE object。任务删除时逐个调用(平台是 LAN 单桶,按键 DELETE 无需
+    /// DeleteObjects 必需的 Content-MD5,免引 md5 实现)。
+    pub fn delete_object(&self, key: &str) -> Result<(), S3Error> {
+        self.request("DELETE", &format!("/{key}"), &[], &[], None)
+            .map(|_| ())
     }
 
     // ---- 内部:签名 + 发请求 ----
@@ -118,28 +164,53 @@ impl S3Client {
     fn request(
         &self,
         method: &str,
-        path_and_query: &str,
+        path: &str,
+        query: &[(&str, &str)],
         extra_headers: &[(&str, &str)],
         body: Option<Vec<u8>>,
     ) -> Result<ureq::Response, S3Error> {
-        // path 与 bucket:virtual-host 风格用子域名,这里统一用 path 风格 /bucket/key。
-        let url = format!(
+        let path_trimmed = path.trim_start_matches('/');
+        // path 风格 /bucket/key(virtual-host 风格不适用 rustfs 单 IP 部署)。
+        let url_base = format!(
             "{}/{}/{}",
             self.endpoint,
-            url_encode_segment(&self.bucket),
-            path_and_query.trim_start_matches('/')
+            url_encode_path_segment(&self.bucket),
+            path_trimmed
         );
-        // 供签名用的 path
+        // 供签名用的 path。
         let sign_path = format!(
             "/{}/{}",
-            url_encode_segment(&self.bucket),
-            path_and_query.trim_start_matches('/')
+            url_encode_path_segment(&self.bucket),
+            path_trimmed
         );
+
+        // canonical query:按 key(再 value)排序后 RFC3986 编码。
+        // 旧实现把 query 直接拼进 sign_path 却签成空 query,带参请求会
+        // SignatureDoesNotMatch;list_objects 依赖这里签名正确。
+        let mut query_sorted: Vec<(&str, &str)> = query.to_vec();
+        query_sorted.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(b.1)));
+        let canonical_query: String = query_sorted
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "{}={}",
+                    url_encode_query_component(k),
+                    url_encode_query_component(v)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        // host 取自 base(query 里的 '/' 已全编码为 %2F,但先取更直接)。
+        let host = host_of(&url_base);
+        let url = if canonical_query.is_empty() {
+            url_base
+        } else {
+            format!("{url_base}?{canonical_query}")
+        };
 
         let body_bytes = body.unwrap_or_default();
         let payload_hash = hex(&sha2::Sha256::digest(&body_bytes));
         let amz_date = now_amz_date();
-        let host = host_of(&url);
 
         // canonical headers:content-type(可选), host, x-amz-content-sha256, x-amz-date,
         // range(可选,GET 部分 content 时必须与实际发送一致)
@@ -169,7 +240,7 @@ impl S3Client {
             .join(";");
 
         let canonical_request = format!(
-            "{method}\n{sign_path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+            "{method}\n{sign_path}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
         );
 
         let scope = format!("{}/{}/s3/aws4_request", &amz_date[..8], self.region);
@@ -267,7 +338,23 @@ fn host_of(url: &str) -> String {
 }
 
 /// path 风格地址段编码:仅编码不安全字符,`/` 由调用方控制。
-fn url_encode_segment(s: &str) -> String {
+fn url_encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// query key/value 编码:除 unreserved 字符外全部百分号编码,`/` 也编码
+/// 为 %2F(S3 对 query 与 path 的编码规则不同;若留下裸 `/`,服务端重算
+/// 签名时会再编码,导致 SignatureDoesNotMatch)。
+fn url_encode_query_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -278,6 +365,35 @@ fn url_encode_segment(s: &str) -> String {
         }
     }
     out
+}
+
+/// 从 S3 ListObjectsV2 的 XML 响应里取出指定标签的文本值。
+/// 不引 XML 解析器:响应结构简单且标签无嵌套同名;对象 key 字符集受限,
+/// 只处理最基本的 `&amp;` `&lt;` `&gt;` 实体。
+fn extract_xml_tag_values(xml: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find(&open) {
+        let after = &rest[start + open.len()..];
+        match after.find(&close) {
+            Some(end) => {
+                out.push(xml_unescape(&after[..end]));
+                rest = &after[end + close.len()..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+fn xml_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, S3Error> {
@@ -359,5 +475,30 @@ mod tests {
         assert_eq!(host_of("http://rustfs:9000/"), "rustfs:9000");
         // no scheme fallback: whole string up to the first '/'
         assert_eq!(host_of("localhost:9000/x"), "localhost:9000");
+    }
+
+    #[test]
+    fn query_component_encodes_slash() {
+        // prefix 里的 / 必须编码成 %2F,否则与服务端重算的签名不一致。
+        assert_eq!(url_encode_query_component("jobs/a/b/"), "jobs%2Fa%2Fb%2F");
+        assert_eq!(url_encode_query_component("a-b_c.d~1"), "a-b_c.d~1");
+    }
+
+    #[test]
+    fn list_xml_keys_and_truncation() {
+        let xml = "<?xml version=\"1.0\"?><ListBucketResult><Name>b</Name>\
+<Contents><Key>jobs/1/original.mp4</Key></Contents>\
+<Contents><Key>jobs/1/000001.png</Key></Contents>\
+<IsTruncated>true</IsTruncated>\
+<NextContinuationToken>abc123</NextContinuationToken></ListBucketResult>";
+        let keys = extract_xml_tag_values(xml, "Key");
+        assert_eq!(keys, vec!["jobs/1/original.mp4", "jobs/1/000001.png"]);
+        assert_eq!(extract_xml_tag_values(xml, "IsTruncated"), vec!["true"]);
+        assert_eq!(
+            extract_xml_tag_values(xml, "NextContinuationToken"),
+            vec!["abc123"]
+        );
+        // 不存在的标签返回空,不报错。
+        assert!(extract_xml_tag_values(xml, "NoSuchTag").is_empty());
     }
 }

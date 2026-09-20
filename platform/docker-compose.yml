@@ -5,10 +5,15 @@
 # Web 平台:    http://localhost:20080/
 # S3 控制台:   http://localhost:19000/
 # PostgreSQL:  localhost:15432 (rsface/rsface)
+#
+# 可调参数(默认值见下方 ${...:-...});复制 platform/.env.example 到
+# 仓库根 .env 可改密钥/密码/资源上限。控制台端口只绑 127.0.0.1,
+# 不对 LAN 暴露;server 走 host 网络绑 0.0.0.0:20080(产品需要)。
 
 services:
   rustfs:
-    image: rustfs/rustfs:latest
+    # 固定到具体版本,不跟 latest:升级是显式动作,避免重建时意外换版本。
+    image: rustfs/rustfs:1.0.0
     container_name: rsface-rustfs
     # 以 hyx (UID:GID = 1000:1000) 运行,这样 bind mount 到 ../data/rustfs/
     # 创建的对象在宿主侧也是 hyx:hyx,无需 root 写。镜像默认以 root 运行
@@ -23,8 +28,9 @@ services:
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rsface-secret}
       RUSTFS_VOLUMES: /data
     ports:
-      - "19000:9000"
-      - "19001:9001"
+      # 仅本机访问:控制台不向 LAN 开放(server 经 host 网络走 127.0.0.1 访问)。
+      - "127.0.0.1:19000:9000"
+      - "127.0.0.1:19001:9001"
     volumes:
       # bind mount 到 data/rustfs/ (项目内,跟随代码可见)。
       - ../data/rustfs:/data
@@ -37,7 +43,8 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:16-alpine
+    # 固定 minor 版本(16.15),只跟安全补丁的升级走显式改标签。
+    image: postgres:16.15-alpine
     container_name: rsface-postgres
     # 以 hyx (UID:GID = 1000:1000) 运行,跟 rustfs + server 对齐,
     # 这样 bind mount 到 ../data/pg/pgdata/ 创建的文件也是 1000:1000,
@@ -46,9 +53,12 @@ services:
     environment:
       POSTGRES_DB: rsface
       POSTGRES_USER: rsface
-      POSTGRES_PASSWORD: rsface-pass
+      # 密码可在 .env 里覆盖(DATABASE_URL 必须同步用同一变量)。
+      # 注意:密码不要含 @ : / ? 等 URL 特殊字符,否则 DATABASE_URL 解析失败。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rsface-pass}
     ports:
-      - "15432:5432"
+      # 仅本机访问:DB 不向 LAN 暴露。
+      - "127.0.0.1:15432:5432"
     volumes:
       # bind mount 到 data/pg/pgdata/ (项目内,跟随代码可见)。
       # 首次启动为空目录 → postgres 自动 initdb;dump 还原走 `make docker-restore-pg`
@@ -102,7 +112,7 @@ services:
       # 优雅停机:SIGTERM 后等任务排空的上限(docker stop 默认只等 10s,
       # 需配 stop_grace_period 一起调大)。
       SHUTDOWN_GRACE_SECS: ${SHUTDOWN_GRACE_SECS:-120}
-      DATABASE_URL: postgres://rsface:rsface-pass@127.0.0.1:15432/rsface
+      DATABASE_URL: postgres://rsface:${POSTGRES_PASSWORD:-rsface-pass}@127.0.0.1:15432/rsface
       LOCAL_MEDIA_DIR: /var/rsface-media
       # 跨域前端(留空 = 同源部署,不开 CORS)
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-}
