@@ -5,9 +5,11 @@
 //! `detector.rs` (pixel-space bbox + score). They are CPU-only, allocation-light,
 //! and `!Sync` (detector scratch buffers are owned per-thread, see `cnn::CnnScratch`).
 
-use crate::detector::Detection;
+#[cfg(feature = "detector-haar")]
 use crate::detector::{Detector as HaarDetectorInner, DetectorConfig};
+use crate::face::Detection;
 use crate::face::FaceDetection;
+#[cfg(feature = "detector-haar")]
 use crate::haar::Cascade;
 use crate::image::{GrayImage, RgbImage};
 
@@ -133,8 +135,10 @@ pub trait FaceDetector: Send {
 /// Maturity is reported as [`Maturity::Production`] for any cascade the user
 /// supplies; scaffolds (random-weight demo cascade) report as [`Maturity::Experimental`]
 /// so the badge remains truthful.
+#[cfg(feature = "detector-haar")]
 pub struct HaarDetector(pub HaarDetectorInner);
 
+#[cfg(feature = "detector-haar")]
 impl HaarDetector {
     /// Wrap a Haar cascade detector so it implements [`FaceDetector`].
     pub fn new(cascade: Cascade, config: DetectorConfig) -> Self {
@@ -142,6 +146,7 @@ impl HaarDetector {
     }
 }
 
+#[cfg(feature = "detector-haar")]
 impl FaceDetector for HaarDetector {
     fn name(&self) -> &'static str {
         "haar"
@@ -177,6 +182,7 @@ mod tests {
     /// The zero-dep classical detectors that ship by default must claim real
     /// maturity; a new detector starts at `Experimental` and is promoted
     /// consciously after measured accuracy lands in `docs/benchmarks.md`.
+    #[cfg(all(feature = "detector-haar", feature = "detector-luminance"))]
     #[test]
     fn classical_detectors_are_gray_without_landmarks() {
         let det = HaarDetector::new(
@@ -197,6 +203,7 @@ mod tests {
     /// `--algo haar` and the FaceDetector-trait dispatch agree on the algorithm
     /// tag. Regression: a typo here would silently break `Vec<Box<dyn FaceDetector>>`
     /// users that key off the string.
+    #[cfg(feature = "detector-haar")]
     #[test]
     fn haar_detector_reports_canonical_name_and_maturity() {
         let det = HaarDetector::new(
@@ -213,6 +220,7 @@ mod tests {
 
     /// The blanket `detect_faces_rgb` default must round-trip through grayscale without
     /// panicking, since every classical detector relies on it.
+    #[cfg(feature = "detector-haar")]
     #[test]
     fn default_rgb_path_delegates_to_gray_without_panic() {
         use crate::image::RgbImage;

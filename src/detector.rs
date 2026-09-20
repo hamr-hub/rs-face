@@ -1,53 +1,14 @@
 //! Multi-scale sliding window detector + non-maximum suppression.
 
+use crate::face::iou;
 use crate::haar::{Cascade, EvalCache};
 use crate::image::GrayImage;
 use crate::integral::{IntegralImage, RotatedIntegralImage, SquaredIntegralImage};
 
-/// A single detection: pixel-space bounding box + confidence score.
-#[derive(Clone, Debug)]
-pub struct Detection {
-    pub x: usize,
-    pub y: usize,
-    pub w: usize,
-    pub h: usize,
-    pub score: f32,
-}
-
-impl Detection {
-    /// Right edge (exclusive) of the bounding box.
-    #[inline]
-    pub fn right(&self) -> usize {
-        self.x + self.w
-    }
-
-    /// Bottom edge (exclusive) of the bounding box.
-    #[inline]
-    pub fn bottom(&self) -> usize {
-        self.y + self.h
-    }
-
-    /// Area in pixels (`w * h`).
-    #[inline]
-    pub fn area(&self) -> usize {
-        self.w * self.h
-    }
-
-    /// Intersection-over-union with another detection, in `[0, 1]`.
-    /// Overlapping boxes return `> 0`; disjoint boxes return exactly `0`.
-    pub fn iou(&self, other: &Detection) -> f32 {
-        iou(self, other)
-    }
-
-    /// Center point `(cx, cy)` of the bounding box.
-    #[inline]
-    pub fn center(&self) -> (f32, f32) {
-        (
-            self.x as f32 + self.w as f32 / 2.0,
-            self.y as f32 + self.h as f32 / 2.0,
-        )
-    }
-}
+// The classical detection box and greedy NMS live in `crate::face` so that
+// landmark-based detectors do not depend on this Haar-specific module.
+// Re-exported here for source compatibility (`rsface::detector::Detection`).
+pub use crate::face::{non_max_suppression, Detection};
 
 /// Configuration for the detector.
 #[derive(Clone, Debug)]
@@ -717,51 +678,6 @@ fn similar_rects(a: &Detection, b: &Detection, eps: f64) -> bool {
         && close((a.y + a.h) as i64, (b.y + b.h) as i64)
 }
 
-/// Standard greedy NMS: pick the highest-score box, suppress all with IoU > threshold.
-pub fn non_max_suppression(mut dets: Vec<Detection>, iou_threshold: f32) -> Vec<Detection> {
-    dets.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut keep: Vec<Detection> = Vec::new();
-    let mut suppressed = vec![false; dets.len()];
-    for i in 0..dets.len() {
-        if suppressed[i] {
-            continue;
-        }
-        keep.push(dets[i].clone());
-        for j in (i + 1)..dets.len() {
-            if suppressed[j] {
-                continue;
-            }
-            if iou(&dets[i], &dets[j]) > iou_threshold {
-                suppressed[j] = true;
-            }
-        }
-    }
-    keep
-}
-
-#[inline]
-fn iou(a: &Detection, b: &Detection) -> f32 {
-    let x1 = a.x.max(b.x);
-    let y1 = a.y.max(b.y);
-    let x2 = (a.x + a.w).min(b.x + b.w);
-    let y2 = (a.y + a.h).min(b.y + b.h);
-    let w = (x2 as i64 - x1 as i64).max(0) as usize;
-    let h = (y2 as i64 - y1 as i64).max(0) as usize;
-    let inter = (w * h) as f32;
-    if inter <= 0.0 {
-        return 0.0;
-    }
-    let union = (a.w * a.h + b.w * b.h) as f32 - inter;
-    if union <= 0.0 {
-        return 0.0;
-    }
-    inter / union
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,62 +708,6 @@ mod tests {
             !r.is_empty(),
             "expected at least one detection in bright-center pattern"
         );
-    }
-
-    #[test]
-    fn nsm_merges_overlapping() {
-        let a = Detection {
-            x: 0,
-            y: 0,
-            w: 20,
-            h: 20,
-            score: 1.0,
-        };
-        let b = Detection {
-            x: 2,
-            y: 2,
-            w: 20,
-            h: 20,
-            score: 0.9,
-        };
-        let c = Detection {
-            x: 100,
-            y: 100,
-            w: 20,
-            h: 20,
-            score: 0.5,
-        };
-        let r = non_max_suppression(vec![a.clone(), b.clone(), c.clone()], 0.3);
-        assert_eq!(r.len(), 2, "should merge a+b but keep c");
-        assert_eq!(r[0].score, 1.0);
-    }
-
-    #[test]
-    fn detection_helpers() {
-        let a = Detection {
-            x: 10,
-            y: 20,
-            w: 30,
-            h: 40,
-            score: 0.75,
-        };
-        assert_eq!(a.right(), 40);
-        assert_eq!(a.bottom(), 60);
-        assert_eq!(a.area(), 1200);
-        let (cx, cy) = a.center();
-        assert_eq!(cx, 25.0);
-        assert_eq!(cy, 40.0);
-        // Identical box → IoU 1; disjoint → 0.
-        let b = a.clone();
-        assert!((a.iou(&b) - 1.0).abs() < 1e-6);
-        let c = Detection {
-            x: 200,
-            y: 200,
-            w: 10,
-            h: 10,
-            score: 0.1,
-        };
-        assert_eq!(a.iou(&c), 0.0);
     }
 
     #[test]

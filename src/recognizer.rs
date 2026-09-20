@@ -1,9 +1,9 @@
 //! Unified [`FaceRecognizer`] trait — the recognition-side counterpart of
 //! [`crate::face_detector::FaceDetector`].
 //!
-//! The three zero-dep gallery recognisers — LBPH ([`crate::lbph::LbphRecognizer`]),
-//! eigenfaces ([`crate::eigenface::EigenfaceRecognizer`]) and Fisherfaces
-//! ([`crate::fisherface::FisherfaceRecognizer`) — all consume [`GrayImage`]
+//! The three zero-dep gallery recognisers — LBPH (the `LbphRecognizer` type
+//! in the `lbph` module), eigenfaces (`EigenfaceRecognizer` in `eigenface`)
+//! and Fisherfaces (`FisherfaceRecognizer` in `fisherface`) — all consume [`GrayImage`]
 //! crops, rank an enrolled gallery by a distance, gate the winner with a
 //! threshold plus a runner-up margin, and report the same four outcomes.
 //! That shared surface is encoded here so benchmark / platform / CLI code
@@ -15,14 +15,15 @@
 //! / 3.0). Always use each recogniser's own configured threshold; the
 //! [`Recognition`] enum carries the winner's raw distance for logging.
 //!
-//! ArcFace ([`crate::arcface_recognizer`]) deliberately does NOT implement
-//! this trait: it needs RGB + an ONNX runtime and scores *cosine
+//! ArcFace (the ONNX `arcface_recognizer` module) deliberately does NOT
+//! implement this trait: it needs RGB + an ONNX runtime and scores *cosine
 //! similarity* (higher is better) via [`crate::embedding::MatchOutcome`],
 //! so folding it into this distance-based grey-crop trait would hide real
 //! semantics. A grey-crop adapter may be added once an aligned-grey path
 //! exists.
 //!
 //! ```
+//! # #![cfg(feature = "recognizer-lbph")]
 //! use rsface::image::GrayImage;
 //! use rsface::lbph::{LbphConfig, LbphRecognizer};
 //! use rsface::recognizer::{FaceRecognizer, IncrementalRecognizer};
@@ -37,10 +38,7 @@
 //! assert!(signed_off(&rec));
 //! ```
 
-use crate::eigenface::EigenfaceRecognizer;
-use crate::fisherface::FisherfaceRecognizer;
 use crate::image::GrayImage;
-use crate::lbph::LbphRecognizer;
 
 /// Outcome of a gallery query, shared by every zero-dep recogniser.
 ///
@@ -160,82 +158,14 @@ pub trait IncrementalRecognizer: FaceRecognizer {
     fn remove(&mut self, label: &str) -> bool;
 }
 
-impl FaceRecognizer for LbphRecognizer {
-    fn name(&self) -> &'static str {
-        "lbph"
-    }
-    fn identify_crop(&self, crop: &GrayImage) -> Recognition {
-        self.identify_crop(crop)
-    }
-    fn rank_crop(&self, crop: &GrayImage) -> Vec<(String, f32)> {
-        self.rank_crop(crop)
-    }
-    fn verify(&self, label: &str, crop: &GrayImage) -> Option<f32> {
-        self.verify(label, crop)
-    }
-    fn len(&self) -> usize {
-        self.len()
-    }
-    fn crop_count(&self) -> usize {
-        self.crop_count()
-    }
-}
+// The `FaceRecognizer` / `IncrementalRecognizer` impls live next to each
+// algorithm (src/lbph.rs, src/eigenface.rs, src/fisherface.rs) so this trait
+// module does not force every recogniser into every build.
 
-impl IncrementalRecognizer for LbphRecognizer {
-    fn enroll(&mut self, label: String, crop: &GrayImage) {
-        self.enroll(label, crop)
-    }
-    fn remove(&mut self, label: &str) -> bool {
-        self.remove(label)
-    }
-}
-
-impl FaceRecognizer for EigenfaceRecognizer {
-    fn name(&self) -> &'static str {
-        "eigenface"
-    }
-    fn identify_crop(&self, crop: &GrayImage) -> Recognition {
-        self.identify_crop(crop)
-    }
-    fn rank_crop(&self, crop: &GrayImage) -> Vec<(String, f32)> {
-        self.rank_crop(crop)
-    }
-    fn verify(&self, label: &str, crop: &GrayImage) -> Option<f32> {
-        self.verify(label, crop)
-    }
-    fn len(&self) -> usize {
-        self.len()
-    }
-    fn crop_count(&self) -> usize {
-        self.crop_count()
-    }
-}
-
-impl FaceRecognizer for FisherfaceRecognizer {
-    fn name(&self) -> &'static str {
-        "fisherface"
-    }
-    fn identify_crop(&self, crop: &GrayImage) -> Recognition {
-        self.identify_crop(crop)
-    }
-    fn rank_crop(&self, crop: &GrayImage) -> Vec<(String, f32)> {
-        self.rank_crop(crop)
-    }
-    fn verify(&self, label: &str, crop: &GrayImage) -> Option<f32> {
-        self.verify(label, crop)
-    }
-    fn len(&self) -> usize {
-        self.len()
-    }
-    fn crop_count(&self) -> usize {
-        self.crop_count()
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "recognizer-lbph"))]
 mod tests {
     use super::*;
-    use crate::lbph::LbphConfig;
+    use crate::lbph::{LbphConfig, LbphRecognizer};
 
     fn fake_face(seed: u8) -> GrayImage {
         // Structured per-seed pattern so different seeds land at different
