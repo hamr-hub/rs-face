@@ -217,29 +217,37 @@ impl HaarFeature {
             // and every realistic face-window input (640×480 up to 4K) is
             // narrow. The branch is one per `eval_inbounds` call, not per
             // rect.
-            let sum: i64 = if is_tilted {
+            //
+            // The result stays in u64 when possible (the rect-sum
+            // inclusion-exclusion is always non-negative) so we save the
+            // `u64 → i64 → f64` cast chain that the historical
+            // implementation paid per rect.
+            let sum_f64: f64 = if is_tilted {
                 // Tilted corners also have to clear the rotated-table rims:
                 // p1 is `h` columns left of (rx, ry) and p3 is `rw + rh`
                 // rows below it. Where they don't, the checked query clips
                 // via its zero border — bit-identical on interior rects.
+                // Tilted rectangles are signed (45° diamond; the result can
+                // be negative), so keep this in i64.
                 let tilted_inbounds = rx >= rh && rx + rw <= ii_w && ry + rw + rh <= ii_h;
-                if tilted_inbounds {
+                let s: i64 = if tilted_inbounds {
                     // SAFETY: all four tilted corners are inside the table.
                     ri.tilted_rect_sum_unchecked(rx, ry, rx + rw, ry + rh)
                 } else {
                     ii.tilted_rect_sum(ri, rx, ry, rx + rw, ry + rh)
-                }
+                };
+                s as f64
             } else if ii.is_wide() {
-                ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as i64
+                ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as f64
             } else {
                 // SAFETY: caller guarantees the rect fits the window,
                 // which fits the image; narrow contract follows from
                 // `!is_wide()`.
                 unsafe {
-                    ii.rect_sum_unchecked_narrow(rx, ry, rx + rw, ry + rh) as i64
+                    ii.rect_sum_unchecked_narrow(rx, ry, rx + rw, ry + rh) as f64
                 }
             };
-            let contribution = (sum as f64) * (r.weight as f64);
+            let contribution = sum_f64 * (r.weight as f64);
             total += contribution;
         }
         total as f32
