@@ -68,6 +68,19 @@ jobs:
           ./target/release/rs-face test://5 --out /tmp/rsface-smoke
           test -f /tmp/rsface-smoke/manifest.json
 
+  tract-feature:
+    # The pure-Rust ONNX backend must keep compiling even though the default
+    # build is zero-dep. cuda-backend is intentionally NOT gated on hosted
+    # runners (no CUDA toolkit -> always fails); validate it on a GPU host.
+    name: feature gate (tract-backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check --features tract-backend
+        run: cargo check --features tract-backend --lib
+
   platform:
     name: platform server (ubuntu)
     runs-on: ubuntu-latest
