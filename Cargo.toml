@@ -222,6 +222,14 @@ name = "real_model_e2e"
 required-features = ["ort-backend"]
 
 [[test]]
+name = "inspect_algos"
+required-features = ["detector-haar", "detector-luminance", "detector-cnn"]
+
+[[test]]
+name = "golden_eval"
+required-features = ["detector-haar", "detector-luminance", "detector-cnn"]
+
+[[test]]
 name = "regression_dump"
 required-features = ["detector-haar"]
 
