@@ -80,9 +80,11 @@ fn resize_bilinear_downscale_odd_dimensions_is_stable() {
     let img = ramp_image(33, 27);
     let out = img.resize_bilinear(7, 5);
     assert_eq!((out.width(), out.height()), (7, 5));
-    for v in out.as_slice() {
-        assert!(*v <= 255);
-    }
+    // u8 max is 255, so "every pixel fits" is trivially true. Instead check
+    // the resize actually produced non-trivial output (a sane resize of a
+    // non-uniform source must yield at least one mid-range pixel).
+    assert!(out.as_slice().iter().any(|&v| v > 0));
+    assert!(out.as_slice().iter().any(|&v| v < 255));
 }
 
 #[test]
@@ -94,9 +96,9 @@ fn resize_bilinear_extreme_ratio_does_not_panic() {
     assert_eq!((tiny.width(), tiny.height()), (1, 1));
     let wide = img.resize_bilinear(1, 100);
     assert_eq!((wide.width(), wide.height()), (1, 100));
-    for v in wide.as_slice() {
-        assert!(*v <= 255);
-    }
+    // u8 max is 255 so a per-pixel <= 255 check would be a tautology;
+    // assert the output is non-trivial (not all zeros).
+    assert!(wide.as_slice().iter().any(|&v| v > 0));
 }
 
 #[test]
@@ -174,9 +176,10 @@ fn resize_area_odd_dimensions_does_not_panic() {
     let img = ramp_image(31, 23);
     let out = img.resize_area(7, 5);
     assert_eq!((out.width(), out.height()), (7, 5));
-    for v in out.as_slice() {
-        assert!(*v <= 255);
-    }
+    // u8 max is 255 — per-pixel clamp is a tautology. Sanity-check the
+    // resize produced non-trivial values.
+    assert!(out.as_slice().iter().any(|&v| v > 0));
+    assert!(out.as_slice().iter().any(|&v| v < 255));
 }
 
 #[test]
@@ -222,7 +225,7 @@ fn downscale_odd_input_does_not_panic_and_truncates() {
     let img = ramp_image(7, 5);
     let out = img.downscale(2);
     assert_eq!((out.width(), out.height()), (3, 2));
-    for v in out.as_slice() {
-        assert!(*v <= 255);
-    }
+    // u8 max is 255; per-pixel clamp is tautological. Sanity-check the
+    // downscale produced non-trivial output.
+    assert!(out.as_slice().iter().any(|&v| v > 0));
 }
