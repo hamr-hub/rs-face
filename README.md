@@ -456,18 +456,12 @@ This project is an exercise in zero-dep classical CV. Two known caveats:
    bump to `--scale 1.4` or `--scale 1.5` and expect fewer false
    negatives.
 
-2. **Tilted (45°) Haar features evaluate to 0.** The rotated integral's
-   two-pass formulation is non-trivial to keep correct under Rust's borrow
-   checker with zero deps. The cascade file format still supports them;
-   external cascades that use diagonal features will simply have those
-   features evaluate to 0.
-
-3. **Video containers other than PNG sequences require `ffmpeg` on PATH**
+2. **Video containers other than PNG sequences require `ffmpeg` on PATH**
    (zero Rust deps, the binary shells out). The included `FfmpegPipeSource`
    does its own resolution probing to match ffmpeg's even-aligned output
    dimensions and avoid desync.
 
-4. **The CNN weights are placeholders.** They are enough to keep the
+3. **The CNN weights are placeholders.** They are enough to keep the
    pipeline exercised end-to-end and to demonstrate that the CNN code path
    works; they are not a trained detector. Train on labelled data before
    relying on it.

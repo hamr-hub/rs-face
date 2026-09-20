@@ -48,6 +48,7 @@ pub fn demo_face_cascade() -> Cascade {
         kind: FeatureKind::VerticalCenter,
         width: 1,
         height: 3,
+        tilted: false,
         rects: vec![
             Rect::new(0, 0, 1, 1, 1.0),
             Rect::new(0, 1, 1, 1, -2.0),
@@ -58,6 +59,7 @@ pub fn demo_face_cascade() -> Cascade {
         kind: FeatureKind::HorizontalCenter,
         width: 3,
         height: 1,
+        tilted: false,
         rects: vec![
             Rect::new(0, 0, 1, 1, 1.0),
             Rect::new(1, 0, 1, 1, -2.0),
@@ -73,6 +75,7 @@ pub fn demo_face_cascade() -> Cascade {
         kind: FeatureKind::VerticalCenter,
         width: 1,
         height: 5,
+        tilted: false,
         rects: vec![
             Rect::new(0, 0, 1, 1, 1.0),
             Rect::new(0, 1, 1, 1, -1.0),
@@ -88,6 +91,7 @@ pub fn demo_face_cascade() -> Cascade {
         kind: FeatureKind::HorizontalCenter,
         width: 3,
         height: 1,
+        tilted: false,
         rects: vec![
             Rect::new(0, 0, 1, 1, 1.0),
             Rect::new(1, 0, 1, 1, -3.0),
@@ -101,6 +105,7 @@ pub fn demo_face_cascade() -> Cascade {
         width: 1,
         height: 2,
         rects: vec![Rect::new(0, 0, 1, 1, 1.0), Rect::new(0, 1, 1, 1, -1.0)],
+        tilted: false,
     };
 
     // Left-half vs right-half: horizontal edge for vertical symmetry.
@@ -109,6 +114,7 @@ pub fn demo_face_cascade() -> Cascade {
         width: 2,
         height: 1,
         rects: vec![Rect::new(0, 0, 1, 1, 1.0), Rect::new(1, 0, 1, 1, -1.0)],
+        tilted: false,
     };
 
     let all = vec![

@@ -209,10 +209,36 @@ pub fn read_png(r: &mut dyn Read) -> std::io::Result<(usize, usize, u8, Vec<u8>)
                 let h = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
                 let depth = data[8];
                 let ctype = data[9];
+                let compression = data[10];
+                let filter_method = data[11];
+                let interlace = data[12];
                 if depth != 8 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "only 8-bit supported",
+                    ));
+                }
+                if w == 0 || h == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "PNG with zero dimensions",
+                    ));
+                }
+                if compression != 0 || filter_method != 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unsupported PNG compression/filter method",
+                    ));
+                }
+                if interlace == 1 {
+                    // Adam7 splits pixels into seven reduced passes; the
+                    // decoder below reconstructs one progressive scanline
+                    // stream, so silently accepting it returns a scrambled
+                    // image. Reject loudly instead.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Adam7 interlaced PNGs are not supported; \
+                         re-export the image as non-interlaced",
                     ));
                 }
                 ihdr = Some((w, h, ctype, depth));
@@ -373,6 +399,44 @@ mod tests {
                 assert_eq!(img[(x, y)], back[(x, y)]);
             }
         }
+    }
+
+    /// Minimal PNG (signature + IHDR + IEND, dummy CRCs) with chosen
+    /// IHDR fields; the decoder verifies CRC only when it cares to.
+    fn minimal_png_ihdr(interlace: u8, w: u32, h: u32) -> Vec<u8> {
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 0, 0, 0, interlace]);
+        let mut out = PNG_SIG.to_vec();
+        out.extend_from_slice(&(13u32.to_be_bytes()));
+        out.extend_from_slice(b"IHDR");
+        out.extend_from_slice(&ihdr);
+        out.extend_from_slice(&[0, 0, 0, 0]); // CRC not verified here
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(b"IEND");
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out
+    }
+
+    #[test]
+    fn adam7_interlaced_png_is_rejected() {
+        // Regression: interlace byte used to be ignored, so an Adam7 image
+        // was decoded as progressive and came back scrambled.
+        let bytes = minimal_png_ihdr(1, 8, 8);
+        let err = read_png(&mut Cursor::new(bytes)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("Adam7"),
+            "error should name Adam7, got: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_dimension_png_is_rejected() {
+        let bytes = minimal_png_ihdr(0, 0, 8);
+        let err = read_png(&mut Cursor::new(bytes)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

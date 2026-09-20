@@ -54,6 +54,10 @@ pub struct HaarFeature {
     pub kind: FeatureKind,
     pub width: u8,  // feature-local width  (units)
     pub height: u8, // feature-local height (units)
+    /// OpenCV `<tilted>` flag: every rect is a 45-degree rotated rectangle,
+    /// so each rectangle sum is read from the rotated integral table rather
+    /// than the upright one.
+    pub tilted: bool,
     pub rects: Vec<Rect>,
 }
 
@@ -95,6 +99,7 @@ impl HaarFeature {
     ) -> f32 {
         let mut total: f64 = 0.0;
         let is_custom = matches!(self.kind, FeatureKind::CustomRects);
+        let is_tilted = self.tilted || matches!(self.kind, FeatureKind::DiagonalEdge);
         let fw = if is_custom {
             1usize
         } else {
@@ -124,9 +129,10 @@ impl HaarFeature {
             let ry2 = (ry + rh).min(ii_h);
             let rx = rx.min(rx2);
             let ry = ry.min(ry2);
-            let sum: i64 = match self.kind {
-                FeatureKind::DiagonalEdge => ii.tilted_rect_sum(ri, rx, ry, rx2, ry2),
-                _ => ii.rect_sum(rx, ry, rx2, ry2) as i64,
+            let sum: i64 = if is_tilted {
+                ii.tilted_rect_sum(ri, rx, ry, rx2, ry2)
+            } else {
+                ii.rect_sum(rx, ry, rx2, ry2) as i64
             };
             let contribution = (sum as f64) * (r.weight as f64);
             total += contribution;
@@ -151,6 +157,16 @@ impl HaarFeature {
     ///
     /// Cascades whose rects overhang the window (possible with hand-edited
     /// `.rfcf` files) must keep using `eval`.
+    ///
+    /// ## Tilted features
+    /// Window containment is NOT sufficient for tilted rects: their rotated
+    /// lookup corners fan out left by the rect height and down by
+    /// `width + height` (see [`RotatedIntegralImage::tilted_rect_sum`]).
+    /// Near the image rims the corners overhang even though the upright rect
+    /// fits; such rects fall back to the checked query, whose zero-border
+    /// convention is the clipped result OpenCV computes from its padded
+    /// rotated table. Interior rects keep the unchecked fast path, so a
+    /// typical scan only pays for bounds checks on its rim windows.
     pub(crate) fn eval_inbounds(
         &self,
         ii: &IntegralImage,
@@ -165,6 +181,7 @@ impl HaarFeature {
         debug_assert!(x + win_w <= ii_w && y + win_h <= ii_h);
         let mut total: f64 = 0.0;
         let is_custom = matches!(self.kind, FeatureKind::CustomRects);
+        let is_tilted = self.tilted || matches!(self.kind, FeatureKind::DiagonalEdge);
         let fw = if is_custom {
             1usize
         } else {
@@ -193,9 +210,20 @@ impl HaarFeature {
             // SAFETY (rect_sum_unchecked): rx < rx2 ≤ ii_w and ry < ry2 ≤ ii_h
             // follow from the documented contract of this method — rects map
             // inside the window, the window fits the image, and rw/rh ≥ 1.
-            let sum: i64 = match self.kind {
-                FeatureKind::DiagonalEdge => ri.tilted_rect_sum_unchecked(rx, ry, rx + rw, ry + rh),
-                _ => ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as i64,
+            let sum: i64 = if is_tilted {
+                // Tilted corners also have to clear the rotated-table rims:
+                // p1 is `h` columns left of (rx, ry) and p3 is `rw + rh`
+                // rows below it. Where they don't, the checked query clips
+                // via its zero border — bit-identical on interior rects.
+                let tilted_inbounds = rx >= rh && rx + rw <= ii_w && ry + rw + rh <= ii_h;
+                if tilted_inbounds {
+                    // SAFETY: all four tilted corners are inside the table.
+                    ri.tilted_rect_sum_unchecked(rx, ry, rx + rw, ry + rh)
+                } else {
+                    ii.tilted_rect_sum(ri, rx, ry, rx + rw, ry + rh)
+                }
+            } else {
+                ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as i64
             };
             let contribution = (sum as f64) * (r.weight as f64);
             total += contribution;
@@ -213,6 +241,7 @@ impl HaarFeature {
             kind: FeatureKind::VerticalEdge,
             width: fw,
             height: fh,
+            tilted: false,
             rects: vec![
                 Rect::new(0, 0, fw, half, 1.0),
                 Rect::new(0, half, fw, fh - half, -1.0),
@@ -226,6 +255,7 @@ impl HaarFeature {
             kind: FeatureKind::HorizontalEdge,
             width: fw,
             height: fh,
+            tilted: false,
             rects: vec![
                 Rect::new(0, 0, half, fh, 1.0),
                 Rect::new(half, 0, fw - half, fh, -1.0),
@@ -238,6 +268,7 @@ impl HaarFeature {
             kind: FeatureKind::DiagonalEdge,
             width: fw,
             height: fh,
+            tilted: false,
             rects: vec![
                 Rect::new(0, 0, fw, fh / 2, 1.0),
                 Rect::new(0, fh / 2, fw, fh - fh / 2, -1.0),
@@ -251,6 +282,7 @@ impl HaarFeature {
             kind: FeatureKind::VerticalCenter,
             width: fw,
             height: fh,
+            tilted: false,
             rects: vec![
                 Rect::new(0, 0, fw, third, 1.0),
                 Rect::new(0, third, fw, third, -2.0),
@@ -265,6 +297,7 @@ impl HaarFeature {
             kind: FeatureKind::HorizontalCenter,
             width: fw,
             height: fh,
+            tilted: false,
             rects: vec![
                 Rect::new(0, 0, third, fh, 1.0),
                 Rect::new(third, 0, third, fh, -2.0),
@@ -317,6 +350,62 @@ mod tests {
         assert_eq!(r, -510.0);
     }
 
+    /// Sum of pixels in the tilted (45°) rectangle `(x1,y1,rw,rh)` using
+    /// the OpenCV cone definition directly: cell R(X,Y) covers pixel
+    /// (px,py) when `Y-1-py >= |X-1-px|`; the tilted query is
+    /// R[p0]-R[p1]-R[p2]+R[p3] with the CV_TILTED_OFS corners.
+    fn cone_rect_sum(img: &GrayImage, x1: usize, y1: usize, rw: usize, rh: usize) -> i64 {
+        let (w, h) = (img.width() as isize, img.height() as isize);
+        let cone = |cx: isize, cy: isize| -> i64 {
+            if cx < 1 || cy < 1 || cx > w || cy > h {
+                return 0;
+            }
+            let mut s = 0i64;
+            for py in 0..h {
+                for px in 0..w {
+                    // (cy-1-py) >= |cx-1-px|  ⇔  cy-py > |cx-1-px|
+                    if py < cy && cy - py > (cx - 1 - px).abs() {
+                        s += img[(px as usize, py as usize)] as i64;
+                    }
+                }
+            }
+            s
+        };
+        let (x, y) = (x1 as isize, y1 as isize);
+        let (rw, rh) = (rw as isize, rh as isize);
+        cone(x, y) - cone(x - rh, y + rh) - cone(x + rw, y + rw) + cone(x + rw - rh, y + rw + rh)
+    }
+
+    #[test]
+    fn tilted_custom_rects_eval_matches_open_cv_cone_sum() {
+        // A converted OpenCV tilted feature: kind=CustomRects with the
+        // `tilted` flag set must evaluate each rect through the rotated
+        // integral table (CV_TILTED_OFS), not as an upright rect.
+        let (w, h) = (48usize, 40usize);
+        let mut img = GrayImage::new(w, h);
+        let mut seed = 0x5EED_1234u32;
+        for y in 0..h {
+            for x in 0..w {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                img[(x, y)] = (seed >> 24) as u8;
+            }
+        }
+        let ii = IntegralImage::from_gray(&img);
+        let ri = RotatedIntegralImage::from_gray(&img);
+        let feat = HaarFeature {
+            kind: FeatureKind::CustomRects,
+            width: 24,
+            height: 24,
+            tilted: true,
+            rects: vec![Rect::new(4, 6, 8, 4, 1.0), Rect::new(4, 10, 8, 4, -1.0)],
+        };
+        let (ox, oy) = (2usize, 3usize);
+        let got = feat.eval(&ii, &ri, ox, oy, 24, 24, w, h);
+        let expected =
+            cone_rect_sum(&img, ox + 4, oy + 6, 8, 4) - cone_rect_sum(&img, ox + 4, oy + 10, 8, 4);
+        assert_eq!(got, expected as f32);
+    }
+
     #[test]
     fn eval_inbounds_matches_eval_bit_for_bit() {
         // Deterministic pseudo-random image covering all feature families.
@@ -343,6 +432,7 @@ mod tests {
             kind: FeatureKind::CustomRects,
             width: 24,
             height: 24,
+            tilted: false,
             rects: vec![Rect::new(2, 2, 8, 8, 1.0), Rect::new(12, 4, 9, 10, -2.0)],
         };
         let mut all = feats;

@@ -152,9 +152,9 @@ impl PipelineRunner {
         }
     }
 
-    fn embed(&self, gray: &GrayImage, dets: &[Detection]) -> Vec<Embedding> {
+    fn embed(&self, gray: &GrayImage, dets: &[Detection]) -> Vec<(usize, Embedding)> {
         let mut out = Vec::with_capacity(dets.len());
-        for d in dets {
+        for (i, d) in dets.iter().enumerate() {
             let (x0, y0, x1, y1) = clamp_bbox(gray, d);
             if x1 <= x0 || y1 <= y0 {
                 continue;
@@ -171,7 +171,9 @@ impl PipelineRunner {
                 continue;
             };
             if let Some(e) = Embedding::from_raw(&raw) {
-                out.push(e);
+                // Tag with the detection index: a dropped crop here must
+                // not shift later embeddings onto the wrong detection.
+                out.push((i, e));
             }
         }
         out
@@ -186,7 +188,7 @@ impl Identify for PipelineRunner {
         &mut self,
         gray: &GrayImage,
         _rgb: Option<&RgbImage>,
-    ) -> Result<(Vec<Detection>, Vec<Embedding>), Self::Err> {
+    ) -> Result<(Vec<Detection>, Vec<(usize, Embedding)>), Self::Err> {
         let dets = self.detect(gray);
         let embs = self.embed(gray, &dets);
         Ok((dets, embs))

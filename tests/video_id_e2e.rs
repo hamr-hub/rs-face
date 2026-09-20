@@ -17,16 +17,15 @@ use rsface::image::{GrayImage, RgbImage};
 use rsface::source::{Frame, FrameSource};
 use rsface::video_id::{identify_video, Identify, VideoIdConfig};
 
-/// Pre-scripted frame source: each entry is `(detections, embeddings)` for
-/// one frame. The frame is just a 1x1 gray placeholder; the test never reads
-/// pixels.
+/// Pre-scripted frame source: each entry's detections for one frame. The
+/// frame is just a 1x1 gray placeholder; the test never reads pixels.
 struct ScriptedSource {
-    frames: Vec<(Vec<Detection>, Vec<Embedding>)>,
+    frames: Vec<Vec<Detection>>,
     index: u64,
 }
 
 impl ScriptedSource {
-    fn new(frames: Vec<(Vec<Detection>, Vec<Embedding>)>) -> Self {
+    fn new(frames: Vec<Vec<Detection>>) -> Self {
         Self { frames, index: 0 }
     }
 }
@@ -36,7 +35,7 @@ impl FrameSource for ScriptedSource {
         if (self.index as usize) >= self.frames.len() {
             return Ok(None);
         }
-        let (dets, _embs) = self.frames[self.index as usize].clone();
+        let dets = self.frames[self.index as usize].clone();
         self.index += 1;
         let gray = Arc::new(GrayImage::new(1, 1));
         let rgb = Some(Arc::new(RgbImage::new(1, 1)));
@@ -49,10 +48,10 @@ impl FrameSource for ScriptedSource {
     }
 }
 
-/// Echo the per-frame `(detections, embeddings)` directly, no detection
-/// pipeline needed.
+/// Echo the per-frame scripted detections directly, tagging each one with
+/// its index + paired embedding (the contract Identify now requires).
 struct ScriptedIdentify {
-    frames: Vec<(Vec<Detection>, Vec<Embedding>)>,
+    frames: Vec<(Vec<Detection>, Vec<(usize, Embedding)>)>,
     cursor: usize,
 }
 
@@ -62,13 +61,13 @@ impl Identify for ScriptedIdentify {
         &mut self,
         _gray: &GrayImage,
         _rgb: Option<&RgbImage>,
-    ) -> Result<(Vec<Detection>, Vec<Embedding>), Self::Err> {
+    ) -> Result<(Vec<Detection>, Vec<(usize, Embedding)>), Self::Err> {
         if self.cursor >= self.frames.len() {
             return Ok((Vec::new(), Vec::new()));
         }
-        let (d, e) = self.frames[self.cursor].clone();
+        let frame = self.frames[self.cursor].clone();
         self.cursor += 1;
-        Ok((d, e))
+        Ok(frame)
     }
 }
 
@@ -97,20 +96,26 @@ fn two_actors_alternating_cluster_into_two_identities() {
     let alice = near_basis(0, dim, 0.0);
     let bob = near_basis(1, dim, 0.0);
 
-    let mut frames: Vec<(Vec<Detection>, Vec<Embedding>)> = Vec::new();
+    let mut det_frames: Vec<Vec<Detection>> = Vec::new();
+    let mut frames: Vec<(Vec<Detection>, Vec<(usize, Embedding)>)> = Vec::new();
     for i in 0..6 {
         let (e, bbox) = if i < 3 {
             (alice.clone(), det(10, 10, 80, 80, 0.9))
         } else {
             (bob.clone(), det(200, 100, 80, 80, 0.9))
         };
-        frames.push((vec![bbox], vec![e]));
+        det_frames.push(vec![bbox.clone()]);
+        frames.push((vec![bbox], vec![(0, e)]));
     }
     // Alice re-appears at the end.
-    frames.push((vec![det(15, 12, 78, 80, 0.85)], vec![alice.clone()]));
-    frames.push((vec![det(20, 14, 76, 78, 0.85)], vec![alice.clone()]));
+    let bbox1 = det(15, 12, 78, 80, 0.85);
+    let bbox2 = det(20, 14, 76, 78, 0.85);
+    det_frames.push(vec![bbox1.clone()]);
+    frames.push((vec![bbox1], vec![(0, alice.clone())]));
+    det_frames.push(vec![bbox2.clone()]);
+    frames.push((vec![bbox2], vec![(0, alice.clone())]));
 
-    let mut src = ScriptedSource::new(frames.clone());
+    let mut src = ScriptedSource::new(det_frames);
     let mut id = ScriptedIdentify { frames, cursor: 0 };
 
     let cfg = VideoIdConfig {
@@ -158,17 +163,19 @@ fn below_threshold_singleton_lands_in_cluster_zero() {
     let alice = near_basis(0, dim, 0.0);
     let bob = near_basis(3, dim, 0.0); // cos(alice, bob) == 0
 
-    let mut frames: Vec<(Vec<Detection>, Vec<Embedding>)> = Vec::new();
+    let mut det_frames: Vec<Vec<Detection>> = Vec::new();
+    let mut frames: Vec<(Vec<Detection>, Vec<(usize, Embedding)>)> = Vec::new();
     for i in 0..6 {
         let (e, bbox) = if i % 2 == 0 {
             (alice.clone(), det(10, 10, 80, 80, 0.9))
         } else {
             (bob.clone(), det(200, 100, 80, 80, 0.9))
         };
-        frames.push((vec![bbox], vec![e]));
+        det_frames.push(vec![bbox.clone()]);
+        frames.push((vec![bbox], vec![(0, e)]));
     }
 
-    let mut src = ScriptedSource::new(frames.clone());
+    let mut src = ScriptedSource::new(det_frames);
     let mut id = ScriptedIdentify { frames, cursor: 0 };
 
     let cfg = VideoIdConfig {

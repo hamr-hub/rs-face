@@ -224,7 +224,7 @@ impl Detector {
         let needs_tilted = cascade
             .features
             .iter()
-            .any(|f| matches!(f.kind, crate::haar::FeatureKind::DiagonalEdge));
+            .any(|f| f.tilted || matches!(f.kind, crate::haar::FeatureKind::DiagonalEdge));
         Self {
             cascade,
             config,
@@ -322,7 +322,27 @@ impl Detector {
                 break;
             }
             if det_w_at_cur < self.config.min_size || det_h_at_cur < self.config.min_size {
-                break;
+                // The window keeps its base size while the image shrinks, so
+                // the detection footprint GROWS on later pyramid levels.
+                // Breaking here made min_size > base window size (e.g. 48)
+                // return zero detections; climb to the next level instead.
+                match next_pyramid_level(
+                    img,
+                    current,
+                    cw,
+                    ch,
+                    self.config.scale_factor,
+                    win_w,
+                    win_h,
+                ) {
+                    Some((lvl, sx, sy)) => {
+                        downscaled = Some(lvl);
+                        scale_x = sx;
+                        scale_y = sy;
+                        continue;
+                    }
+                    None => break,
+                }
             }
             if cw < win_w || ch < win_h {
                 break;
@@ -380,8 +400,11 @@ impl Detector {
             let use_variance = self.config.variance_threshold < u64::MAX;
 
             // GPU fast-path: run the full cascade on GPU when worth it.
-            // The kernel handles variance normalisation + per-stage eval +        // early rejection in parallel across all (x, y) windows.
-            if stride == 1 {
+            // The kernel handles variance normalisation + per-stage eval +
+            // early rejection in parallel across all (x, y) windows.
+            // The OpenCL kernel has no rotated-integral-table path, so a
+            // cascade containing tilted features must stay on CPU.
+            if stride == 1 && !self.needs_tilted {
                 if let Some(g) = self.gpu() {
                     // Same u32-overflow guard as the integral-build path:
                     // the GPU kernel's table cannot represent wide images.
@@ -501,28 +524,13 @@ impl Detector {
             }
 
             // Prepare next pyramid level.
-            let next_w = ((cw as f32) / self.config.scale_factor)
-                .round()
-                .max(win_w as f32) as usize;
-            let next_h = ((ch as f32) / self.config.scale_factor)
-                .round()
-                .max(win_h as f32) as usize;
-            if next_w == cw || next_h == ch {
-                break;
-            }
-            // For downscaling (next_w < cw), use area averaging which matches
-            // OpenCV's default `cv::resize` for >2× downscaling and is significantly
-            // more accurate than bilinear for cascade evaluation.
-            if next_w < cw {
-                downscaled = Some(current.resize_area(next_w, next_h));
-            } else {
-                downscaled = Some(current.resize_bilinear(next_w, next_h));
-            }
-            let next = downscaled.as_ref().expect("just stored");
-            scale_x = img.width() as f32 / next.width() as f32;
-            scale_y = img.height() as f32 / next.height() as f32;
-            if next.width() <= win_w || next.height() <= win_h {
-                break;
+            match next_pyramid_level(img, current, cw, ch, self.config.scale_factor, win_w, win_h) {
+                Some((lvl, sx, sy)) => {
+                    downscaled = Some(lvl);
+                    scale_x = sx;
+                    scale_y = sy;
+                }
+                None => break,
             }
         }
 
@@ -538,6 +546,42 @@ impl Detector {
             windows_evaluated,
         )
     }
+}
+
+/// Compute the next pyramid level for an image currently `cw × ch`.
+///
+/// Returns the resized level plus per-axis scales (orig/level), or `None`
+/// when the pyramid cannot advance: the next dimensions would not shrink,
+/// or the next level would not fit the base cascade window.
+///
+/// Downscaling uses area averaging, which matches OpenCV's default
+/// `cv::resize` for >2× shrinkage and is more accurate than bilinear for
+/// cascade evaluation; bilinear is kept for the (rare) non-shrinking axis.
+fn next_pyramid_level(
+    img: &GrayImage,
+    current: &GrayImage,
+    cw: usize,
+    ch: usize,
+    scale_factor: f32,
+    win_w: usize,
+    win_h: usize,
+) -> Option<(GrayImage, f32, f32)> {
+    let next_w = ((cw as f32) / scale_factor).round().max(win_w as f32) as usize;
+    let next_h = ((ch as f32) / scale_factor).round().max(win_h as f32) as usize;
+    if next_w == cw || next_h == ch {
+        return None;
+    }
+    let level = if next_w < cw {
+        current.resize_area(next_w, next_h)
+    } else {
+        current.resize_bilinear(next_w, next_h)
+    };
+    if level.width() <= win_w || level.height() <= win_h {
+        return None;
+    }
+    let sx = img.width() as f32 / level.width() as f32;
+    let sy = img.height() as f32 / level.height() as f32;
+    Some((level, sx, sy))
 }
 
 /// Relative position/size tolerance for two raw hits to count as the same
@@ -872,6 +916,35 @@ mod tests {
         }
         // The fixture must be a real PPM, not the test-suite placeholder.
         assert!(w > 100 && h > 100, "fixture suspiciously small: {w}x{h}");
+    }
+
+    #[test]
+    fn min_size_larger_than_base_window_still_detects() {
+        // Regression for the pyramid `break` bug: a min_size above the
+        // cascade's base window (24) used to terminate the pyramid before
+        // any level was scanned (the footprint starts at 24 and GROWS as
+        // the image shrinks), so min_size=48 returned zero detections.
+        let fixture = Path::new("tests/fixtures/lena.ppm");
+        assert!(fixture.exists(), "fixture {} missing", fixture.display());
+        let mut f = std::fs::File::open(fixture).expect("open lena.ppm");
+        let rgb = crate::image::codec::read_ppm(&mut f).expect("decode ppm");
+        let img = rgb.to_gray();
+
+        let cfg = DetectorConfig {
+            min_size: 48,
+            max_size: 4096,
+            use_gpu: false,
+            ..DetectorConfig::default()
+        };
+        let det = Detector::new(crate::haar::bundled::bundled_frontalface_cascade(), cfg);
+        let hits = det.detect(&img);
+        assert!(
+            !hits.is_empty(),
+            "min_size=48 must still detect Lena's face; pyramid climb regressed"
+        );
+        for d in &hits {
+            assert!(d.w >= 48 && d.h >= 48, "reported box below min_size: {d:?}");
+        }
     }
 
     fn det(x: usize, y: usize, w: usize, h: usize, score: f32) -> Detection {
