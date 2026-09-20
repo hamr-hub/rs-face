@@ -210,6 +210,13 @@ impl HaarFeature {
             // SAFETY (rect_sum_unchecked): rx < rx2 ≤ ii_w and ry < ry2 ≤ ii_h
             // follow from the documented contract of this method — rects map
             // inside the window, the window fits the image, and rw/rh ≥ 1.
+            //
+            // Dispatch the corner reads to the narrow (u32) specialised
+            // path when the integral image is narrow — skips the
+            // `IntegralTable` enum match that the generic variant emits,
+            // and every realistic face-window input (640×480 up to 4K) is
+            // narrow. The branch is one per `eval_inbounds` call, not per
+            // rect.
             let sum: i64 = if is_tilted {
                 // Tilted corners also have to clear the rotated-table rims:
                 // p1 is `h` columns left of (rx, ry) and p3 is `rw + rh`
@@ -222,8 +229,15 @@ impl HaarFeature {
                 } else {
                     ii.tilted_rect_sum(ri, rx, ry, rx + rw, ry + rh)
                 }
-            } else {
+            } else if ii.is_wide() {
                 ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as i64
+            } else {
+                // SAFETY: caller guarantees the rect fits the window,
+                // which fits the image; narrow contract follows from
+                // `!is_wide()`.
+                unsafe {
+                    ii.rect_sum_unchecked_narrow(rx, ry, rx + rw, ry + rh) as i64
+                }
             };
             let contribution = (sum as f64) * (r.weight as f64);
             total += contribution;
