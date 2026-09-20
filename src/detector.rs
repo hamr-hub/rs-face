@@ -507,12 +507,7 @@ impl Detector {
                                     y + win_h - 1,
                                 )
                             } else {
-                                ii.rect_sum_unchecked(
-                                    x + 1,
-                                    y + 1,
-                                    x + win_w - 1,
-                                    y + win_h - 1,
-                                )
+                                ii.rect_sum_unchecked(x + 1, y + 1, x + win_w - 1, y + win_h - 1)
                             };
                             let ss = cache.sum_sq_rect_sum_unchecked(
                                 x + 1,
