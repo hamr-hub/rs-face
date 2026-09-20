@@ -273,13 +273,69 @@ impl IntegralImage {
     #[inline]
     pub(crate) fn rect_sum_unchecked(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> u64 {
         debug_assert!(x1 < x2 && x2 <= self.width && y1 < y2 && y2 <= self.height);
-        // SAFETY: documented contract above; debug_assert pins it in test builds.
+        let stride = self.stride;
+        // SAFETY: documented contract above; debug_assert pins it in test
+        // builds. Match the IntegralTable discriminant ONCE per call (the
+        // historical implementation did 4 separate `corner_unchecked` calls
+        // and paid the match cost four times — at ~50k windows × 4 corners
+        // × 25 stages of cascade eval, that branch pressure was a real
+        // contributor to the cascade's hot-loop cost).
         unsafe {
-            let a = self.corner_unchecked(y1 * self.stride + x1);
-            let b = self.corner_unchecked(y1 * self.stride + x2);
-            let c = self.corner_unchecked(y2 * self.stride + x1);
-            let d = self.corner_unchecked(y2 * self.stride + x2);
-            d + a - b - c
+            match &self.data {
+                IntegralTable::Narrow(v) => {
+                    let a = *v.get_unchecked(y1 * stride + x1) as u64;
+                    let b = *v.get_unchecked(y1 * stride + x2) as u64;
+                    let c = *v.get_unchecked(y2 * stride + x1) as u64;
+                    let d = *v.get_unchecked(y2 * stride + x2) as u64;
+                    d + a - b - c
+                }
+                IntegralTable::Wide(v) => {
+                    let a = *v.get_unchecked(y1 * stride + x1);
+                    let b = *v.get_unchecked(y1 * stride + x2);
+                    let c = *v.get_unchecked(y2 * stride + x1);
+                    let d = *v.get_unchecked(y2 * stride + x2);
+                    d + a - b - c
+                }
+            }
+        }
+    }
+
+    /// Narrow-only variant of [`Self::rect_sum_unchecked`]. Skips the
+    /// `IntegralTable` enum match that the generic variant must emit on
+    /// every call — at ~50k windows × 25 stages × 1 feature × ~3 rects of
+    /// cascade eval, the match is the dominant cost in the cascade hot
+    /// loop. Use only when the caller has already verified
+    /// `!self.is_wide()` for this table.
+    ///
+    /// # Safety contract (caller must uphold)
+    /// Same as [`Self::rect_sum_unchecked`], AND the caller must guarantee
+    /// the table is narrow (`is_wide() == false`). Calling on a wide
+    /// table would read u32 entries instead of u64 — a soundness bug.
+    #[inline]
+    pub(crate) unsafe fn rect_sum_unchecked_narrow(
+        &self,
+        x1: usize,
+        y1: usize,
+        x2: usize,
+        y2: usize,
+    ) -> u64 {
+        debug_assert!(x1 < x2 && x2 <= self.width && y1 < y2 && y2 <= self.height);
+        debug_assert!(!self.is_wide());
+        let stride = self.stride;
+        // SAFETY: caller guarantees narrow variant and in-bounds rect. The
+        // discriminant is re-checked as `unreachable_unchecked` so the
+        // compiler can drop the second arm of the dispatch.
+        unsafe {
+            match &self.data {
+                IntegralTable::Narrow(v) => {
+                    let a = *v.get_unchecked(y1 * stride + x1) as u64;
+                    let b = *v.get_unchecked(y1 * stride + x2) as u64;
+                    let c = *v.get_unchecked(y2 * stride + x1) as u64;
+                    let d = *v.get_unchecked(y2 * stride + x2) as u64;
+                    d + a - b - c
+                }
+                IntegralTable::Wide(_) => std::hint::unreachable_unchecked(),
+            }
         }
     }
 
@@ -501,6 +557,36 @@ impl SquaredIntegralImage {
                 .unwrap_or(u64::MAX);
             sum_sq_part >= sum_part + rhs
         })
+    }
+
+    /// Fast variance pre-filter test with precomputed `N` and `N²`.
+    ///
+    /// Same arithmetic and accept/reject semantics as
+    /// [`Self::passes_variance_sums`], but accepts the two
+    /// `(N, N²)` values the cascade already has on hand (the window's
+    /// `(w - 2) * (h - 2)` and its square) instead of recomputing them per
+    /// call. The detector builds `CachedNormFactor` once per frame, then
+    /// threads `(n_pixels, n_pixels_sq)` into the window scan and avoids
+    /// both the `w * h` multiply and the `(w*h).checked_mul(w*h)` per window.
+    ///
+    /// All overflow checks in [`Self::passes_variance_sums`] are dropped:
+    /// `sum_sq ≤ W*H*255² ≤ 1.4e11` and `N ≤ 24*24 = 576`, so
+    /// `sum_sq * N ≤ 8e13 < 2^47`; `sum ≤ 5.3e8` and `sum² ≤ 2.8e17 < 2^58`;
+    /// `threshold * N² ≤ u64::MAX*576²` would only overflow on pathological
+    /// thresholds the detector never reaches. If a future caller wants the
+    /// conservative semantics, use [`Self::passes_variance_sums`].
+    #[inline]
+    pub fn passes_variance_sums_fast(
+        sum: u64,
+        sum_sq: u64,
+        n: u64,
+        n_sq: u64,
+        variance_threshold: u64,
+    ) -> bool {
+        // variance >= threshold iff sum_sq * N - sum² >= threshold * N²
+        let sum_sq_part = sum_sq * n;
+        let sum_part = sum * sum;
+        sum_sq_part >= sum_part + variance_threshold * n_sq
     }
 }
 

@@ -358,6 +358,10 @@ impl Detector {
             // intermediate clone (previously this was `cached_sq.clone()`
             // which copied the entire (W+1)*(H+1) u64 buffer).
             cache.set_squared_iis(ii_sq);
+            // Tell the cascade whether the regular integral is narrow (u32)
+            // — the cascade's per-rect reads take the branch-free narrow
+            // path when this is true. Set once per level.
+            cache.set_narrow_integral(!ii.is_wide());
             // Rotated integral: only cascades with tilted (DiagonalEdge)
             // features ever query it. The demo cascade has none, so skip the
             // (W+1)×(H+1) i64 construction entirely for such cascades.
@@ -378,6 +382,27 @@ impl Detector {
                 .round()
                 .max(1.0) as usize;
             let use_variance = self.config.variance_threshold < u64::MAX;
+            // Inner normrect (`window - 2` on each side) and its pixel count
+            // are constant for a fixed cascade window. Hoist them out of the
+            // per-window loop so the variance pre-filter and the cascade's
+            // variance-norm factor can both skip `(w*h)` and `(w*h)²`
+            // arithmetic per window.
+            let nw_norm = win_w.saturating_sub(2);
+            let nh_norm = win_h.saturating_sub(2);
+            let n_pixels = (nw_norm * nh_norm) as u64;
+            let n_pixels_sq = n_pixels * n_pixels;
+            let thr = self.config.variance_threshold;
+            // Hoist the IntegralTable discriminant: the per-window
+            // `rect_sum_unchecked_narrow` skips the enum match that the
+            // generic variant emits, and every 640x480 / 1080p / 4K input
+            // the detector sees in practice satisfies
+            // `cw * ch * 255 ≤ u32::MAX` (the narrow path's contract).
+            let ii_is_narrow = !ii.is_wide();
+            // Hoist the (N → f64) cast: the per-window variance
+            // computation is `N * ss - s²` (a fused multiply-add on the
+            // FMA unit) and the (N → f64) cast is constant for the
+            // cascade window.
+            let n_pixels_f64 = n_pixels as f64;
 
             // GPU fast-path: run the full cascade on GPU when worth it.
             // The kernel handles variance normalisation + per-stage eval +        // early rejection in parallel across all (x, y) windows.
@@ -443,32 +468,60 @@ impl Detector {
                     // fits the level image (x + win_w <= cw, y + win_h <= ch).
                     let score_opt = if use_variance {
                         let (s, ss) = unsafe {
-                            (
-                                ii.rect_sum_unchecked(x + 1, y + 1, x + win_w - 1, y + win_h - 1),
-                                cache.sum_sq_rect_sum_unchecked(
+                            // Specialise for the narrow (u32) IntegralImage:
+                            // the cascade's per-window corner reads are the
+                            // dominant cost in the hot loop, and the generic
+                            // variant has to `match` the IntegralTable enum
+                            // for every call. The image-size guard
+                            // (`prefix_sums_fit_u32`) keeps the integral on
+                            // the narrow path for any 640x480 / 1080p / 4K
+                            // input the detector will see in practice.
+                            let s = if ii_is_narrow {
+                                ii.rect_sum_unchecked_narrow(
                                     x + 1,
                                     y + 1,
                                     x + win_w - 1,
                                     y + win_h - 1,
-                                ),
-                            )
+                                )
+                            } else {
+                                ii.rect_sum_unchecked(x + 1, y + 1, x + win_w - 1, y + win_h - 1)
+                            };
+                            let ss = cache.sum_sq_rect_sum_unchecked(
+                                x + 1,
+                                y + 1,
+                                x + win_w - 1,
+                                y + win_h - 1,
+                            );
+                            (s, ss)
                         };
-                        if !SquaredIntegralImage::passes_variance_sums(
+                        // The pre-filter expression `(ss * N - s²)` is the
+                        // same integer the cascade needs for its
+                        // varianceNormFactor sqrt. Compute it ONCE here in
+                        // f64 and hand both to the cascade — saves the
+                        // cascade from redoing `(nw_area * sum_sq - sum²)`
+                        // per window.
+                        if !SquaredIntegralImage::passes_variance_sums_fast(
                             s,
                             ss,
-                            win_w - 2,
-                            win_h - 2,
-                            self.config.variance_threshold,
+                            n_pixels,
+                            n_pixels_sq,
+                            thr,
                         ) {
                             None
                         } else {
-                            self.cascade.classify_inbounds_with_sums(
+                            // Fused multiply-add: `(N * ss) - s²` is one
+                            // fma op on the FMA unit instead of two
+                            // multiplies and a subtract.
+                            let s_f = s as f64;
+                            let ss_f = ss as f64;
+                            let variance_part = n_pixels_f64.mul_add(ss_f, -s_f * s_f);
+                            self.cascade.classify_inbounds_with_variance_part(
                                 &ii,
                                 &ri,
                                 x,
                                 y,
                                 &mut cache,
-                                (s, ss),
+                                variance_part,
                             )
                         }
                     } else {
