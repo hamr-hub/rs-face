@@ -1133,6 +1133,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tower-http",
  "ureq",
 ]
