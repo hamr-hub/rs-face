@@ -50,6 +50,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   return descriptive errors instead of decoded garbage.
 
 
+### Added — multi-algorithm ensemble fuser
+- **`src/ensemble.rs`** — `TaggedDetection` + `fuse()` greedy cluster
+  over per-algorithm detection sets. Groups boxes whose pairwise IoU
+  exceeds `iou_threshold`, weighted-averages the bbox by
+  `source_weight * score`, and emits a cluster iff `votes >= min_votes`.
+  Zero deps; reachable from `cargo build --no-default-features --lib`
+  because `Detection`/`iou` are core types. The platform's
+  `/api/jobs/{id}/compare` endpoint can drive the `sources` field
+  directly to render the consensus breakdown.
+- **`tests/golden_eval.rs`** — integration test that runs Haar,
+  Luminance, CNN (raw + calibrated), and 4 ensemble variants over a
+  4-image face-positive set (lena, two-people, demo_face_256, an
+  in-memory synthetic face where Haar is known to fail) and prints a
+  precision / recall / F1 / avg_ms table. The Haar-gated ensemble is
+  the deployment-safe default: it preserves Haar's measured F1
+  while letting agreeing detectors refine the box. Two more
+  ensemble strategies (`union` and `consensus`) are reported for
+  comparison. Labels are gitignored under
+  `tests/fixtures/golden/labels/` per the accuracy-subagent contract.
+- **`tests/inspect_algos.rs`** — `#[ignore]`d debug helper that dumps
+  every detector's output on the golden set so a calibration cycle
+  can inspect failure modes without modifying the eval table.
+
 ### Changed — code-quality sweep (no behaviour change)
 - **`src/main.rs`** — `run_cnn_pipeline` and `run_algo_pipeline` were
   near-identical (~120 lines of duplicated frame-loop / RGB-fallback /
