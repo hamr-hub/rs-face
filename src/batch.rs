@@ -459,17 +459,9 @@ fn write_batch_manifest(
     writeln!(f, "{{")?;
     writeln!(f, "  \"version\": \"rs-face-0.2-batch-v1\",")?;
     writeln!(f, "  \"stats\": {{")?;
-    writeln!(
-        f,
-        "    \"images_processed\": {},",
-        stats.images_processed
-    )?;
+    writeln!(f, "    \"images_processed\": {},", stats.images_processed)?;
     writeln!(f, "    \"images_with_face\": {},", stats.images_with_face)?;
-    writeln!(
-        f,
-        "    \"total_detections\": {},",
-        stats.total_detections
-    )?;
+    writeln!(f, "    \"total_detections\": {},", stats.total_detections)?;
     writeln!(f, "    \"elapsed_ms\": {},", stats.elapsed_ms)?;
     let avg = if stats.images_processed > 0 {
         stats.elapsed_ms as f64 / stats.images_processed as f64
@@ -489,7 +481,12 @@ fn write_batch_manifest(
         write!(
             f,
             "\"output\": \"{}\", ",
-            json_escape(&r.output.as_ref().map(|p| p.display().to_string()).unwrap_or_default())
+            json_escape(
+                &r.output
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            )
         )?;
         write!(f, "\"width\": {}, \"height\": {}, ", r.width, r.height)?;
         write!(f, "\"detect_ms\": {:.3}, ", r.detect_ms)?;

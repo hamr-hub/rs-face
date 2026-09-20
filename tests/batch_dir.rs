@@ -60,7 +60,10 @@ fn batch_dir_processes_real_face_fixture_and_writes_per_image_outputs() {
     .expect("run_batch_dir");
 
     assert_eq!(stats.images_processed, 1);
-    assert_eq!(stats.images_with_face, 1, "demo portrait must trigger ≥1 face");
+    assert_eq!(
+        stats.images_with_face, 1,
+        "demo portrait must trigger ≥1 face"
+    );
     assert!(stats.total_detections >= 1);
     assert_eq!(results.len(), 1);
     assert!(results[0].error.is_none());
@@ -79,7 +82,10 @@ fn batch_dir_processes_real_face_fixture_and_writes_per_image_outputs() {
     let manifest = batch::manifest_path(out_dir.path());
     assert!(manifest.is_file());
     let body = fs::read_to_string(&manifest).unwrap();
-    assert!(body.contains("\"version\""), "manifest missing version key:\n{body}");
+    assert!(
+        body.contains("\"version\""),
+        "manifest missing version key:\n{body}"
+    );
     assert!(
         body.contains("\"images_processed\": 1"),
         "manifest wrong processed count:\n{body}"
@@ -129,7 +135,10 @@ fn batch_dir_only_with_face_skips_empty_annotated_outputs_but_keeps_manifest_ent
     .expect("run_batch_dir");
 
     assert_eq!(stats.images_processed, 2);
-    assert_eq!(stats.images_with_face, 1, "only the demo portrait has faces");
+    assert_eq!(
+        stats.images_with_face, 1,
+        "only the demo portrait has faces"
+    );
 
     // The annotated PNG for the blank image must NOT be on disk.
     let blank_anno = out_dir.path().join("detections").join("b_blank.png");
@@ -143,9 +152,15 @@ fn batch_dir_only_with_face_skips_empty_annotated_outputs_but_keeps_manifest_ent
     assert!(face_anno.is_file());
 
     // Per-image results still describe both images (including the empty one).
-    let blank_result = results.iter().find(|r| r.input.ends_with("b_blank.pgm")).unwrap();
+    let blank_result = results
+        .iter()
+        .find(|r| r.input.ends_with("b_blank.pgm"))
+        .unwrap();
     assert_eq!(blank_result.detections.len(), 0);
-    assert!(blank_result.output.is_none(), "empty image has no output file");
+    assert!(
+        blank_result.output.is_none(),
+        "empty image has no output file"
+    );
     assert!(blank_result.error.is_none());
 }
 
@@ -177,10 +192,16 @@ fn batch_dir_continues_after_a_per_image_decode_error() {
     .expect("run_batch_dir");
 
     assert_eq!(stats.images_processed, 2);
-    let bad = results.iter().find(|r| r.input.ends_with("bad.pgm")).unwrap();
+    let bad = results
+        .iter()
+        .find(|r| r.input.ends_with("bad.pgm"))
+        .unwrap();
     assert!(bad.error.is_some(), "truncated PGM must surface an error");
     assert!(bad.detections.is_empty());
-    let good = results.iter().find(|r| r.input.ends_with("good.pgm")).unwrap();
+    let good = results
+        .iter()
+        .find(|r| r.input.ends_with("good.pgm"))
+        .unwrap();
     assert!(good.error.is_none(), "good fixture should pass cleanly");
     assert!(good.output.is_some());
 }
@@ -188,9 +209,8 @@ fn batch_dir_continues_after_a_per_image_decode_error() {
 #[test]
 fn batch_dir_errors_when_input_directory_does_not_exist() {
     let out_dir = TempDir::new("rsface-batch-missing-out").unwrap();
-    let missing = std::path::PathBuf::from(
-        "/this/path/should/never/exist/rsface-batch-missing-input",
-    );
+    let missing =
+        std::path::PathBuf::from("/this/path/should/never/exist/rsface-batch-missing-input");
     let err = batch::run_batch_dir(
         bundled_frontalface_cascade(),
         &missing,

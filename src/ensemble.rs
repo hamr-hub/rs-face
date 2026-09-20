@@ -183,11 +183,7 @@ impl Cluster {
     /// Names of every source that contributed a member. Useful for the
     /// consensus-breakdown UI: `"haar+luminance"` on a 2-vote cluster.
     fn sources(&self) -> String {
-        let mut names: Vec<&'static str> = self
-            .members
-            .iter()
-            .map(|m| m.source)
-            .collect();
+        let mut names: Vec<&'static str> = self.members.iter().map(|m| m.source).collect();
         names.sort_unstable();
         names.dedup();
         names.join("+")
@@ -287,7 +283,10 @@ pub fn fuse(inputs: Vec<TaggedDetection>, config: &EnsembleConfig) -> Vec<FusedC
 /// cluster membership metadata. Equivalent to
 /// `fuse(...).into_iter().map(|c| c.detection).collect()`.
 pub fn fuse_detections(inputs: Vec<TaggedDetection>, config: &EnsembleConfig) -> Vec<Detection> {
-    fuse(inputs, config).into_iter().map(|c| c.detection).collect()
+    fuse(inputs, config)
+        .into_iter()
+        .map(|c| c.detection)
+        .collect()
 }
 
 #[cfg(test)]
@@ -313,7 +312,12 @@ mod tests {
         assert_eq!(out[0].votes, 1);
         assert_eq!(out[0].sources, "haar");
         assert_eq!(
-            (out[0].detection.x, out[0].detection.y, out[0].detection.w, out[0].detection.h),
+            (
+                out[0].detection.x,
+                out[0].detection.y,
+                out[0].detection.w,
+                out[0].detection.h
+            ),
             (10, 20, 30, 40)
         );
     }
