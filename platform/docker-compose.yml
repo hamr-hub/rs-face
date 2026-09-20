@@ -61,7 +61,8 @@ services:
       - "127.0.0.1:15432:5432"
     volumes:
       # bind mount 到 data/pg/pgdata/ (项目内,跟随代码可见)。
-      # 首次启动为空目录 → postgres 自动 initdb;dump 还原走 `make docker-restore-pg`
+      # 首次启动为空目录 → postgres 自动 initdb;dump 还原走 DOCKER.md「备份/恢复」
+      # 节的 `docker exec -i rsface-postgres pg_restore ...` 命令
       - ../data/pg/pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rsface -d rsface"]

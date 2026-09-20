@@ -134,7 +134,7 @@ fi
 # ---------- 5) 等所有 job 终态,timeout 60s ----------
 log "stage 5: wait for all jobs done (timeout=60s)"
 DEADLINE=$(( $(date +%s) + 60 ))
-while [ $(date +%s) -lt $DEADLINE ]; do
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   S1=$(curl -s "$BASE/api/jobs/$J1" | grep -o '"status":"[a-z]*"' | head -1 || true)
   S2=$(curl -s "$BASE/api/jobs/$J2" | grep -o '"status":"[a-z]*"' | head -1 || true)
   S3=$(curl -s "$BASE/api/jobs/$J3" | grep -o '"status":"[a-z]*"' | head -1 || true)

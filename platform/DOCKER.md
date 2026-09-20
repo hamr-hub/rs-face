@@ -197,9 +197,39 @@ rm -rf data/rustfs data/pg/pgdata data/media
 - `MAX_CONCURRENT_JOBS` — 并发任务数(默认 2)
 - `MAX_QUEUE_DEPTH` — 任务队列上限(默认 64)
 - `JOB_TIMEOUT_SECS` / `JOB_TIMEOUT_VIDEO_SECS` — 任务超时(默认 600/3600,设 0 关闭)
-- `SHUTDOWN_GRACE_SECS` — SIGTERM 后任务排空宽限(默认 120)
+- `JOB_TIMEOUT_STREAM_SECS` — 流任务超时(默认 0 = 不限,靠 cancel 控)
+- `SHUTDOWN_GRACE_SECS` — SIGTERM 后任务排空宽限(compose 默认 120;二进制内置默认 180)
 - `SERVER_MEM_LIMIT` — server 容器 OOM 上限(默认 2g)
 - `CORS_ALLOW_ORIGIN` — 跨域白名单(留空 = 同源)
+
+### 完整 env 参考(高级 / 部署覆盖)
+
+下列变量在 `platform/server/src/config.rs` 都有内置默认,一般无需设置;compose 已注入
+基础设施类(`BIND_ADDR` / `S3_*` / `WEB_DIR` / `TMP_DIR` / `RSFACE_CASCADE` /
+`DATABASE_URL` / `LOCAL_MEDIA_DIR`),这里只列业务可调项:
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `RSFACE_ALGO` | `haar` | 算法选择(`haar` / `cnn` / `luminance`)|
+| `RSFACE_CASCADE` | `cascade.rfcf` | Haar 级联权重路径(镜像内 `/app/cascade.rfcf`)|
+| `RSFACE_CNN_WEIGHTS` | 空 | 自定义 CNN 权重路径;空则用内置 starter weights |
+| `RSFACE_USE_CNN` | `0` | `1` 时默认算法切到 CNN |
+| `RSFACE_USE_GPU` | `1` | OpenCL squared-integral 预筛(无设备时静默回退 CPU)|
+| `RSFACE_MIN_SCORE` | `0.0` | Haar 最小检测分(0.3 左右可压低 FP)|
+| `RSFACE_THREAD_POOL` | `0` | 检测线程数;`0` = 物理并行度 − 1 |
+| `MAX_FRAMES_VIDEO` | `3600` | 单视频处理帧数上限 |
+| `MAX_FRAMES_STREAM` | `0` | 单流抽帧数上限;`0` = 不限 |
+| `MAX_FACE_CROPS` | `2000` | 单任务裁剪图上限 |
+| `MIN_FACE_SIZE` | `24` | 最小人脸边长 px |
+| `MAX_CONCURRENT_JOBS` | `2` | 并发 job 数(1..64)|
+| `MAX_QUEUE_DEPTH` | `64` | 队列背压阈值,满了 create 直接拒绝 |
+| `JOB_TIMEOUT_SECS` / `JOB_TIMEOUT_VIDEO_SECS` / `JOB_TIMEOUT_STREAM_SECS` | `600` / `3600` / `0` | 各类任务硬超时秒数,`0` 关闭 |
+| `SSE_KEEPALIVE_SECS` | `15` | `/events` SSE 心跳间隔 |
+| `STREAM_KEEPALIVE_PERIOD` | `30` | 流 worker 无事件时的写存活周期 |
+| `UPLOAD_LIMIT_IMAGE_MB` | `50` | 图片上传上限(MiB)|
+| `UPLOAD_LIMIT_VIDEO_GB` | `2` | 视频上传上限(GiB)|
+| `CORS_ALLOW_ORIGIN` | 空 | 跨域白名单 Origin,空 = 同源不发 CORS 头 |
+| `SHUTDOWN_GRACE_SECS` | `180` | SIGTERM 排空宽限(compose 覆盖为 120)|
 
 ## GPU 部署
 

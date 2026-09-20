@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # e2e smoke for the docker-deployed rs-face platform.
-# Run via: make docker-test   (or: bash platform/scripts/docker-smoke.sh)
+# Run via: bash platform/scripts/docker-smoke.sh
 #
 # Tries to hit every layer of the stack:
 #   [1/4] rsface-server /api/health         (HTTP, in-container service)
@@ -10,7 +10,7 @@
 #
 # Steps 1-3 are mandatory. Step 4 is best-effort: skipped silently if no test
 # image is present. The script never exits non-zero on a partial failure, so
-# `make docker-test` is safe to run as a smoke that tells you what's working.
+# it is safe to run as a smoke that tells you what's working.
 
 set -u
 BASE="${BASE:-http://localhost:20080}"
@@ -48,4 +48,4 @@ else
 fi
 
 echo
-echo "smoke done. full logs: make docker-logs"
+echo "smoke done. full logs: docker compose -f platform/docker-compose.yml logs -f --tail=100"
