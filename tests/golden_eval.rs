@@ -644,7 +644,23 @@ fn run_ensemble(
 
 /// Main eval: each algorithm in turn, then several ensemble variants,
 /// in a single side-by-side table.
+///
+/// Marked `#[ignore]` because it requires `tests/fixtures/golden/labels/*.txt`,
+/// which are gitignored (annotated per-image). Bootstrap with:
+///
+/// ```text
+/// cargo test --test inspect_algos -- --ignored --nocapture
+/// ```
+///
+/// Then write one `tests/fixtures/golden/labels/<image>.txt` per image,
+/// with one `x y w h` line per ground-truth face box (pixel coords).
+///
+/// Run this eval with:
+/// ```text
+/// cargo test --test golden_eval -- --ignored --nocapture --test-threads=1
+/// ```
 #[test]
+#[ignore = "requires gitignored tests/fixtures/golden/labels/*.txt — bootstrap via inspect_algos"]
 fn golden_eval_table() {
     let imgs = golden_set();
     assert!(
