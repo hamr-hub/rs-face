@@ -21,14 +21,62 @@ fn n_runs() -> usize {
 fn int_pairs() -> Vec<(Detection, Detection)> {
     // Mix of disjoint, partial-overlap, nested, degenerate cases.
     let boxes: Vec<Detection> = vec![
-        Detection { x: 0, y: 0, w: 20, h: 20, score: 0.0 },
-        Detection { x: 5, y: 5, w: 20, h: 20, score: 0.0 },
-        Detection { x: 100, y: 100, w: 30, h: 30, score: 0.0 },
-        Detection { x: 0, y: 0, w: 0, h: 0, score: 0.0 },
-        Detection { x: 10, y: 10, w: 100, h: 100, score: 0.0 },
-        Detection { x: 20, y: 20, w: 80, h: 80, score: 0.0 },
-        Detection { x: 0, y: 0, w: 1, h: 1, score: 0.0 },
-        Detection { x: 50, y: 50, w: 10, h: 10, score: 0.0 },
+        Detection {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 20,
+            score: 0.0,
+        },
+        Detection {
+            x: 5,
+            y: 5,
+            w: 20,
+            h: 20,
+            score: 0.0,
+        },
+        Detection {
+            x: 100,
+            y: 100,
+            w: 30,
+            h: 30,
+            score: 0.0,
+        },
+        Detection {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+            score: 0.0,
+        },
+        Detection {
+            x: 10,
+            y: 10,
+            w: 100,
+            h: 100,
+            score: 0.0,
+        },
+        Detection {
+            x: 20,
+            y: 20,
+            w: 80,
+            h: 80,
+            score: 0.0,
+        },
+        Detection {
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            score: 0.0,
+        },
+        Detection {
+            x: 50,
+            y: 50,
+            w: 10,
+            h: 10,
+            score: 0.0,
+        },
     ];
     let mut pairs = Vec::with_capacity(boxes.len() * boxes.len());
     for a in &boxes {
@@ -41,12 +89,54 @@ fn int_pairs() -> Vec<(Detection, Detection)> {
 
 fn f32_pairs() -> Vec<(FaceDetection, FaceDetection)> {
     let boxes = vec![
-        FaceDetection { x1: 0.0, y1: 0.0, x2: 20.0, y2: 20.0, score: 0.0, landmarks: None },
-        FaceDetection { x1: 5.5, y1: 5.5, x2: 25.5, y2: 25.5, score: 0.0, landmarks: None },
-        FaceDetection { x1: 100.0, y1: 100.0, x2: 130.0, y2: 130.0, score: 0.0, landmarks: None },
-        FaceDetection { x1: 0.0, y1: 0.0, x2: 0.0, y2: 0.0, score: 0.0, landmarks: None },
-        FaceDetection { x1: -3.0, y1: -7.0, x2: 10.0, y2: 10.0, score: 0.0, landmarks: None },
-        FaceDetection { x1: 10.5, y1: 10.5, x2: 90.5, y2: 90.5, score: 0.0, landmarks: None },
+        FaceDetection {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 20.0,
+            y2: 20.0,
+            score: 0.0,
+            landmarks: None,
+        },
+        FaceDetection {
+            x1: 5.5,
+            y1: 5.5,
+            x2: 25.5,
+            y2: 25.5,
+            score: 0.0,
+            landmarks: None,
+        },
+        FaceDetection {
+            x1: 100.0,
+            y1: 100.0,
+            x2: 130.0,
+            y2: 130.0,
+            score: 0.0,
+            landmarks: None,
+        },
+        FaceDetection {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 0.0,
+            y2: 0.0,
+            score: 0.0,
+            landmarks: None,
+        },
+        FaceDetection {
+            x1: -3.0,
+            y1: -7.0,
+            x2: 10.0,
+            y2: 10.0,
+            score: 0.0,
+            landmarks: None,
+        },
+        FaceDetection {
+            x1: 10.5,
+            y1: 10.5,
+            x2: 90.5,
+            y2: 90.5,
+            score: 0.0,
+            landmarks: None,
+        },
     ];
     let mut pairs = Vec::with_capacity(boxes.len() * boxes.len());
     for a in &boxes {
