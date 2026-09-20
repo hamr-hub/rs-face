@@ -398,6 +398,16 @@ impl Detector {
                 .round()
                 .max(1.0) as usize;
             let use_variance = self.config.variance_threshold < u64::MAX;
+            // Inner normrect (`window - 2` on each side) and its pixel count
+            // are constant for a fixed cascade window. Hoist them out of the
+            // per-window loop so the variance pre-filter and the cascade's
+            // variance-norm factor can both skip `(w*h)` and `(w*h)²`
+            // arithmetic per window.
+            let nw_norm = win_w.saturating_sub(2);
+            let nh_norm = win_h.saturating_sub(2);
+            let n_pixels = (nw_norm * nh_norm) as u64;
+            let n_pixels_sq = n_pixels * n_pixels;
+            let thr = self.config.variance_threshold;
 
             // GPU fast-path: run the full cascade on GPU when worth it.
             // The kernel handles variance normalisation + per-stage eval +
@@ -476,12 +486,12 @@ impl Detector {
                                 ),
                             )
                         };
-                        if !SquaredIntegralImage::passes_variance_sums(
+                        if !SquaredIntegralImage::passes_variance_sums_fast(
                             s,
                             ss,
-                            win_w - 2,
-                            win_h - 2,
-                            self.config.variance_threshold,
+                            n_pixels,
+                            n_pixels_sq,
+                            thr,
                         ) {
                             None
                         } else {
