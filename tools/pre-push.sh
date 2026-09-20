@@ -34,6 +34,14 @@ cargo clippy --manifest-path platform/Cargo.toml --all-targets -- -D warnings \
 echo "▶ zero-dep core lib build"
 cargo build --no-default-features --lib || say "zero-dep lib build broke (STRUCTURE §2.4/2.7)"
 
+echo "▶ rustdoc deny warnings (core)"
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items \
+  || say "core rustdoc warnings: broken intra-doc links"
+
+echo "▶ rustdoc deny warnings (platform)"
+( cd platform && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items ) \
+  || say "platform rustdoc warnings"
+
 echo "▶ core lib tests"
 cargo test --lib || say "core tests failed"
 
