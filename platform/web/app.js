@@ -1598,6 +1598,12 @@ const upload = (() => {
     }));
     utils.$('#tb-dashboard').addEventListener('click', () => { dashboard.open(); });
     setupGlobalDrop(); setupGlobalPaste();
+    // 上传队列:"清空" 按钮移除已完成 / 失败项
+    const uqClear = utils.$('#upload-queue-clear');
+    if (uqClear) uqClear.addEventListener('click', (e) => {
+      e.stopPropagation();
+      uploadQueue.clearDone();
+    });
   }
 
   const openModal = () => { utils.$('#modal-new').classList.remove('hidden'); selectType('image'); };
@@ -1610,6 +1616,24 @@ const upload = (() => {
     utils.$$('.new-pane').forEach(p => p.classList.add('hidden'));
     const pane = utils.$('#pane-' + t); if (pane) pane.classList.remove('hidden');
   }
+  /** 把一个或多个图片文件提交到上传队列(走 upload-queue.js)。
+   *  等价于旧的 submitImage(file),但走可见 UI + 并发控制 + 失败重试。 */
+  function submitImageFiles(files) {
+    if (!files || !files.length) return [];
+    const ids = uploadQueue.enqueue(files, 'image');
+    if (files.length >= 1) closeAllModals();
+    return ids;
+  }
+  /** 单文件图片上传(老 API;被 paste / emptyPaste / 对外暴露使用)。 */
+  function submitImage(file) { return submitImageFiles([file]); }
+  /** 视频文件:走 import/video;也走队列。 */
+  function submitVideoFiles(files) {
+    if (!files || !files.length) return [];
+    const ids = uploadQueue.enqueue(files, 'video');
+    closeAllModals();
+    return ids;
+  }
+  function submitVideo(file) { return submitVideoFiles([file]); }
   async function loadSettings() {
     const cfg = await api.getConfig();
     state.config = cfg;
@@ -1688,8 +1712,8 @@ const upload = (() => {
       // modal 内的 dropzone 自己处理(z-index 更高,事件先到 modal)
       if (!utils.$('#modal-new').classList.contains('hidden')) return;
       const t = files[0].type || '';
-      if (t.startsWith('image/')) for (const f of files) submitImage(f);
-      else if (t.startsWith('video/')) submitVideo(files[0]);
+      if (t.startsWith('image/')) submitImageFiles(files);
+      else if (t.startsWith('video/')) submitVideoFiles(files.length > 1 ? [files[0]] : files);
       else toast.warn('不支持的文件类型: ' + (t || '未知'));
     });
   }
@@ -1728,52 +1752,7 @@ const upload = (() => {
     const v = (sel.value || '').trim();
     return v ? v : undefined;
   }
-  async function submitImage(file) {
-    try {
-      toast.info(`上传 ${file.name}…`);
-      const t0 = Date.now();
-      const data = await api.postImage(file, getAlgoChoice());
-      if (data.error) {
-        if (window.__track) window.__track('upload_failed', { kind: 'image', size_kb: Math.round(file.size / 1024) });
-        return toast.error('上传失败: ' + data.error);
-      }
-      if (window.__track) window.__track('upload_submitted', {
-        kind: 'image', size_kb: Math.round(file.size / 1024), algo: getAlgoChoice() || null,
-        round_trip_ms: Date.now() - t0,
-      });
-      toast.success('已提交 #' + (data.job_id || '').slice(0, 8));
-      try {
-        const job = await api.getJob(data.job_id);
-        sidebar.upsertJob(job); preview.open(job.id);
-      } catch {}
-    } catch (e) {
-      if (window.__track) window.__track('upload_exception', { kind: 'image', message: String(e.message || e).slice(0, 128) });
-      toast.error('上传失败: ' + e.message);
-    }
-  }
-  async function submitVideo(file) {
-    try {
-      toast.info(`上传 ${file.name}…`);
-      const t0 = Date.now();
-      // 用 /api/import/video(语义清晰,响应里带 LAN URL)。
-      const data = await api.importVideo(file, getAlgoChoice());
-      if (data.error) {
-        if (window.__track) window.__track('upload_failed', { kind: 'video', size_kb: Math.round(file.size / 1024) });
-        return toast.error('上传失败: ' + data.error);
-      }
-      if (window.__track) window.__track('upload_submitted', {
-        kind: 'video', size_kb: Math.round(file.size / 1024), algo: getAlgoChoice() || null,
-        round_trip_ms: Date.now() - t0,
-      });
-      apiCache.bustAll(); // 新任务出现,失效列表缓存
-      toast.success('已提交 #' + (data.job_id || '').slice(0, 8));
-      const job = await api.getJob(data.job_id);
-      sidebar.upsertJob(job); preview.open(job.id);
-    } catch (e) {
-      if (window.__track) window.__track('upload_exception', { kind: 'video', message: String(e.message || e).slice(0, 128) });
-      toast.error('上传失败: ' + e.message);
-    }
-  }
+  /** (单文件 submitImage / submitVideo 已上移;走 upload-queue 统一管理。) */
   /** 视频 URL 导入:服务端 ffmpeg 拉取 + 一次性 Video job,处理完返回 S3 LAN URL。 */
   async function submitVideoUrl(url) {
     try {
@@ -2347,6 +2326,7 @@ function initKeys() {
 
 async function init() {
   theme.init(); modalKit.init();
+  if (typeof uploadQueue !== 'undefined' && uploadQueue && typeof uploadQueue.init === 'function') uploadQueue.init();
   sidebar.init(); upload.init(); batch.init(); confirmModal.init(); initKeys();
   visibilityCtl.init();
   // 平台 KPI 实时拉取
@@ -2462,4 +2442,5 @@ document.addEventListener('DOMContentLoaded', init);
 window.__rsface = {
   state, api, sidebar, preview, sse, batch, theme, toast, dashboard, lightbox, hashRouter,
   kpi, visibilityCtl, modalKit, ctxMenu, confirmModal,
+  uploadQueue: (typeof uploadQueue !== 'undefined') ? uploadQueue : null,
 };
