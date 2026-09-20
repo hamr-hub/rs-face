@@ -180,6 +180,10 @@ impl HaarFeature {
     ) -> f32 {
         debug_assert!(x + win_w <= ii_w && y + win_h <= ii_h);
         let mut total: f64 = 0.0;
+        // Hoist the `is_custom` / `is_tilted` discriminators out of the
+        // per-rect loop. They're constant for the whole feature.eval call;
+        // checking them per-rect costs a branch per rect (~7.5M branches
+        // per frame on the OpenCV cascade's per-window scan).
         let is_custom = matches!(self.kind, FeatureKind::CustomRects);
         let is_tilted = self.tilted || matches!(self.kind, FeatureKind::DiagonalEdge);
         let fw = if is_custom {
@@ -192,14 +196,24 @@ impl HaarFeature {
         } else {
             self.height.max(1) as usize
         };
+        // Pre-select the corner-read path: every realistic face-window
+        // input (640×480 up to 4K) is narrow, so this is a one-time
+        // branch per `eval_inbounds` call instead of one per rect.
+        let ii_is_wide = ii.is_wide();
         for r in &self.rects {
+            // SAFETY (rect_sum_unchecked): rx < rx2 ≤ ii_w and ry < ry2 ≤ ii_h
+            // follow from the documented contract of this method — rects map
+            // inside the window, the window fits the image, and rw/rh ≥ 1.
             let (rx, ry, rw, rh) = if is_custom {
-                (
-                    x + r.x as usize,
-                    y + r.y as usize,
-                    std::cmp::max(1, r.w as usize),
-                    std::cmp::max(1, r.h as usize),
-                )
+                let rx = x + r.x as usize;
+                let ry = y + r.y as usize;
+                // r.w / r.h are u8 fields loaded per iter; max(1, ...) is
+                // a no-op when the cascade author left them non-zero
+                // (true for every OpenCV .rfcf). Keep the guard anyway for
+                // hand-edited cascades.
+                let rw = std::cmp::max(1, r.w as usize);
+                let rh = std::cmp::max(1, r.h as usize);
+                (rx, ry, rw, rh)
             } else {
                 let rx = x + r.x as usize * win_w / fw;
                 let ry = y + r.y as usize * win_h / fh;
@@ -207,7 +221,7 @@ impl HaarFeature {
                 let rh = std::cmp::max(1, r.h as usize * win_h / fh);
                 (rx, ry, rw, rh)
             };
-            // SAFETY (rect_sum_unchecked): rx < rx2 ≤ ii_w and ry < ry2 ≤ ii_h
+// SAFETY (rect_sum_unchecked): rx < rx2 ≤ ii_w and ry < ry2 ≤ ii_h
             // follow from the documented contract of this method — rects map
             // inside the window, the window fits the image, and rw/rh ≥ 1.
             //
@@ -237,12 +251,12 @@ impl HaarFeature {
                     ii.tilted_rect_sum(ri, rx, ry, rx + rw, ry + rh)
                 };
                 s as f64
-            } else if ii.is_wide() {
+            } else if ii_is_wide {
                 ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as f64
             } else {
                 // SAFETY: caller guarantees the rect fits the window,
                 // which fits the image; narrow contract follows from
-                // `!is_wide()`.
+                // `!ii_is_wide`.
                 unsafe {
                     ii.rect_sum_unchecked_narrow(rx, ry, rx + rw, ry + rh) as f64
                 }
