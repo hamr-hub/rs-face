@@ -86,7 +86,7 @@ src/gpu/
 ├── mod.rs              # OpenCL FFI driver (zero-dep, dynamic loader)
 ├── backend.rs          # GpuBackend trait + dispatcher + OpenCL passthrough
 ├── metal.rs             # Apple Metal backend — Apple Silicon GPU
-├── cuda.rs / rocm.rs / ascend.rs / mlu.rs   # NVIDIA / AMD / 华为昇腾 / 寒武纪 stubs
+├── cuda.rs             # NVIDIA CUDA backend (feature-gated)
 ```
 
 Adding a new vendor is one Cargo.toml dep + one `probe()` body — the
@@ -127,11 +127,11 @@ python3 tools/compare_cpu_gpu.py out/rs_face_compare/cpu/*/detections.jsonl \
 | `cpu`     | host CPU                | ✅ works                  | ✅ works                                |
 | `metal`   | Apple Metal (Apple Silicon) | ✅ runs, results byte-identical to CPU | n/a |
 | `opencl`  | OpenCL ICD (Metal-OpenCL on Mac) | ⚠️ broken — Apple removed the runtime binary in macOS 26.5 | ✅ works (Khronos ICD + NVIDIA/AMD ICD) |
-| `cuda`    | NVIDIA CUDA             | stub                      | enabled by adding `cust` and uncommenting `probe()` in `src/gpu/cuda.rs` |
-| `rocm`    | AMD ROCm (HIP)          | stub                      | enabled by adding HIP bindings and uncommenting `probe()` |
-| `directml`| AMD/NVIDIA on Windows   | stub                      | enabled by adding DirectML bindings    |
-| `acl`     | Huawei Ascend (CANN)    | stub                      | enabled by linking `libascendcl`       |
-| `mlu`     | Cambricon MLU (BANG C)  | stub                      | enabled by linking `libcnrt`           |
+| `cuda`    | NVIDIA CUDA             | feature-gated (`cuda-backend`) | build with `--features cuda-backend` |
+| `directml`| AMD/NVIDIA on Windows   | not wired                  | would need DirectML bindings; not on roadmap |
+| `rocm`    | AMD ROCm (HIP)         | not wired                  | not on roadmap |
+| `acl`     | Huawei Ascend (CANN)   | not wired                  | not on roadmap |
+| `mlu`     | Cambricon MLU (BANG C) | not wired                  | not on roadmap |
 
 ---
 
@@ -141,10 +141,7 @@ python3 tools/compare_cpu_gpu.py out/rs_face_compare/cpu/*/detections.jsonl \
 src/gpu/mod.rs                 # OpenCL FFI driver (zero-dep, dynamic loader)
 src/gpu/backend.rs             # GpuBackend trait + dispatcher + OpenCL passthrough
 src/gpu/metal.rs                # Apple Metal backend — Apple Silicon GPU
-src/gpu/cuda.rs                 # CUDA stub
-src/gpu/rocm.rs                 # ROCm stub
-src/gpu/ascend.rs               # Huawei Ascend stub
-src/gpu/mlu.rs                  # Cambricon MLU stub
+src/gpu/cuda.rs                 # CUDA backend (feature-gated)
 src/bin/rs_face_detect.rs       # video → JSONL, both CPU and GPU per frame
 Cargo.toml                      # optional metal crate behind --features metal-backend
 docs/GPU_BACKENDS.md            # backend adapter documentation
@@ -164,8 +161,9 @@ identical to the CPU path** — is **achieved on this Mac**:
 * ✅ **Byte-identical results**: every box's `(x, y, w, h, score)`
   matches between CPU and GPU across 119,002 boxes tested
 * ✅ Per-vendor adapter interface (`GpuBackend` trait) ready to extend
-  to CUDA / ROCm / Ascend / MLU on their respective platforms
-* ✅ Multi-vendor support: AMD / Mac / NVIDIA / 国产 GPU 全部接好
+  to additional backends (CUDA is wired behind `--features cuda-backend`;
+  ROCm / Ascend / MLU / DirectML are intentionally not on the roadmap yet)
+* ✅ Apple Silicon + NVIDIA + zero-dep OpenCL ICD paths proven end-to-end
 * ✅ Python auxiliary tooling (`run_rust_detect.py`,
   `compare_cpu_gpu.py`, `gpu_backends.py`) for orchestration and
   parity verification

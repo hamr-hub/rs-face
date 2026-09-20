@@ -57,26 +57,23 @@ rs-face/
 │   ├── embedding.rs    # FaceEmbedding + Gallery matcher
 │   ├── face.rs         # Detection, Face, landmark types shared across modules
 │   ├── face_detector.rs# the uniform FaceDetector trait
-│   ├── hog_face.rs     # HOG + Linear SVM detector
 │   ├── integral.rs     # integral + rotated + squared integral images
 │   ├── lbph.rs         # uniform-LBP histograms + chi-square distance
 │   ├── luminance_face.rs # band + symmetry detector (no weights)
 │   ├── models.rs       # model registry with SHA-256 pinned digests
-│   ├── mtcnn.rs        # P-Net → R-Net → O-Net cascade
 │   ├── output.rs       # PNG / JSON manifest writers
 │   ├── pipeline.rs     # multi-threaded pipeline (source → N detectors → sink)
 │   ├── scrfd.rs        # SCRFD pre/post-processing (InsightFace)
 │   ├── scrfd_detector.rs # end-to-end SCRFD detector
 │   ├── video_id.rs     # cross-video tracker + clusterer + re-id
-│   ├── yunet.rs        # YuNet-style anchor-based detector
-│   ├── haar/           # features, cascade, demo cascade, OpenCV XML→.rfcf
+│   ├── haar/           # features, cascade, demo cascade, bundled OpenCV .rfcf
 │   ├── cnn/            # 24×24 Conv→ReLU→Pool→FC→Sigmoid CNN detector
-│   ├── gpu/            # GPU backend trait + metal/cuda/rocm/mlu/ascend/cpu impls
+│   ├── gpu/            # GPU backend trait + zero-dep OpenCL + metal/cuda behind cargo features
 │   ├── image/          # PNG / PPM codec, GrayImage / RgbImage
 │   ├── onnx/           # backend-agnostic forward pass (ort vs tract)
 │   ├── pool/           # worker pool helper used by the pipeline
 │   ├── source/         # FrameSource trait + ffmpeg / http / image-seq impls
-│   ├── weights/        # placeholder *.bin weights for include_bytes! scaffolds
+│   ├── weights/        # bundled OpenCV Haar cascade (.rfcf) + NOTICE
 │   └── bin/            # extra CLI binaries (see below)
 │
 ├── src/bin/            # explicit [[bin]] targets (Cargo.toml sets autobins=false)
@@ -107,7 +104,7 @@ rs-face/
 │   ├── cascade_dump.rs           # parse a `.rfcf` and print its structure
 │   ├── detect_haar.rs            # smallest end-to-end Haar run on a synthetic frame
 │   ├── detect_scrfd_arcface.rs   # survey the ONNX model registry
-│   ├── detect_uniform.rs         # trait-dispatch demo across Haar + HoG
+│   ├── detect_uniform.rs         # trait-dispatch demo across Haar + Luminance + LBPH
 │   ├── identify_short_drama.rs   # end-to-end video-level re-id (see docs/recognition-video.md)
 │   ├── lena_classify_stages.rs   # walk a real cascade stage by stage
 │   ├── recognise_eigenface.rs    # train + identify with eigenfaces, no weights
@@ -123,7 +120,7 @@ rs-face/
 │   ├── bench-results*.md # measured accuracy / throughput tables
 │   ├── CPU_VS_GPU_REPORT.md # when GPU helps, when it doesn't
 │   ├── format.md       # `.rfcf` binary cascade format
-│   ├── GPU_BACKENDS.md # CPU / Metal / CUDA / ROCm / MLU / Ascend
+│   ├── GPU_BACKENDS.md # CPU fallback + Metal + CUDA (other vendors not yet wired)
 │   ├── recognition-*.md # per-recogniser deep dives
 │   └── samples/        # annotated PNGs from real detection runs
 │
