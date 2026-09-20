@@ -86,7 +86,7 @@ pub struct EvalCache {
     gen: u32,
     /// Squared integral image, lazily initialized. Used for OpenCV's
     /// variance normalization of feature responses. Set once per frame via
-    /// [`Detector::detect`], reused across all pyramid levels.
+    /// [`crate::detector::Detector::detect`], reused across all pyramid levels.
     sum_sq_iis: Option<crate::integral::SquaredIntegralImage>,
 }
 
@@ -193,7 +193,7 @@ impl EvalCache {
     ///
     /// # Safety contract
     /// `x1 < x2 <= width` and `y1 < y2 <= height` on the attached squared
-    /// integral image (see [`SquaredIntegralImage::rect_sum_sq_unchecked`]).
+    /// integral image (see [`crate::integral::SquaredIntegralImage::rect_sum_sq_unchecked`]).
     #[inline]
     pub(crate) unsafe fn sum_sq_rect_sum_unchecked(
         &self,

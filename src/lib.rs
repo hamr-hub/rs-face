@@ -42,9 +42,9 @@
 //! - [`luminance_face`]      : band-pattern + mirror-symmetry detector (no weights, classical CV).
 //!
 //! ### Detection algorithms (ONNX, opt-in via `ort-backend` / `tract-backend`)
-//! - [`scrfd`]               : InsightFace SCRFD-10G pre/post-processing.
-//! - [`scrfd_detector`]      : end-to-end SCRFD detector using either ONNX backend.
-//! - [`onnx`]                : backend-agnostic forward pass; `ort` (GPU-capable, C++ runtime) vs `tract` (pure Rust, CPU only).
+//! - `scrfd`                 : InsightFace SCRFD-10G pre/post-processing.
+//! - `scrfd_detector`        : end-to-end SCRFD detector using either ONNX backend.
+//! - `onnx`                  : backend-agnostic forward pass; `ort` (GPU-capable, C++ runtime) vs `tract` (pure Rust, CPU only).
 //!
 //! ### Recognition (zero-dep)
 //! - [`eigenface`]           : PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`.
@@ -56,15 +56,15 @@
 //! - [`video_id`]            : video-level identification — IoU tracker + single-linkage clusterer + cross-video re-id. Plugs any (detector, recogniser) pair via the [`video_id::Identify`] trait; example wires the zero-dep haar + LBPH path.
 //!
 //! ### Recognition (ONNX, opt-in)
-//! - [`arcface`]             : ArcFace R50 / MobileFaceNet pre/post-processing (alignment, L2-norm).
-//! - [`arcface_recognizer`]  : end-to-end embedding extractor + gallery matcher.
+//! - `arcface`               : ArcFace R50 / MobileFaceNet pre/post-processing (alignment, L2-norm).
+//! - `arcface_recognizer`    : end-to-end embedding extractor + gallery matcher.
 //!
 //! ### Domain types & glue
 //! - [`face_detector`]       : the [`FaceDetector`] trait — every algorithm implements it.
 //! - [`recognizer`]          : the [`FaceRecognizer`] trait — LBPH/eigenfaces/Fisherfaces dispatch uniformly; shared [`Recognition`] outcome.
 //! - [`face`]                : `Detection`, `Face`, landmark-aware types shared by detection + recognition.
-//! - [`models`]              : model registry with pinned SHA-256 digests for downloaded weights.
-//! - [`align`]               : landmark-based face alignment (112×112 canonical) for ArcFace.
+//! - `models`                : model registry with pinned SHA-256 digests for downloaded weights.
+//! - `align`                 : landmark-based face alignment (112×112 canonical) for ArcFace.
 //! - [`embedding`]           : `FaceEmbedding` (f32 vector, L2-normalised) + matcher.
 //!
 //! ### Pipeline / orchestration (`std` only)
@@ -147,8 +147,10 @@
 //! ## `no_std` & threading
 //!
 //! Core types (`GrayImage`, `Cascade`, `Detector` feature tables, `LbphConfig`)
-//! avoid `alloc` where practical. The threading primitives in [`pipeline`],
-//! [`pool`], and [`source`] require the `std` feature, which is on by default.
+//! avoid `alloc` where practical, but the crate as a whole is `std`-only —
+//! there is no `#![no_std]` build. The threading primitives in `pipeline`,
+//! `pool`, and `source` live behind the `pipeline` / `source` cargo features
+//! (both on by default) so allocator-light embeddings stay trim-able.
 //!
 //! ## License
 //!
@@ -158,7 +160,7 @@
 //! provenance in `src/weights/NOTICE.md`), shipped as the documented `.rfcf`
 //! format; the CNN starter weights are trainable via the `cnn_train` binary,
 //! and ONNX models are fetched on demand through the SHA-256-pinned registry
-//! in [`models`] (InsightFace weights are non-commercial research-only;
+//! in `models` (InsightFace weights are non-commercial research-only;
 //! the YuNet model pin is Apache-2.0).
 
 #![allow(clippy::too_many_arguments)] // Pipeline knobs are independently tuned; bundling them hides call sites.

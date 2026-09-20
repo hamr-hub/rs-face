@@ -10,8 +10,9 @@
 //! the same canonical landmark configuration.
 //!
 //! Rounding to `usize` at detect time would throw away the sub-pixel precision that
-//! the similarity transform in [`crate::align`] needs, so [`FaceDetection`] keeps
-//! `f32` throughout and only quantises at the drawing/serialisation boundary.
+//! the similarity transform in the ONNX-only `crate::align` module needs, so
+//! [`FaceDetection`] keeps `f32` throughout and only quantises at the
+//! drawing/serialisation boundary.
 
 /// A single detection: pixel-space bounding box + confidence score.
 ///
@@ -119,10 +120,10 @@ pub(crate) fn iou(a: &Detection, b: &Detection) -> f32 {
 
 /// Canonical index of each of the five landmarks, in InsightFace order.
 ///
-/// This ordering is a hard ABI contract with the ArcFace reference landmarks in
-/// [`crate::align::ARCFACE_REFERENCE_LANDMARKS`] — permuting it silently destroys
-/// recognition accuracy rather than producing an error, so it is spelled out as
-/// named constants instead of bare indices.
+/// This ordering is a hard ABI contract with the ArcFace reference landmarks
+/// (`crate::align::ARCFACE_REFERENCE_LANDMARKS`, ONNX backend only) — permuting
+/// it silently destroys recognition accuracy rather than producing an error, so
+/// it is spelled out as named constants instead of bare indices.
 pub mod landmark {
     pub const LEFT_EYE: usize = 0;
     pub const RIGHT_EYE: usize = 1;

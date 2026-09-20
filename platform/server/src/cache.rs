@@ -19,7 +19,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// 简易 TTL 缓存:`get_or_fill` 在 TTL 过期或首次访问时调用 `fill`,
-/// 把 fill 的 Vec<u8> 结果缓存 `ttl` 时间。
+/// 把 fill 的 `Vec<u8>` 结果缓存 `ttl` 时间。
 pub struct TtlCache {
     state: Mutex<Option<(Instant, Vec<u8>)>>,
     ttl: Duration,

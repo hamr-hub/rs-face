@@ -286,7 +286,7 @@ pub fn to_prometheus(m: &PlatformMetrics) -> String {
     out
 }
 
-/// 给一个便利函数,直接给 Arc<JobRegistry> 调 → 文本。
+/// 给一个便利函数,直接给 `Arc<JobRegistry>` 调 → 文本。
 pub fn render_prometheus(reg: &Arc<JobRegistry>) -> String {
     to_prometheus(&PlatformMetrics::current(reg))
 }

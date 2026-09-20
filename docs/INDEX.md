@@ -99,7 +99,7 @@ that own a labelled gallery but cannot ship `libonnxruntime`.
 
 `platform/` is a thin deployment wrapper around the library: HTTP API, job
 queue, Postgres-backed persistence, Prometheus `/metrics`, and a vanilla-JS
-web UI for comparing the six detectors side by side.
+web UI for comparing the three zero-dep detectors (Haar / CNN / luminance) side by side.
 
 - [`platform/README.md`](../platform/README.md) — what it is, how to run, port map (20080/19000/15432).
 - [`platform/MINIMUM_CONFIG.md`](../platform/MINIMUM_CONFIG.md) — smallest viable box.

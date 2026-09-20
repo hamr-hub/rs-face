@@ -59,6 +59,11 @@ jobs:
       - name: minimal-core test
         run: cargo test --lib --no-default-features
 
+      # rustdoc is strict about intra-doc links: feature-gated modules must
+      # be referenced as plain code, or `cargo doc` breaks for default users.
+      - name: rustdoc (deny warnings)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
+
       - name: full default build + lib tests
         run: |
           cargo build --release --all-targets
@@ -139,3 +144,7 @@ jobs:
       - name: test
         working-directory: platform
         run: cargo test
+
+      - name: rustdoc (deny warnings)
+        working-directory: platform
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items
