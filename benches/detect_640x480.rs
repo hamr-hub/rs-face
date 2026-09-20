@@ -38,9 +38,30 @@ fn synth_face_640x480() -> GrayImage {
         for x in 0..w {
             s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let n = ((s >> 24) as u8).max(20);
-            let v = spot(w as f32 * 0.25, h as f32 * 0.30, 60.0, 220, x as f32, y as f32)
-                .max(spot(w as f32 * 0.70, h as f32 * 0.40, 90.0, 230, x as f32, y as f32))
-                .max(spot(w as f32 * 0.50, h as f32 * 0.75, 45.0, 215, x as f32, y as f32));
+            let v = spot(
+                w as f32 * 0.25,
+                h as f32 * 0.30,
+                60.0,
+                220,
+                x as f32,
+                y as f32,
+            )
+            .max(spot(
+                w as f32 * 0.70,
+                h as f32 * 0.40,
+                90.0,
+                230,
+                x as f32,
+                y as f32,
+            ))
+            .max(spot(
+                w as f32 * 0.50,
+                h as f32 * 0.75,
+                45.0,
+                215,
+                x as f32,
+                y as f32,
+            ));
             // Background noise blends with the spot highlights.
             img[(x, y)] = v.max(n);
         }
@@ -103,7 +124,12 @@ fn main() {
         cascade.window_w,
         cascade.window_h
     );
-    println!("[detect_640x480] image={}x{} iters={}", img.width(), img.height(), n_iters);
+    println!(
+        "[detect_640x480] image={}x{} iters={}",
+        img.width(),
+        img.height(),
+        n_iters
+    );
 
     let (median_ms, n_dets) = time_run(&det, &img, n_iters);
     let fps = 1000.0 / median_ms.max(1e-9);
