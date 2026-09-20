@@ -418,6 +418,11 @@ impl Detector {
             // the detector sees in practice satisfies
             // `cw * ch * 255 ≤ u32::MAX` (the narrow path's contract).
             let ii_is_narrow = !ii.is_wide();
+            // Hoist the (N → f64) cast: the per-window variance
+            // computation is `N * ss - s²` (a fused multiply-add on the
+            // FMA unit) and the (N → f64) cast is constant for the
+            // cascade window.
+            let n_pixels_f64 = n_pixels as f64;
 
             // GPU fast-path: run the full cascade on GPU when worth it.
             // The kernel handles variance normalisation + per-stage eval +
@@ -532,8 +537,12 @@ impl Detector {
                         ) {
                             None
                         } else {
-                            let variance_part = (n_pixels as f64) * (ss as f64)
-                                - (s as f64) * (s as f64);
+                            // Fused multiply-add: `(N * ss) - s²` is one
+                            // fma op on the FMA unit instead of two
+                            // multiplies and a subtract.
+                            let s_f = s as f64;
+                            let ss_f = ss as f64;
+                            let variance_part = n_pixels_f64.mul_add(ss_f, -s_f * s_f);
                             self.cascade.classify_inbounds_with_variance_part(
                                 &ii,
                                 &ri,
