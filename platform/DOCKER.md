@@ -172,7 +172,7 @@ data/
 | `curl localhost:20080` 拒连 | `ss -tlnp \| grep 20080` | 端口冲突 → 改 compose 里 `BIND_ADDR`;容器没起 → `docker logs rsface-server \| tail -30` |
 | `[persist] PG connect failed: Connection reset by peer` | `docker logs rsface-postgres \| tail -20` | PG 没 healthy 时 server 已经尝试连接;`depends_on: condition: service_healthy` 会保证顺序,如有 race 等 5s 重试 |
 | `ensure_bucket failed: Connection refused`(S3) | `docker logs rsface-rustfs \| tail -10` | rustfs 没起;看 healthcheck 是否 `healthy` |
-| bind mount `Permission denied` | `ls -la data/` | 旧目录是 `root:root 0755`(典型:之前用 docker volume);重命名 `data → data.old`,新建 `data/{rustfs,pg/pgdata,media}/`(当前用户拥有) |
+| bind mount `Permission denied` | `ls -la data/` | 旧目录是 `root:root 0755`(典型:之前用 docker volume);重命名 `data → data.old`,新建 `data/{rustfs,pg/pgdata,media}/`(当前用户拥有)。`rustfs` 容器已锁定 UID:GID = 1000:1000(见 `docker-compose.yml`),host 侧目录必须是 hyx:hyx 才能写入。 |
 | 容器起不来,日志报 `port already in use` | `ss -tlnp \| grep -E '20080\|15432\|1900[01]'` | 另一个进程占了端口;在 compose 里改 HOST 端口 |
 | `cargo build` 失败但 `docker compose up -d --build` 不重 build | `docker images \| grep rsface-server` | 旧镜像被缓存;`docker compose build --no-cache server` |
 

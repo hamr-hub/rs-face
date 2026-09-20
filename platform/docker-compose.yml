@@ -10,6 +10,14 @@ services:
   rustfs:
     image: rustfs/rustfs:latest
     container_name: rsface-rustfs
+    # 以 hyx (UID:GID = 1000:1000) 运行,这样 bind mount 到 ../data/rustfs/
+    # 创建的对象在宿主侧也是 hyx:hyx,无需 root 写。镜像默认以 root 运行
+    # 会让 data/rustfs/ 出现 root-owned 目录,后续 hyx 跑 `rm` / `du` 都会
+    # 触发 Permission denied。
+    # 注意:已有的 root-owned data/rustfs/ 内容需要先
+    #   sudo chown -R 1000:1000 data/rustfs
+    # 否则容器启动后会拒读旧对象。
+    user: "1000:1000"
     environment:
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rsface}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rsface-secret}

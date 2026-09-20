@@ -73,6 +73,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (with platform/ sub-tree, tests/, benches/, examples/, docs/, tools/,
   data/) and point at `CONTRIBUTING.md` for the canonical version.
 
+### Fixed — platform deploy permissions
+- **`platform/docker-compose.yml` — rustfs 容器锁定 UID:GID = 1000:1000**:
+  rustfs 镜像默认以 root 运行,绑定 `../data/rustfs` 后容器创建的对象
+  在宿主侧是 `root:root`,hyx 用户后续 `rm` / `du` / `rsync` 等操作会
+  Permission denied。锁定 `user: "1000:1000"` 后内外一致。迁移期
+  已有 root-owned 的 `data/rustfs/` 内容需要 `sudo chown -R 1000:1000`
+  才能被新容器读到(详见 compose 注释 + DOCKER.md troubleshooting)。
+
 ### Housekeeping — structure audit + frontend package simplification
 - **Removed `platform/CHANGELOG_CNN.md` and `platform/CHANGELOG_PERF.md`**
   — STRUCTURE.md §2.3 forbids `CHANGELOG_*.md` under `platform/`. Release
