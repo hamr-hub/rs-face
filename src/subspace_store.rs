@@ -461,7 +461,11 @@ fn read_finite_vector(
         SubspaceStoreError::InvalidConfig(format!("{what} byte length overflows usize"))
     })?))?;
     let mut out = Vec::with_capacity(n);
-    for chunk in raw.chunks_exact(4) {
+    // `take(n * 4)` returns exactly that many bytes or errors, so the
+    // as_chunks remainder is provably empty (clippy 1.98 prefers as_chunks).
+    let words = raw.as_chunks::<4>().0;
+    debug_assert_eq!(words.len(), n);
+    for chunk in words {
         let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         if !v.is_finite() {
             return Err(SubspaceStoreError::InvalidConfig(format!(
