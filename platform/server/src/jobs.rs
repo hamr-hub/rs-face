@@ -364,7 +364,7 @@ impl JobRegistry {
                 j.cancel.store(true, Ordering::SeqCst);
             }
         }
-        println!("[jobs] shutdown: cancel signalled to non-terminal jobs (total {n})");
+        tracing::info!("[jobs] shutdown: cancel signalled to non-terminal jobs (total {n})");
     }
 
     /// 是否还有 queued/running 任务(停机排空检测)。
@@ -538,7 +538,9 @@ impl JobRegistry {
                         loop {
                             let now = std::time::Instant::now();
                             if now >= deadline {
-                                eprintln!("[job {id}] watchdog: timeout after {secs}s, cancelling");
+                                tracing::warn!(
+                                    "[job {id}] watchdog: timeout after {secs}s, cancelling"
+                                );
                                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                                 break;
                             }
@@ -590,7 +592,7 @@ impl JobRegistry {
                             &serde_json::json!({"type": "error", "message": e.to_string()})
                                 .to_string(),
                         );
-                        eprintln!("[job {}] error: {e}", job.id);
+                        tracing::warn!("[job {}] error: {e}", job.id);
                         let err_str = e.to_string();
                         let id = job.id.clone();
                         let db = reg.db.clone();
@@ -611,7 +613,7 @@ impl JobRegistry {
                             Some(format!("panic: {msg}"));
                         job.set_status(JobStatus::Error);
                         job.emit(&serde_json::json!({"type": "error", "message": format!("panic: {msg}")}).to_string());
-                        eprintln!("[job {}] PANIC: {msg}", job.id);
+                        tracing::warn!("[job {}] PANIC: {msg}", job.id);
                         let err_str = format!("panic: {msg}");
                         let id = job.id.clone();
                         let db = reg.db.clone();
@@ -1162,13 +1164,13 @@ fn put_with_fallback(reg: &JobRegistry, key: &str, ct: &str, bytes: &[u8]) -> St
     match reg.s3.put_object(key, ct, bytes.to_vec()) {
         Ok(_) => format!("s3://{key}"),
         Err(e) => {
-            eprintln!("[storage] S3 put failed for {key}: {e} — falling back to local disk");
+            tracing::warn!("[storage] S3 put failed for {key}: {e} — falling back to local disk");
             let path = reg.cfg.local_media_dir.join(key);
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             if std::fs::write(&path, bytes).is_err() {
-                eprintln!("[storage] local write also failed for {key}");
+                tracing::warn!("[storage] local write also failed for {key}");
             }
             format!("local://{key}")
         }
@@ -1182,7 +1184,7 @@ fn put_with_fallback_file(reg: &JobRegistry, key: &str, ct: &str, src: &std::pat
     match reg.s3.put_object_file(key, ct, src) {
         Ok(_) => return format!("s3://{key}"),
         Err(e) => {
-            eprintln!("[storage] S3 stream-put failed for {key}: {e} — falling back to local")
+            tracing::warn!("[storage] S3 stream-put failed for {key}: {e} — falling back to local")
         }
     }
     let dst = reg.cfg.local_media_dir.join(key);
@@ -1190,7 +1192,7 @@ fn put_with_fallback_file(reg: &JobRegistry, key: &str, ct: &str, src: &std::pat
         let _ = std::fs::create_dir_all(parent);
     }
     if std::fs::copy(src, &dst).is_err() {
-        eprintln!("[storage] local stream-copy failed for {key}");
+        tracing::warn!("[storage] local stream-copy failed for {key}");
     }
     format!("local://{key}")
 }
@@ -1210,7 +1212,7 @@ pub fn put_bytes_with_fallback_blocking(
     if std::fs::write(&path, bytes).is_ok() {
         format!("local://{key}")
     } else {
-        eprintln!("[storage] local write failed for {key} — returning inline://");
+        tracing::warn!("[storage] local write failed for {key} — returning inline://");
         format!("inline://{key}")
     }
 }
@@ -1224,7 +1226,7 @@ fn put_with_inline_fallback(reg: &JobRegistry, key: &str, ct: &str, bytes: &[u8]
     match reg.s3.put_object(key, ct, bytes.to_vec()) {
         Ok(_) => return format!("s3://{key}"),
         Err(e) => {
-            eprintln!("[storage] S3 put failed for {key}: {e} — falling back to local disk");
+            tracing::warn!("[storage] S3 put failed for {key}: {e} — falling back to local disk");
         }
     }
     let path = reg.cfg.local_media_dir.join(key);
@@ -1234,7 +1236,7 @@ fn put_with_inline_fallback(reg: &JobRegistry, key: &str, ct: &str, bytes: &[u8]
     if std::fs::write(&path, bytes).is_ok() {
         return format!("local://{key}");
     }
-    eprintln!("[storage] BOTH S3 and local failed for {key} — inlining base64 into SSE event");
+    tracing::warn!("[storage] BOTH S3 and local failed for {key} — inlining base64 into SSE event");
     format!("inline://{key}")
 }
 
@@ -1259,7 +1261,7 @@ pub fn cleanup_job_media_blocking(
                 break;
             }
             if std::time::Instant::now() >= deadline {
-                eprintln!("[jobs] cleanup worker join timeout for {id}, proceeding anyway");
+                tracing::warn!("[jobs] cleanup worker join timeout for {id}, proceeding anyway");
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1270,23 +1272,25 @@ pub fn cleanup_job_media_blocking(
         Ok(keys) => {
             for key in keys {
                 if let Err(e) = s3.delete_object(&key) {
-                    eprintln!("[storage] delete object {key} failed: {e}");
+                    tracing::warn!("[storage] delete object {key} failed: {e}");
                 }
             }
         }
-        Err(e) => eprintln!("[storage] list {prefix} failed: {e} — orphan objects left in bucket"),
+        Err(e) => {
+            tracing::warn!("[storage] list {prefix} failed: {e} — orphan objects left in bucket")
+        }
     }
     let local = cfg.local_media_dir.join(&prefix);
     if let Err(e) = std::fs::remove_dir_all(&local) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("[storage] cleanup local {local:?} failed: {e}");
+            tracing::warn!("[storage] cleanup local {local:?} failed: {e}");
         }
     }
     // tmp 工作目录一并清掉(任务已从索引删除,没有再读的路径)。
     let tmp = cfg.tmp_dir.join(id);
     if let Err(e) = std::fs::remove_dir_all(&tmp) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("[jobs] cleanup tmp {tmp:?} failed: {e}");
+            tracing::warn!("[jobs] cleanup tmp {tmp:?} failed: {e}");
         }
     }
 }
@@ -1477,7 +1481,7 @@ fn select_algo_name(cfg: &Config) -> String {
     match from_env.as_deref() {
         Some("haar") | Some("cnn") | Some("luminance") => from_env.unwrap(),
         Some(other) => {
-            eprintln!("[jobs] unknown RSFACE_ALGO='{other}', falling back to haar/cnn logic");
+            tracing::warn!("[jobs] unknown RSFACE_ALGO='{other}', falling back to haar/cnn logic");
             if cfg.use_cnn || cfg.cnn_weights.is_some() {
                 "cnn".to_string()
             } else {

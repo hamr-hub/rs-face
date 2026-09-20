@@ -726,6 +726,14 @@ per-commit attribution.
 - **`/api/health/deep`** endpoint — surfaces S3 + Postgres reachability
   with a 200 / 503 split; the shallow `/api/health` stays a no-IO probe
   for the Docker healthcheck.
+- **`platform/server/src/lib.rs`** — server crate exposed as a library
+  (`pub mod api / config / jobs / metrics / persist / s3 / zip`) so
+  integration tests can import modules.
+- **`platform/tests/integration.rs`** — 6 in-process integration tests
+  with full HTTP round-trip via reqwest: deep_health,
+  upload_image_end_to_end, ssrf_bypass_payloads_all_rejected (5 payloads),
+  download_zip_returns_valid_archive (LOCAL + EOCD signature check),
+  range_request_returns_206, available_algos_includes_expected_three.
 
 ### Security
 - **SSRF parser-differential fixes** (`platform/server/src/api.rs`):
@@ -745,6 +753,12 @@ per-commit attribution.
   lexer-aware `split_sql_statements` (nested block comments, line
   comments, quoted strings, `$tag$` dollar quotes). Fail-fast at startup
   on migration error.
+- **`/api/health/deep` probes** bounded by 2 s `tokio::time::timeout` so a
+  hung backend doesn't pin `spawn_blocking` (DoS hardening).
+- **`/api/health/deep` body** collapsed `ok/fail/disabled` into a single
+  boolean per backend, so anonymous callers can't infer whether the
+  deployment runs with Postgres or in-memory mode (info-disclosure
+  hardening).
 
 ### Performance / resource hygiene
 - **Streaming S3 PUT** (`put_object_file`, `UNSIGNED-PAYLOAD` SigV4): the
@@ -753,8 +767,10 @@ per-commit attribution.
 - **Streaming `/media` Range responses** (`S3RangeStream`,
   `tokio_util::io::ReaderStream`, `File::take(len)`): scrubbing a 2 GB
   video in the browser no longer allocates 2 GB in the server.
-- **Streaming `download_zip`** with 256 MiB cap; skipped entry count
-  surfaced in `manifest.json` as `truncated_entries` + `size_bytes`.
+- **Streaming `download_zip`** via `ZipWriter::finish_into<W: Write>` +
+  `mpsc::Sender<Vec<u8>>` (depth 4) + `Body::from_stream`: peak memory
+  is bounded by `4 × chunk-size`, not the full archive. 256 MiB cap
+  still applies on top.
 - **ffmpeg video import** gets `-fs` size cap + 600 s wall-clock timeout
   (`run_ffmpeg_wait_with_timeout`). Image-conversion twins get the same
   30 s timeout pattern (`run_ffmpeg_with_timeout_blocking`).
@@ -764,6 +780,14 @@ per-commit attribution.
 - **`compare_algos`** refuses non-image jobs and > 16 MiB originals
   (local: `tokio::fs::metadata` gate; S3: bounded `get_object_range(0, +16 MiB)`
   so HEAD→GET TOCTOU can't grow past the cap).
+
+### Observability
+- **`tracing` + `tracing-subscriber`** added; `init_tracing()` in
+  `main.rs` defaults to `info,rsface_platform=info,tower_http=info,axum=info`
+  via `EnvFilter`. ~50 scattered `eprintln!` / `println!` calls in
+  `persist.rs` / `jobs.rs` / `api.rs` / `main.rs` migrated to
+  `tracing::warn!` / `tracing::info!` / `tracing::error!`. FATAL startup
+  messages now log at `error!` so journald picks them up correctly.
 
 ### Correctness
 - **`Job.worker` `JoinHandle`** (`jobs.rs`): `cleanup_job_media_blocking`
@@ -792,11 +816,13 @@ per-commit attribution.
   per-algorithm `required-features` trimming still resolves.
 
 ### Tests
-- 56 platform tests pass (was 45 at PR #4; +11 from this round):
+- 57 platform unit tests pass (was 45 at PR #4; +12 from this round):
   numeric IPv4 SSRF, IPv4-mapped / percent-encoded SSRF, streaming
   Range, `/media` path-traversal, queued cancel, `local_range_stream`,
   s3 list / SigV4 canonical-query, header round-trip, JSON cache, config,
-  zip layout + CRC vectors, etc.
+  zip layout + CRC vectors, `key_extension_sanitizes_path_traversal`, etc.
+- 6 platform integration tests pass (Colima docker-compose live):
+  full HTTP round-trip for upload / detect / delete / SSRF / Range / zip.
 - 17 GitHub Actions checks green: 13-combination feature matrix on the
   core crate + core on ubuntu + macos + platform on ubuntu.
 

@@ -170,28 +170,29 @@ async fn health() -> Json<serde_json::Value> {
 async fn health_deep(
     State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    // 深探:S3 / PG 健康。在 spawn_blocking 里跑 sync probe,不要把
-    // healthcheck 端点阻塞在等待 IO 上 — kube 探针一次 ping 至少要 ≤ 1s。
-    let s3_ok = tokio::task::spawn_blocking({
+    // 深探:S3 / PG 健康。每个探测 2 s 截止,防止挂起把 spawn_blocking
+    // 池耗光(DoS 防护)。信息最小化:不区分 "disabled" vs "fail" vs
+    // "ok",只暴露 boolean,避免泄露部署模式。
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    let s3_probe = tokio::task::spawn_blocking({
         let s3 = state.s3.clone();
         move || s3.ping().is_ok()
-    })
-    .await
-    .unwrap_or(false);
+    });
+    let s3_ok = match tokio::time::timeout(PROBE_TIMEOUT, s3_probe).await {
+        Ok(Ok(ok)) => ok,
+        Ok(Err(_)) | Err(_) => false, // join error 或 timeout → fail
+    };
     let pg_ok = if let Some(pool) = state.db.pool.clone() {
-        sqlx::query_scalar::<_, i32>("SELECT 1")
-            .fetch_one(&pool)
-            .await
-            .is_ok()
+        let q = sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&pool);
+        matches!(tokio::time::timeout(PROBE_TIMEOUT, q).await, Ok(Ok(_)))
     } else {
-        // 没配 DATABASE_URL:纯内存模式,记为 degraded,但不视为 unhealthy。
-        false
+        // 没配 DATABASE_URL:纯内存模式算 OK(本就接受这种部署)。
+        true
     };
     let overall_ok = s3_ok && pg_ok;
     let status = if overall_ok {
         StatusCode::OK
     } else {
-        // 200 但 body 显示 degraded,让运维看 log;非 OK 让探针退避重试。
         StatusCode::SERVICE_UNAVAILABLE
     };
     (
@@ -200,12 +201,8 @@ async fn health_deep(
             "status": if overall_ok { "ok" } else { "degraded" },
             "service": "rsface-platform",
             "checks": {
-                "s3": if s3_ok { "ok" } else { "fail" },
-                "postgres": if state.db.pool.is_some() {
-                    if pg_ok { "ok" } else { "fail" }
-                } else {
-                    "disabled"
-                },
+                "s3": s3_ok,
+                "postgres": pg_ok,
             }
         })),
     )
@@ -1444,9 +1441,11 @@ async fn telemetry_ingest(
     let accepted = safe.len();
     // 永远 stdout 一份,方便开发模式无 DB 也能看埋点。
     if let Some(first) = safe.first() {
-        eprintln!(
+        tracing::warn!(
             "[telemetry] batch {} events, accepted={} first.name={}",
-            n, accepted, first.name
+            n,
+            accepted,
+            first.name
         );
     }
     // 有 DB → 异步批量落库
@@ -1901,7 +1900,7 @@ async fn media(
                 .into_response()
         }
         _ => {
-            eprintln!(
+            tracing::warn!(
                 "[media] not found local='{}' and S3 lookup failed",
                 local_path.display()
             );
@@ -2095,18 +2094,54 @@ async fn download_zip(
     });
     let _ = zip.add_file("manifest.json", manifest.to_string().as_bytes());
 
-    let bytes = zip.finish();
+    // 流式输出:不让 axum 把整 archive 一次性 copy 到 body。后台线程同步
+    // 写 zip 到 mpsc channel,前端 `Body::from_stream` 边收边发 —— 256 MiB cap
+    // 之上的剩余字节也只占 mpsc 缓冲深度(4 段),不再一整 Vec 4 GiB 堆常驻。
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<Vec<u8>>>(4);
+    std::thread::spawn(move || {
+        let mut w = ChannelWriter { tx: &tx };
+        if let Err(e) = zip.finish_into(&mut w) {
+            let _ = tx.blocking_send(Err(e));
+        }
+        // tx drops → rx returns None → body ends.
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let body = axum::body::Body::from_stream(stream);
     // 文件名只用 id(hex-dash 安全字符),不嵌入可能含引号的 display_name。
     let id_head: String = id.chars().take(8).collect();
     let disposition = format!("attachment; filename=\"rsface-{id_head}.zip\"");
-    (
-        [
-            (header::CONTENT_TYPE, "application/zip".to_string()),
-            (header::CONTENT_DISPOSITION, disposition),
-        ],
-        bytes,
-    )
-        .into_response()
+    let mut resp = (StatusCode::OK, body).into_response();
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/zip"),
+    );
+    resp.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&disposition)
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"rsface.zip\"")),
+    );
+    resp
+}
+
+/// `std::io::Write` 适配器,把每段字节送进 `tokio::sync::mpsc::Sender`。
+/// 用于 streaming zip body:后台线程同步 `write`,前端异步收。
+struct ChannelWriter<'a> {
+    tx: &'a tokio::sync::mpsc::Sender<std::io::Result<Vec<u8>>>,
+}
+
+impl std::io::Write for ChannelWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let len = buf.len();
+        // 每个 chunk 都 copy 一份,避免 zip writer 后续复用 buf 槽位时
+        // 写到 half-overlap 的同一 Vec。
+        match self.tx.blocking_send(Ok(buf[..len].to_vec())) {
+            Ok(()) => Ok(len),
+            Err(_) => Err(std::io::Error::other("zip stream consumer dropped")),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn error_response(code: StatusCode, msg: &str) -> Response {
@@ -2137,7 +2172,7 @@ fn remove_job_workdir(state: &JobRegistry, id: &str) {
     tokio::task::spawn_blocking(move || {
         if let Err(e) = std::fs::remove_dir_all(&dir) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("[jobs] cleanup workdir {dir:?} failed: {e}");
+                tracing::warn!("[jobs] cleanup workdir {dir:?} failed: {e}");
             }
         }
     });
@@ -2764,7 +2799,7 @@ async fn telemetry_summary(
             .into_response()
         }
         Err(e) => {
-            eprintln!("[telemetry] summary query failed: {e}");
+            tracing::warn!("[telemetry] summary query failed: {e}");
             Json(serde_json::json!({
                 "ok": true, "enabled": false, "error": e.to_string(),
                 "window_secs": window_secs, "buckets": [], "total": 0,
@@ -2817,7 +2852,7 @@ async fn telemetry_recent(
             .into_response()
         }
         Err(e) => {
-            eprintln!("[telemetry] recent query failed: {e}");
+            tracing::warn!("[telemetry] recent query failed: {e}");
             Json(serde_json::json!({
                 "ok": true, "enabled": false, "error": e.to_string(),
                 "events": [],

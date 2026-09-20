@@ -9,6 +9,10 @@ license = "MIT"
 name = "rsface-server"
 path = "server/src/main.rs"
 
+[lib]
+name = "rsface_platform"
+path = "server/src/lib.rs"
+
 [dependencies]
 # 人脸识别核心库(SDK)。core 保持零依赖,平台层在此引入服务端依赖。
 # 包名为 rs-face,lib 名为 rsface;此处重命名为 rsface 以便 `use rsface::…`。
@@ -35,6 +39,18 @@ hmac = "0.12"
 
 # PostgreSQL(任务/帧/人脸持久化)
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "migrate"] }
+
+# 结构化日志:统一替代散落的 eprintln!。仅 platform 引入,
+# core 仍保持零依赖。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
+
+[dev-dependencies]
+# 集成测试:跑整个 axum router 起来 + 用 reqwest 模拟真实 HTTP 请求。
+# 不引入 reqwest 之外的服务容器依赖;集成测试假设有 rustfs / postgres 在
+# 127.0.0.1 跑,没起来就跳过。
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
+tempfile = "3"
 
 [profile.release]
 opt-level = 3
