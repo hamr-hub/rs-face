@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — module groundwork for per-algorithm features
+- `Detection` / `non_max_suppression` / `iou` now live in the detector-agnostic
+  `rsface::face` module; `rsface::detector` re-exports them, so existing
+  `rsface::detector::Detection` imports keep working. The `FaceRecognizer` /
+  `IncrementalRecognizer` impls moved out of the trait module into the
+  `lbph` / `eigenface` / `fisherface` algorithm modules they belong to.
+  Behavior and public paths are unchanged; this only unblocks compiling
+  individual algorithms behind cargo features.
+
 ### Changed — package hygiene
 - The crates.io tarball no longer ships the multi-MB photo fixtures only the
   opt-in ONNX e2e test needs (`biden.ppm`, `two-people.ppm`) nor the rendered
