@@ -79,6 +79,10 @@ impl Db {
                 "0002_telemetry.sql",
                 include_str!("../../migrations/0002_telemetry.sql"),
             ),
+            (
+                "0003_jobs_health_columns.sql",
+                include_str!("../../migrations/0003_jobs_health_columns.sql"),
+            ),
         ];
         let mut applied = 0u64;
         for (name, sql) in files {
@@ -251,6 +255,111 @@ impl Db {
             .bind(key)
             .execute(pool)
             .await;
+    }
+
+    /// 标记 job 进入 running 时刻(用于 DB 端分析 + orphan 检测的起点)。
+    /// 幂等:同 id 重复调用覆盖一次。失败只打日志(persist 是尽力而为)。
+    pub async fn mark_started(&self, id: &str, started_ms: u64) {
+        let Some(pool) = &self.pool else {
+            return;
+        };
+        let _ = sqlx::query(
+            "UPDATE jobs SET status='running', started_at=to_timestamp($2::bigint / 1000.0), \
+             heartbeat_at=now(), updated_at=now() WHERE id=$1",
+        )
+        .bind(id)
+        .bind(started_ms as i64)
+        .execute(pool)
+        .await;
+    }
+
+    /// heartbeat:run_job 内的 watchdog 心跳线程每 30s 调用一次,
+    /// 让 DB 知道这个 job 还在跑。orphan 扫描以
+    /// `heartbeat_at < now() - 5min` 判定僵尸。
+    pub async fn heartbeat(&self, id: &str) {
+        let Some(pool) = &self.pool else {
+            return;
+        };
+        let _ = sqlx::query(
+            "UPDATE jobs SET heartbeat_at=now(), updated_at=now() WHERE id=$1 AND status='running'",
+        )
+        .bind(id)
+        .execute(pool)
+        .await;
+    }
+
+    /// 设置归档标志(侧栏默认隐藏;与内存 `Job::archived` 字段镜像)。
+    pub async fn set_archived(&self, id: &str, archived: bool) {
+        let Some(pool) = &self.pool else {
+            return;
+        };
+        let _ = sqlx::query(
+            "UPDATE jobs SET archived=$2, updated_at=now() WHERE id=$1",
+        )
+        .bind(id)
+        .bind(archived)
+        .execute(pool)
+        .await;
+    }
+
+    /// 设置错误码(API `error_code` 字段):与 `error` 文本共存,
+    /// 便于 PG 端按 error_code 聚合("哪些 task 因 queue_full 失败")。
+    /// 保留为持久化 API 表面,jobs.rs 在 run_job 失败时调用;
+    /// 当前编译期只有 reap_orphans 内部用,标 `allow(dead_code)` 避免
+    /// 暂时未被引用时告警。
+    #[allow(dead_code)]
+    pub async fn set_error_code(&self, id: &str, code: &str) {
+        let Some(pool) = &self.pool else {
+            return;
+        };
+        let _ = sqlx::query(
+            "UPDATE jobs SET error_code=$2, updated_at=now() WHERE id=$1",
+        )
+        .bind(id)
+        .bind(code)
+        .execute(pool)
+        .await;
+    }
+
+    /// 孤儿任务回收:扫描所有 `status IN ('queued','running')` 且
+    /// `heartbeat_at IS NULL OR heartbeat_at < now() - 5min` 的行,
+    /// 把它们置为 error,error='orphaned by server restart'。
+    ///
+    /// **适用场景**:服务器在 job 跑到一半时挂掉 / SIGKILL / OOM,
+    /// DB 里留下了 status='running' 但内存里已经没有对应 JobRegistry
+    /// 条目的"僵尸行"。它们会让 `/api/jobs?status=running` 等查询
+    /// 永远返回这个 ID,前端看到的是"一直卡在 running"。
+    ///
+    /// **触发时机**:每次 server 启动后,migrate() 之后,listen bind
+    /// 之前(确保孤儿不占任何 in-flight 槽位)。
+    ///
+    /// **DB 不可用时**:返回 None,调用方降级为日志警告 + 继续启动
+    /// (用户接受"重启后看不到这些状态" vs "服务起不来")。
+    pub async fn reap_orphans(&self, stale_secs: i64) -> Option<u64> {
+        let pool = self.pool.as_ref()?;
+        // 用 to_timestamp(seconds) 而非 epoch 转换,PG 端 `now() - interval`
+        // 自动按 timestamptz 算;老行(迁移前写入) heartbeat_at IS NULL,
+        // `IS NULL OR <` 表达,直接命中。
+        let res = sqlx::query(
+            "UPDATE jobs SET status='error', \
+             error='orphaned by server restart', \
+             error_code='orphaned', \
+             finished_ms=$2, \
+             updated_at=now() \
+             WHERE status IN ('queued','running') \
+               AND (heartbeat_at IS NULL OR heartbeat_at < now() - make_interval(secs => $1))",
+        )
+        .bind(stale_secs as f64)
+        .bind(now_ms_u64() as i64)
+        .execute(pool)
+        .await;
+        match res {
+            Ok(r) => Some(r.rows_affected()),
+            Err(e) => {
+                eprintln!("[persist] reap_orphans failed: {e}");
+                None
+            }
+        }
     }
 
     /// 单帧写(现在 run_job 走 add_frames_batch 批量路径;保留单帧 API
@@ -769,5 +878,14 @@ mod tests {
         assert_eq!(init.len(), 7);
         let telemetry = split_sql_statements(include_str!("../../migrations/0002_telemetry.sql"));
         assert_eq!(telemetry.len(), 1);
+        let health = split_sql_statements(include_str!("../../migrations/0003_jobs_health_columns.sql"));
+        // 5 列 ALTER + 5 索引 CREATE = 10 top-level statements
+        // (started_at / heartbeat_at / updated_at / archived / error_code;
+        //  BRIN × 2 + status B-tree + archived 组合 + error_code B-tree)
+        assert!(
+            health.len() >= 10,
+            "0003 should split into ≥10 stmts, got {}",
+            health.len()
+        );
     }
 }

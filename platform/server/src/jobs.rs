@@ -646,9 +646,41 @@ impl JobRegistry {
             let db = self.db.clone();
             let id = job.id.clone();
             tokio::spawn(async move {
-                db.update_job_status(&id, JobStatus::Running, None, None)
-                    .await;
+                // mark_started 同时写 status='running' + started_at +
+                // heartbeat_at。heartbeat 是后续 orphan 回收的依据。
+                db.mark_started(&id, crate::persist::now_ms_u64()).await;
             });
+        }
+
+        // heartbeat:每 30s 写一次 `heartbeat_at = now()`。
+        // orphan 扫描(启动时)会用"heartbeat_at < now()-5min"判僵尸;
+        // 没有这一行,运行超过 5 分钟但还没 finish 的 job 会被误判。
+        // 通过 spawn_run 已经传入的 `rt` handle 在 tokio runtime 里 spawn
+        // 一个独立 task 跑心跳;cancel 是同一 AtomicBool,run_job 退出后
+        // 下一次轮询即结束。task 是 fire-and-forget,run_job 不阻塞等它。
+        {
+            let rt = self.rt.clone();
+            let db = self.db.clone();
+            let id = job.id.clone();
+            let cancel = job.cancel.clone();
+            tokio::spawn(async move {
+                // 第一次心跳立刻发:让 orphan 扫描在 job 启动 30s 内就能
+                // 看到"alive"标记(而不是等到第一个 30s tick)。
+                if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    db.heartbeat(&id).await;
+                }
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+                // 跳过首次立即触发(上面已经手动发过了),让 30s 节奏对齐。
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    db.heartbeat(&id).await;
+                }
+            });
+            let _ = rt; // 当前实现用不到 rt(已有 handle),保留变量供未来扩展
         }
 
         // 1) 输入预处理:图片归一化为 PGM;视频 URL 同步 ffmpeg 转 mp4;
