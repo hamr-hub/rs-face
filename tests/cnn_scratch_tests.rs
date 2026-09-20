@@ -19,20 +19,15 @@ fn scratch_default_sizes_match_forward_pass_contract() {
     // `forward()`; changing one without the other is a silent failure.
     // If you intentionally change a CNN layer shape, update this test.
     let s = CnnScratch::new();
-    let b = unsafe { &*s.buffers_mut() };
-    // (Same internal access via a fresh `new()` because `buffers_mut()`
-    // requires the SAFETY contract; we never share between threads here.)
-    let s2 = CnnScratch::new();
-    let b2 = s2.buffers_mut();
-    assert_eq!(b2.c1.len(), 22 * 22 * 8, "c1 = 22x22x8");
-    assert_eq!(b2.c2.len(), 20 * 20 * 16, "c2 = 20x20x16");
-    assert_eq!(b2.c2p.len(), 10 * 10 * 16, "c2p = 10x10x16");
-    assert_eq!(b2.c3.len(), 8 * 8 * 32, "c3 = 8x8x32");
-    assert_eq!(b2.c3p.len(), 4 * 4 * 32, "c3p = 4x4x32");
-    assert_eq!(b2.f1.len(), 32, "f1 = 32");
-    assert_eq!(b2.f2.len(), 1, "f2 = 1");
-    // Avoid unused-variable warning when neither field is otherwise read.
-    let _ = b;
+    let b = s.buffers_mut();
+    assert_eq!(b.c1.len(), 22 * 22 * 8, "c1 = 22x22x8");
+    assert_eq!(b.c2.len(), 20 * 20 * 16, "c2 = 20x20x16");
+    assert_eq!(b.c2p.len(), 10 * 10 * 16, "c2p = 10x10x16");
+    assert_eq!(b.c3.len(), 8 * 8 * 32, "c3 = 8x8x32");
+    assert_eq!(b.c3p.len(), 4 * 4 * 32, "c3p = 4x4x32");
+    assert_eq!(b.f1.len(), 32, "f1 = 32");
+    assert_eq!(b.f2.len(), 1, "f2 = 1");
+    let _ = s;
 }
 
 #[test]
