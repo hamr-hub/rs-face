@@ -189,6 +189,10 @@ name = "algo_compat"
 required-features = ["detector-haar", "detector-luminance"]
 
 [[test]]
+name = "cnn_scratch_tests"
+required-features = ["detector-cnn"]
+
+[[test]]
 name = "bench_detect"
 required-features = ["detector-haar"]
 
