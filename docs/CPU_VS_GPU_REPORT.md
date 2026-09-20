@@ -85,9 +85,13 @@ bounded by the cascade math rather than by GPU dispatch.
 src/gpu/
 ├── mod.rs              # OpenCL FFI driver (zero-dep, dynamic loader)
 ├── backend.rs          # GpuBackend trait + dispatcher + OpenCL passthrough
-├── metal.rs             # Apple Metal backend — Apple Silicon GPU
-├── cuda.rs / rocm.rs / ascend.rs / mlu.rs   # NVIDIA / AMD / 华为昇腾 / 寒武纪 stubs
+├── metal.rs            # Apple Metal backend — Apple Silicon GPU (metal-backend feature)
+├── cuda.rs             # NVIDIA CUDA backend via cudarc (cuda-backend feature)
 ```
+
+The earlier `rocm` / `ascend` / `mlu` probe-only placeholders were removed;
+they never executed a kernel. Add a new vendor by implementing `GpuBackend`
+— see `docs/GPU_BACKENDS.md` for the recipe.
 
 Adding a new vendor is one Cargo.toml dep + one `probe()` body — the
 `GpuBackend` trait keeps the dispatch surface identical.
@@ -127,11 +131,11 @@ python3 tools/compare_cpu_gpu.py out/rs_face_compare/cpu/*/detections.jsonl \
 | `cpu`     | host CPU                | ✅ works                  | ✅ works                                |
 | `metal`   | Apple Metal (Apple Silicon) | ✅ runs, results byte-identical to CPU | n/a |
 | `opencl`  | OpenCL ICD (Metal-OpenCL on Mac) | ⚠️ broken — Apple removed the runtime binary in macOS 26.5 | ✅ works (Khronos ICD + NVIDIA/AMD ICD) |
-| `cuda`    | NVIDIA CUDA             | stub                      | enabled by adding `cust` and uncommenting `probe()` in `src/gpu/cuda.rs` |
-| `rocm`    | AMD ROCm (HIP)          | stub                      | enabled by adding HIP bindings and uncommenting `probe()` |
-| `directml`| AMD/NVIDIA on Windows   | stub                      | enabled by adding DirectML bindings    |
-| `acl`     | Huawei Ascend (CANN)    | stub                      | enabled by linking `libascendcl`       |
-| `mlu`     | Cambricon MLU (BANG C)  | stub                      | enabled by linking `libcnrt`           |
+| `cuda`    | NVIDIA CUDA             | n/a                       | ✅ real implementation — build with `--features cuda-backend` (plus a matching `cudarc/cuda-*` version feature); needs the CUDA toolkit at build time and driver at runtime |
+| `rocm`    | AMD ROCm (HIP)          | removed                   | was a probe-only placeholder; implement `GpuBackend` to re-add |
+| `directml`| AMD/NVIDIA on Windows   | n/a                       | use the `ort-directml` execution provider with `ort-backend` for ONNX inference |
+| `acl`     | Huawei Ascend (CANN)    | removed                   | was a probe-only placeholder; implement `GpuBackend` to re-add |
+| `mlu`     | Cambricon MLU (BANG C)  | removed                   | was a probe-only placeholder; implement `GpuBackend` to re-add |
 
 ---
 
@@ -141,12 +145,9 @@ python3 tools/compare_cpu_gpu.py out/rs_face_compare/cpu/*/detections.jsonl \
 src/gpu/mod.rs                 # OpenCL FFI driver (zero-dep, dynamic loader)
 src/gpu/backend.rs             # GpuBackend trait + dispatcher + OpenCL passthrough
 src/gpu/metal.rs                # Apple Metal backend — Apple Silicon GPU
-src/gpu/cuda.rs                 # CUDA stub
-src/gpu/rocm.rs                 # ROCm stub
-src/gpu/ascend.rs               # Huawei Ascend stub
-src/gpu/mlu.rs                  # Cambricon MLU stub
+src/gpu/cuda.rs                 # NVIDIA CUDA backend (cudarc; cuda-backend feature)
 src/bin/rs_face_detect.rs       # video → JSONL, both CPU and GPU per frame
-Cargo.toml                      # optional metal crate behind --features metal-backend
+Cargo.toml                      # optional metal/cudarc crates behind metal-backend / cuda-backend
 docs/GPU_BACKENDS.md            # backend adapter documentation
 docs/CPU_VS_GPU_REPORT.md       # this file
 tools/run_rust_detect.py        # Python aux: spawn binary across backends
