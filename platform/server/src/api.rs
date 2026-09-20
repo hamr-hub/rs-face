@@ -4,6 +4,7 @@
 //! - `GET  /`                     前端入口
 //! - `GET  /{file}`               前端静态资源(web/)
 //! - `GET  /api/health`           健康检查
+//! - `GET  /api/health/deep`     深探 (S3 + Postgres)
 //! - `GET  /api/config`           当前检测器模式(haar/cnn) + 权重文件状态
 //! - `POST /api/jobs/image`       上传图片检测(multipart: file,≤ UPLOAD_LIMIT_IMAGE_MB)
 //! - `POST /api/jobs/video`       上传视频检测(multipart: file,≤ UPLOAD_LIMIT_VIDEO_GB)
@@ -66,6 +67,7 @@ pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
+        .route("/api/health/deep", get(health_deep))
         .route("/api/config", get(config_info))
         .route("/api/metrics", get(metrics))
         .route("/metrics", get(prometheus_metrics))
@@ -161,7 +163,52 @@ fn apply_cors_headers(headers: &mut axum::http::HeaderMap, allow_origin: &str) {
 }
 
 async fn health() -> Json<serde_json::Value> {
+    // 浅探:进程在跑、axum router 起来。Docker healthcheck 用。
     Json(serde_json::json!({"status": "ok", "service": "rsface-platform"}))
+}
+
+async fn health_deep(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // 深探:S3 / PG 健康。在 spawn_blocking 里跑 sync probe,不要把
+    // healthcheck 端点阻塞在等待 IO 上 — kube 探针一次 ping 至少要 ≤ 1s。
+    let s3_ok = tokio::task::spawn_blocking({
+        let s3 = state.s3.clone();
+        move || s3.ping().is_ok()
+    })
+    .await
+    .unwrap_or(false);
+    let pg_ok = if let Some(pool) = state.db.pool.clone() {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .is_ok()
+    } else {
+        // 没配 DATABASE_URL:纯内存模式,记为 degraded,但不视为 unhealthy。
+        false
+    };
+    let overall_ok = s3_ok && pg_ok;
+    let status = if overall_ok {
+        StatusCode::OK
+    } else {
+        // 200 但 body 显示 degraded,让运维看 log;非 OK 让探针退避重试。
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "status": if overall_ok { "ok" } else { "degraded" },
+            "service": "rsface-platform",
+            "checks": {
+                "s3": if s3_ok { "ok" } else { "fail" },
+                "postgres": if state.db.pool.is_some() {
+                    if pg_ok { "ok" } else { "fail" }
+                } else {
+                    "disabled"
+                },
+            }
+        })),
+    )
 }
 
 /// `GET /metrics` — Prometheus exposition format. Renders the same data as
@@ -2939,6 +2986,22 @@ mod import_tests {
         let h3 = fxhash_short(b"hello");
         assert_ne!(h1, h2);
         assert_eq!(h1, h3);
+    }
+
+    /// `key_extension` 是 zip entry-name 安全的核心:送进 zip 之前必须把
+    /// 任意扩展名(用户上传 / S3 key / URL 路径)收敛到小写字母数字。
+    /// zip-slip 测试单独在 zip.rs;这里是输入清洗层。
+    #[test]
+    fn key_extension_sanitizes_path_traversal() {
+        assert_eq!(key_extension("local://jobs/x/original.pgm"), "pgm");
+        assert_eq!(key_extension("s3://jobs/x/original"), "bin");
+        // 路径穿越段被扩展名解析干掉
+        assert_eq!(key_extension("local://../../etc/passwd"), "bin");
+        // 非 ascii 拒(扩展名分支只允许 alnum)
+        assert_eq!(key_extension("local://foo.中"), "bin");
+        // 上限 5 字符
+        assert_eq!(key_extension("local://foo.tooooooolong"), "bin");
+        assert_eq!(key_extension("local://foo.mp4"), "mp4");
     }
 }
 

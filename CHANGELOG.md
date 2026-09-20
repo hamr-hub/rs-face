@@ -709,6 +709,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `README.md` "Latest run" section linking to the sample frames and listing
   the run's measured throughput / detection counts.
 
+## [0.1.1] — 2026-09-20 — Platform hardening round 2
+
+Closes the deferred audit items from PR #4 plus a second security review
+of the result. Items roll up by area; see PRs #4 / #7 / #8 / #10 for the
+per-commit attribution.
+
+### Added
+- **`platform/server/src/zip.rs`** — dependency-free STORE-method ZIP writer
+  (local headers + central directory + EOCD + const-built CRC-32 table).
+  Used by `/api/jobs/{id}/download.zip` to package one job's annotated
+  frames + face crops + `manifest.json` as a single archive.
+- **`/api/jobs/{id}/compare`** TB (test-button) trigger wired through the
+  existing compare pipeline (frontend `platform/web/compare.js`); governed
+  polling (`visibilitychange`-aware).
+- **`/api/health/deep`** endpoint — surfaces S3 + Postgres reachability
+  with a 200 / 503 split; the shallow `/api/health` stays a no-IO probe
+  for the Docker healthcheck.
+
+### Security
+- **SSRF parser-differential fixes** (`platform/server/src/api.rs`):
+  - `normalize_host_for_check` peels percent-encoded (`%31%32%37.0.0.1`),
+    IPv4-mapped IPv6 (`::ffff:127.0.0.1`), and rejects IDN / non-ASCII /
+    `..` outright before SSRF classification.
+  - `is_blocked_host` recognises `[::ffff:127.0.0.1]` and bare `::ffff:127.0.0.1`
+    directly (defense in depth — even if normalize regresses, the IPv4
+    rules still fire).
+  - Numeric IPv4 (`2130706433`, `0x7f000001`, `0177.0.0.1`, `0xa9.0xfe.0xfe.0xfe`)
+    now decodes to octets before classification.
+  - `import_video_url` and `start_stream` both feed `url_authority_host`
+    (strips userinfo / port) before SSRF classification.
+- **Telemetry filter** is now case-fold + extended with `secret`,
+  `password`, `token` (low #10).
+- **Migrations**: `schema_migrations` bookkeeping, per-file transaction,
+  lexer-aware `split_sql_statements` (nested block comments, line
+  comments, quoted strings, `$tag$` dollar quotes). Fail-fast at startup
+  on migration error.
+
+### Performance / resource hygiene
+- **Streaming S3 PUT** (`put_object_file`, `UNSIGNED-PAYLOAD` SigV4): the
+  original media upload no longer `fs::read` + `to_vec` a multi-GB video
+  into a Vec before sending.
+- **Streaming `/media` Range responses** (`S3RangeStream`,
+  `tokio_util::io::ReaderStream`, `File::take(len)`): scrubbing a 2 GB
+  video in the browser no longer allocates 2 GB in the server.
+- **Streaming `download_zip`** with 256 MiB cap; skipped entry count
+  surfaced in `manifest.json` as `truncated_entries` + `size_bytes`.
+- **ffmpeg video import** gets `-fs` size cap + 600 s wall-clock timeout
+  (`run_ffmpeg_wait_with_timeout`). Image-conversion twins get the same
+  30 s timeout pattern (`run_ffmpeg_with_timeout_blocking`).
+- **ureq split timeouts** (`timeout_connect` 10 s, `timeout_read` 600 s,
+  `timeout_write` 600 s); large GETs no longer killed by the old single
+  120 s budget.
+- **`compare_algos`** refuses non-image jobs and > 16 MiB originals
+  (local: `tokio::fs::metadata` gate; S3: bounded `get_object_range(0, +16 MiB)`
+  so HEAD→GET TOCTOU can't grow past the cap).
+
+### Correctness
+- **`Job.worker` `JoinHandle`** (`jobs.rs`): `cleanup_job_media_blocking`
+  joins the running worker thread (15 s deadline) before listing and
+  deleting the S3 prefix — eliminates the delete-vs-write race that
+  produced orphan S3 objects on rapid cancel/delete.
+- **Poison tolerance** on every per-job `Mutex` (registry-wide `jobs`
+  HashMap stays strict). Worker panic no longer wedges `/api/jobs` or
+  `/metrics`.
+- **`O(n²)` crop counting** replaced by a single running counter in the
+  video loop.
+- **Pre-permit queued cancel** writes `Cancelled` to PG so historical rows
+  reflect the true terminal state (low #14).
+- **`DATABASE_URL` set + connect fail** now `exit(1)` at startup instead
+  of silently running memory-only and losing all persistence (low #13).
+
+### Deployment
+- **Multi-arch image build** (`platform/Dockerfile`): `TARGETARCH` maps to
+  `aarch64` / `x86_64-unknown-linux-musl`; cross-arch cross-compile
+  fails explicitly.
+- **rustfs / postgres** pinned (`rustfs/rustfs:1.0.0`,
+  `postgres:16.15-alpine`); console / DB ports bind `127.0.0.1` only
+  (no LAN exposure); Postgres password parameterised via `.env`.
+- **Dockerfile cascade path synced** with the `src/weights/` move
+  (PR #7); cache-prefetch layer stubs cargo target placeholders so
+  per-algorithm `required-features` trimming still resolves.
+
+### Tests
+- 56 platform tests pass (was 45 at PR #4; +11 from this round):
+  numeric IPv4 SSRF, IPv4-mapped / percent-encoded SSRF, streaming
+  Range, `/media` path-traversal, queued cancel, `local_range_stream`,
+  s3 list / SigV4 canonical-query, header round-trip, JSON cache, config,
+  zip layout + CRC vectors, etc.
+- 17 GitHub Actions checks green: 13-combination feature matrix on the
+  core crate + core on ubuntu + macos + platform on ubuntu.
+
+### Live verification
+Five SSRF bypass payloads were rejected by the live stack on the merged
+main (Colima VM docker-compose):
+
+```
+rtsp://[::ffff:127.0.0.1]/c   → 400 url host is blocked
+http://user:pass@127.0.0.1/x  → 400 url host is blocked
+http://%31%32%37.0.0.1/x      → 400 url host is blocked
+rtsp://0x7f000001:554/cam     → 400 url host is blocked
+rtsp://2130706433/cam         → 400 url host is blocked
+```
+
 ## [0.1.0] — 2026-08-13
 
 ### Added

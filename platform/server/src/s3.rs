@@ -171,6 +171,12 @@ impl S3Client {
             .ok_or_else(|| S3Error("HEAD missing content-length".into()))
     }
 
+    /// 轻量健康检查:`HEAD /<bucket>` 看 rustfs 是否可达 + 凭据是否合法。
+    /// 用于 `/api/health/deep` 端点。
+    pub fn ping(&self) -> Result<(), S3Error> {
+        self.request("HEAD", "/", &[], &[], None).map(|_| ())
+    }
+
     /// ListObjectsV2:列出 `prefix` 下全部对象 key(自动按 continuation-token
     /// 翻页)。删除任务媒体时用来枚举对象。
     pub fn list_objects(&self, prefix: &str) -> Result<Vec<String>, S3Error> {
