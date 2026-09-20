@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — real OpenCV cascade bundled; zero-arg install works
+- **The classical OpenCV frontal-face cascade now ships inside the binary**
+  (`src/weights/haarcascade_frontalface_default.rfcf`, converted from OpenCV
+  4.10.0's Apache-2.0 XML; source hash pinned in `src/weights/NOTICE.md`).
+  Embedded via `include_bytes!` and served by
+  `rsface::haar::bundled::bundled_frontalface_cascade()`, the CLI uses it by
+  default — no `--cascade` path and no model download are needed to detect
+  real faces. The 930 KB audit XML is kept beside it but excluded from the
+  crates.io package.
+- **`rs-face demo`** is a zero-argument post-install smoke test: the bundled
+  cascade runs against an embedded 256×256 portrait (fixture under
+  `tests/fixtures/`), prints the detection, writes an annotated PNG to
+  `rsface-demo/`, and exits non-zero when no face is found.
+- **Uniform `FaceRecognizer` trait** (`src/recognizer.rs`): LBPH /
+  eigenfaces / Fisherfaces now dispatch behind one API with a shared
+  `Recognition` outcome (including incremental enroll); cookbook snippet in
+  `examples/recognise_uniform.rs`.
+
 ### Removed — placeholder-weight detectors
 - **`src/mtcnn.rs`, `src/hog_face.rs`, `src/yunet.rs` and the random-weight
   blobs under `src/weights/` were deleted.** They shipped 1–3 KB of random
@@ -159,6 +177,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`README.md § Project layout`**: rewritten to show the full tree
   (with platform/ sub-tree, tests/, benches/, examples/, docs/, tools/,
   data/) and point at `CONTRIBUTING.md` for the canonical version.
+- **No new top-level directories (STRUCTURE §2.1)**: the feature branch that
+  added the bundled cascade had introduced `assets/`; its contents moved to
+  the documented homes — cascade weights + `NOTICE.md` under `src/weights/`,
+  the embedded demo portrait under `tests/fixtures/` — with `include_bytes!`
+  paths, the `.gitignore` rfcf exception and the crates.io package excludes
+  updated. `docs/CASCADE_FIX.md`, the last `*_fix.md` scratch note banned by
+  STRUCTURE §2.2 (its uppercase name slipped past the earlier audit), was
+  deleted and its three inbound links cleaned.
 
 ### Fixed — platform deploy permissions
 - **`platform/docker-compose.yml` — rustfs 容器锁定 UID:GID = 1000:1000**:
