@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — zero-dependency deep embeddings (`embednet`)
+- **`rsface::embednet`**: a genuinely trainable embedding CNN in pure
+  `std` — im2col/col2im GEMM convolutions (1→24→48→64→96 channels),
+  max-pool, a 128-d FC head with L2 normalisation, He init, and a full
+  analytic backward pass (gradients verified against central finite
+  differences). The `ContrastiveTrainer` optimises the Hadsell–Chopra–
+  LeCun contrastive pair loss with Adam; `EmbedNetRecognizer` adapts the
+  resulting unit vectors to the same zero-dep `embedding::Gallery`
+  matcher as ONNX ArcFace and to the grey-crop `FaceRecognizer` trait.
+  Weights persist to a strict-versioned `.rsen` container.
+- **`embednet_train` binary**: trains on a folder-of-folders
+  (`root/<label>/*.{pgm,ppm,png}`), reports held-out pair accuracy and
+  same/different distances every 200 steps, and saves the best snapshot.
+- **`examples/recognise_embednet.rs`**: end-to-end demo — trains on
+  synthetic identities, identifies a held-out probe through the uniform
+  trait, and round-trips weights through `.rsen`.
+- Honesty scope, same as the CNN detector: trainable from scratch with no
+  bundled weights; ONNX ArcFace stays the industrial-accuracy option.
+
 ### Added — real OpenCV cascade bundled; zero-arg install works
 - **The classical OpenCV frontal-face cascade now ships inside the binary**
   (`src/weights/haarcascade_frontalface_default.rfcf`, converted from OpenCV

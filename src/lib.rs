@@ -50,6 +50,7 @@
 //! - [`eigenface`]           : PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`.
 //! - [`fisherface`]          : Fisherfaces / LDA (Belhumeur–Hespanha–Kriegman): n−C PCA reduction then C−1 class-discriminant axes; best zero-dep pair EER.
 //! - [`lbph`]                : uniform Local Binary Patterns histograms + chi-square distance.
+//! - [`embednet`]            : zero-dependency **trainable embedding CNN** (im2col convs, full backprop, contrastive-pair Adam trainer, `.rsen` weights) — a mini-ArcFace in pure `std`, producing 128-d embeddings for the same [`embedding::Gallery`] as ONNX ArcFace.
 //! - [`lbph_store`]          : zero-dep binary gallery persistence (save/load across restarts, no crops needed).
 //! - [`subspace_store`]      : trained-model persistence for eigenfaces/fisherfaces (mean, axes, projections).
 //! - [`video_id`]            : video-level identification — IoU tracker + single-linkage clusterer + cross-video re-id. Plugs any (detector, recogniser) pair via the [`video_id::Identify`] trait; example wires the zero-dep haar + LBPH path.
@@ -140,7 +141,7 @@
 //! | family            | default build | what extra you must do |
 //! |-------------------|---------------|------------------------|
 //! | `haar`, `luminance`, `lbph`, `eigenface`, `fisherface` | ✅ Production-grade out of the box | nothing |
-//! | `cnn`                                    | 🟡 Trainable toy net (starter weights only) | train with `cnn_train`, load via `--cnn-weights` |
+//! | `cnn`, `embednet`                        | 🟡 Genuinely trainable from scratch, no bundled weights | train with `cnn_train` / `embednet_train` (embednet = pure-Rust, zero-dep deep embeddings) |
 //! | `scrfd`, `arcface`                       | ⛔ Opt-in (`ort-backend` / `tract-backend`) | download ONNX models; `tools/fetch_models.sh` does this |
 //!
 //! ## `no_std` & threading
@@ -202,6 +203,7 @@ pub mod cnn;
 pub mod detector;
 pub mod eigenface;
 pub mod embedding;
+pub mod embednet;
 pub mod face;
 pub mod face_detector;
 pub mod fisherface;

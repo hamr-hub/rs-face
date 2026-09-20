@@ -62,6 +62,12 @@ path = "src/bin/bench_fisherface.rs"
 name = "cnn_train"
 path = "src/bin/cnn_train.rs"
 
+# Zero-dependency metric-learning trainer for the EmbedNet embedding
+# network (contrastive pairs; writes .rsen weights for EmbedNet::load).
+[[bin]]
+name = "embednet_train"
+path = "src/bin/embednet_train.rs"
+
 [[bin]]
 name = "debug_cascade"
 path = "src/bin/debug_cascade.rs"
