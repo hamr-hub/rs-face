@@ -461,11 +461,11 @@ fn print_table(reports: &[ScoreReport]) {
 /// clock on the larger fixtures).
 #[derive(Default)]
 struct CachedDetections {
-    haar: Vec<Vec<Detection>>,
-    luminance: Vec<Vec<Detection>>,
-    luminance_strict: Vec<Vec<Detection>>,
-    cnn_raw: Vec<Vec<Detection>>,
-    cnn_cal: Vec<Vec<Detection>>,
+    haar: (Vec<Vec<Detection>>, f32), // (detections, total elapsed ms)
+    luminance: (Vec<Vec<Detection>>, f32),
+    luminance_strict: (Vec<Vec<Detection>>, f32),
+    cnn_raw: (Vec<Vec<Detection>>, f32),
+    cnn_cal: (Vec<Vec<Detection>>, f32),
 }
 
 impl CachedDetections {
@@ -493,12 +493,30 @@ impl CachedDetections {
             ..CnnConfig::default()
         });
 
-        let mut cache = CachedDetections::default();
+        let mut haar_dets = Vec::with_capacity(imgs.len());
+        let mut lum_dets = Vec::with_capacity(imgs.len());
+        let mut lum_strict_dets = Vec::with_capacity(imgs.len());
+        let mut raw = Vec::with_capacity(imgs.len());
+        let mut cal = Vec::with_capacity(imgs.len());
+        let mut haar_ms = 0.0f32;
+        let mut lum_ms = 0.0f32;
+        let mut lum_strict_ms = 0.0f32;
+        let mut raw_ms = 0.0f32;
+        let mut cal_ms = 0.0f32;
         for entry in imgs {
             let img = load_entry(entry);
-            cache.haar.push(haar_det.detect(&img));
-            cache.luminance.push(lum.detect(&img));
-            cache.luminance_strict.push(lum_strict.detect(&img));
+
+            let t0 = Instant::now();
+            haar_dets.push(haar_det.detect(&img));
+            haar_ms += t0.elapsed().as_secs_f32() * 1000.0;
+
+            let t0 = Instant::now();
+            lum_dets.push(lum.detect(&img));
+            lum_ms += t0.elapsed().as_secs_f32() * 1000.0;
+
+            let t0 = Instant::now();
+            lum_strict_dets.push(lum_strict.detect(&img));
+            lum_strict_ms += t0.elapsed().as_secs_f32() * 1000.0;
 
             let (w, h) = (img.width(), img.height());
             let small_enough = w * h <= 512 * 512;
@@ -507,10 +525,14 @@ impl CachedDetections {
                 for (i, &p) in img.as_slice().iter().enumerate() {
                     buf[i] = p as f32 / 255.0;
                 }
-                let raw = cnn_raw.detect(&buf, w, h);
-                let cal = cnn_cal.detect(&buf, w, h);
-                cache.cnn_raw.push(
-                    raw.into_iter()
+                let t0 = Instant::now();
+                let r = cnn_raw.detect(&buf, w, h);
+                raw_ms += t0.elapsed().as_secs_f32() * 1000.0;
+                let t0 = Instant::now();
+                let c = cnn_cal.detect(&buf, w, h);
+                cal_ms += t0.elapsed().as_secs_f32() * 1000.0;
+                raw.push(
+                    r.into_iter()
                         .map(|d| Detection {
                             x: d.x,
                             y: d.y,
@@ -520,8 +542,8 @@ impl CachedDetections {
                         })
                         .collect(),
                 );
-                cache.cnn_cal.push(
-                    cal.into_iter()
+                cal.push(
+                    c.into_iter()
                         .map(|d| Detection {
                             x: d.x,
                             y: d.y,
@@ -532,20 +554,26 @@ impl CachedDetections {
                         .collect(),
                 );
             } else {
-                cache.cnn_raw.push(Vec::new());
-                cache.cnn_cal.push(Vec::new());
+                raw.push(Vec::new());
+                cal.push(Vec::new());
             }
         }
-        cache
+        CachedDetections {
+            haar: (haar_dets, haar_ms),
+            luminance: (lum_dets, lum_ms),
+            luminance_strict: (lum_strict_dets, lum_strict_ms),
+            cnn_raw: (raw, raw_ms),
+            cnn_cal: (cal, cal_ms),
+        }
     }
 
-    fn by_name(&self, idx: usize, name: &str) -> &[Detection] {
+    fn by_name<'a>(&'a self, idx: usize, name: &str) -> &'a [Detection] {
         match name {
-            "haar" => &self.haar[idx],
-            "luminance" => &self.luminance[idx],
-            "luminance-strict" => &self.luminance_strict[idx],
-            "cnn-raw" => &self.cnn_raw[idx],
-            "cnn-cal" => &self.cnn_cal[idx],
+            "haar" => &self.haar.0[idx],
+            "luminance" => &self.luminance.0[idx],
+            "luminance-strict" => &self.luminance_strict.0[idx],
+            "cnn-raw" => &self.cnn_raw.0[idx],
+            "cnn-cal" => &self.cnn_cal.0[idx],
             _ => &[],
         }
     }
@@ -638,12 +666,17 @@ fn golden_eval_table() {
     eprintln!("[golden-eval] detector pass complete");
 
     // --- Per-algorithm reports from the cached results. ---
-    let haar_report = report_from_cache("haar", &imgs, &cache.haar);
+    let haar_report = report_from_cache("haar", &imgs, &cache.haar.0, cache.haar.1);
     eprintln!(
         "[golden-eval] haar: P={:.3} R={:.3} F1={:.3} emit={}",
         haar_report.precision, haar_report.recall, haar_report.f1, haar_report.emitted_total
     );
-    let lum_report = report_from_cache("luminance", &imgs, &cache.luminance);
+    let lum_report = report_from_cache(
+        "luminance",
+        &imgs,
+        &cache.luminance.0,
+        cache.luminance.1,
+    );
     eprintln!(
         "[golden-eval] luminance: P={:.3} R={:.3} F1={:.3} emit={}",
         lum_report.precision, lum_report.recall, lum_report.f1, lum_report.emitted_total
@@ -651,7 +684,8 @@ fn golden_eval_table() {
     let lum_strict_report = report_from_cache(
         "luminance-strict",
         &imgs,
-        &cache.luminance_strict,
+        &cache.luminance_strict.0,
+        cache.luminance_strict.1,
     );
     eprintln!(
         "[golden-eval] luminance-strict: P={:.3} R={:.3} F1={:.3} emit={}",
@@ -660,12 +694,22 @@ fn golden_eval_table() {
         lum_strict_report.f1,
         lum_strict_report.emitted_total
     );
-    let cnn_raw_report = report_from_cache("cnn-raw", &imgs, &cache.cnn_raw);
+    let cnn_raw_report = report_from_cache(
+        "cnn-raw",
+        &imgs,
+        &cache.cnn_raw.0,
+        cache.cnn_raw.1,
+    );
     eprintln!(
         "[golden-eval] cnn-raw: emit={}",
         cnn_raw_report.emitted_total
     );
-    let cnn_cal_report = report_from_cache("cnn-cal", &imgs, &cache.cnn_cal);
+    let cnn_cal_report = report_from_cache(
+        "cnn-cal",
+        &imgs,
+        &cache.cnn_cal.0,
+        cache.cnn_cal.1,
+    );
     eprintln!(
         "[golden-eval] cnn-cal: emit={}",
         cnn_cal_report.emitted_total
@@ -755,13 +799,14 @@ fn golden_eval_table() {
     print_table(&reports);
 }
 
-/// Build a `ScoreReport` from cached per-image detections. The
-/// timing is reported as 0 because the cached pass already paid for
-/// it; this row is for F1 / precision / recall comparison only.
+/// Build a `ScoreReport` from cached per-image detections. The total
+/// wall-clock `ms_total` is divided by the image count to produce the
+/// `avg_ms` column.
 fn report_from_cache(
     name: &'static str,
     imgs: &[ImageEntry],
     detections: &[Vec<Detection>],
+    ms_total: f32,
 ) -> ScoreReport {
     let mut tp = 0usize;
     let mut fp = 0usize;
@@ -781,12 +826,13 @@ fn report_from_cache(
     } else {
         0.0
     };
+    let avg_ms = ms_total / imgs.len() as f32;
     ScoreReport {
         name,
         precision,
         recall,
         f1,
-        avg_ms: 0.0,
+        avg_ms,
         emitted_total,
     }
 }
