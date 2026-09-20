@@ -70,6 +70,7 @@ rs-face/
 | You're adding | Home directory |
 |---|---|
 | New algorithm module | `src/<algo>.rs` or `src/<algo>/` (multi-file) |
+| Bundled zero-dep weights (e.g. random scaffold blobs for `cnn`/`hog`/`yunet`/`mtcnn`) | `src/weights/<name>.bin` — referenced via `include_bytes!`. Real ONNX weights belong in gitignored `models/` at repo root. |
 | New `[[bin]]` target | `src/bin/<name>.rs` (and list it in `Cargo.toml`) |
 | Integration test | `tests/<name>.rs` |
 | Criterion bench | `benches/<name>.rs` (`harness = false`) |
@@ -113,7 +114,8 @@ CHANGELOG_<TOPIC>.md (in platform/*)
 The historical ones were:
 - `TASK_PLAN.md` (root) — deleted 2026-09
 - `core/MULTI_ALGO.md` — deleted 2026-09 (along with empty `core/`)
-- `platform/CHANGELOG_CNN.md`, `platform/CHANGELOG_PERF.md` — deleted 2026-09
+- `platform/CHANGELOG_CNN.md`, `platform/CHANGELOG_PERF.md` — deleted 2026-09; re-purged 2026-09-20 after a regression reintroduced them
+- `platform/web/CHANGELOG_DOUBAO.md`, `CHANGELOG_ENHANCE.md`, `CHANGELOG_FIXES.md` — same rule, also re-purged 2026-09-20
 - `platform/web/CHANGELOG_DOUBAO.md`, `CHANGELOG_ENHANCE.md`, `CHANGELOG_FIXES.md` — deleted 2026-09
 
 Their content is either superseded by `docs/algorithms.md`, `docs/architecture.md`,

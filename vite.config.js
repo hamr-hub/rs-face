@@ -3,8 +3,9 @@
 // The production bundle is shipped inside the rsface-server Docker image
 // (see platform/Dockerfile); this config exists only for the dev workflow:
 //
-//   1. Backend:  `make docker-up`  (rsface-server on http://localhost:20080)
-//   2. Frontend: `make web-dev`    (Vite on http://localhost:5173, HMR on)
+//   1. Backend:  `docker compose -f platform/docker-compose.yml up -d --build`
+//                (rsface-server on http://localhost:20080)
+//   2. Frontend: `pnpm dev`  (Vite on http://localhost:5173, HMR on)
 //
 // Vite serves `platform/web/` as a static root (see `root:` below), then
 // proxies /api/* and /events to the Docker backend. Edits to app.js /

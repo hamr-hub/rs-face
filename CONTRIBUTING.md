@@ -155,8 +155,6 @@ rs-face/
 │   ├── DOCKER_SIZING.md # recommended instance sizes per workload
 │   ├── MINIMUM_CONFIG.md # smallest viable box
 │   ├── PROFILE.md      # performance profile from real load tests
-│   ├── CHANGELOG_CNN.md # platform CNN-specific history
-│   ├── CHANGELOG_PERF.md # perf-pass history (cache/gzip/ETag)
 │   ├── docs/           # platform design + roadmap + SDK notes
 │   ├── migrations/     # SQL migrations (0001_init, 0002_telemetry, ...)
 │   ├── scripts/        # bash + node smoke / screenshot scripts

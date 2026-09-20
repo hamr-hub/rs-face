@@ -73,6 +73,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (with platform/ sub-tree, tests/, benches/, examples/, docs/, tools/,
   data/) and point at `CONTRIBUTING.md` for the canonical version.
 
+### Housekeeping — structure audit + frontend package simplification
+- **Removed `platform/CHANGELOG_CNN.md` and `platform/CHANGELOG_PERF.md`**
+  — STRUCTURE.md §2.3 forbids `CHANGELOG_*.md` under `platform/`. Release
+  history lives in the root `CHANGELOG.md`. The `docs/INDEX.md` entry that
+  pointed at `platform/CHANGELOG_CNN.md` is removed.
+- **Removed `platform/web/CHANGELOG_DOUBAO.md`,
+  `CHANGELOG_ENHANCE.md`, `CHANGELOG_FIXES.md`** — same rule applies
+  under `platform/web/`.
+- **Frontend package management simplified**: dropped
+  `pnpm-workspace.yaml` (placeholder content, no actual workspace
+  defined) and `.npmrc` (broken `onlyBuiltDependencies[]=` syntax).
+  Frontend dev workflow is now `pnpm install && pnpm dev` with a single
+  `package.json` declaring one `devDependency` (`vite`).
+- **Fixed `vite.config.js` comments** that referenced `make docker-up` /
+  `make web-dev` — STRUCTURE.md §2.8 forbids a Makefile; the comments
+  now point at the canonical `docker compose` / `pnpm dev` commands.
+- **Documented `src/weights/`** in `STRUCTURE.md` §1.1 lookup table as
+  the home for bundled zero-dep binary weights (`include_bytes!`-loaded).
+- **Cleaned up generated / cached files**: removed `.meta.yaml` and
+  `cascade.rfcf` from the working tree (both `.gitignore`d; re-generated
+  on demand by their respective tools).
+
 ### Documentation — Docker is the canonical deployment story
 - **`CLAUDE.md` at the repo root codifies the rule**: platform services
   (rustfs + postgres + rsface-server) are deployed / started / integration-tested

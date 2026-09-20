@@ -87,7 +87,6 @@ web UI for comparing the six detectors side by side.
 - [`platform/MINIMUM_CONFIG.md`](../platform/MINIMUM_CONFIG.md) — smallest viable box.
 - [`platform/DOCKER_SIZING.md`](../platform/DOCKER_SIZING.md) — sizing for the bundled compose stack.
 - [`platform/PROFILE.md`](../platform/PROFILE.md) — performance profile from real load tests.
-- [`platform/CHANGELOG_CNN.md`](../platform/CHANGELOG_CNN.md) — CNN-related platform changes.
 
 ---
 
