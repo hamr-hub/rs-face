@@ -88,6 +88,13 @@ pub struct EvalCache {
     /// variance normalization of feature responses. Set once per frame via
     /// [`Detector::detect`], reused across all pyramid levels.
     sum_sq_iis: Option<crate::integral::SquaredIntegralImage>,
+    /// Whether the regular (non-squared) integral image attached to the
+    /// current pyramid level uses the narrow (u32) backing buffer. The
+    /// cascade's per-rect corner reads use a branch-free specialised path
+    /// when this is true; the detector sets it once per pyramid level.
+    /// Defaults to `false` (the conservative assumption: take the generic
+    /// branch). Set via [`Self::set_narrow_integral`].
+    narrow_integral: bool,
 }
 
 impl EvalCache {
@@ -100,7 +107,15 @@ impl EvalCache {
             responses: vec![(0, 0.0); n_features],
             gen: 1,
             sum_sq_iis: None,
+            narrow_integral: false,
         }
+    }
+    /// Record whether the (non-squared) integral image attached to the
+    /// current pyramid level is narrow (u32) or wide (u64). The cascade's
+    /// per-rect reads use the cheap narrow-specialised path when true.
+    #[inline(always)]
+    pub fn set_narrow_integral(&mut self, narrow: bool) {
+        self.narrow_integral = narrow;
     }
     #[inline(always)]
     pub fn get_or_eval(
@@ -400,7 +415,15 @@ impl Cascade {
             debug_assert!(x + ww <= ii.width() && y + wh <= ii.height());
             // SAFETY: the normrect is the inner (ww-2)×(wh-2) rect of a
             // window that fits the image, so it is strictly inside the table.
-            let s = unsafe { ii.rect_sum_unchecked(nx1, ny1, nx2, ny2) };
+            // Specialise for narrow (u32) IntegralImages when the cache flag
+            // says so — that's what every realistic face-window input takes,
+            // and the enum-match elimination is measurable in the cascade
+            // hot loop.
+            let s = if cache.narrow_integral {
+                unsafe { ii.rect_sum_unchecked_narrow(nx1, ny1, nx2, ny2) }
+            } else {
+                unsafe { ii.rect_sum_unchecked(nx1, ny1, nx2, ny2) }
+            };
             let sq = match cache.sum_sq_iis.as_ref() {
                 Some(sq) => unsafe { sq.rect_sum_sq_unchecked(nx1, ny1, nx2, ny2) },
                 None => 0,
