@@ -13,10 +13,13 @@ pub(crate) const JACOBI_SWEEPS: usize = 30;
 
 /// Cyclic Jacobi eigenvalue algorithm on a packed `n x n` slice (row-major).
 ///
-/// On return the matrix is (near-)diagonal and `(eigenvalues, eigenvectors)` is
-/// returned; eigenvector `k` is column `k` of the returned flat matrix, eigenvalues
-/// sorted **descending**. Input is symmetrised defensively in case of rounding drift.
-pub(crate) fn jacobi_symmetric(a: &mut [f32], n: usize) -> (Vec<f32>, Vec<f32>) {
+/// On return the matrix is (near-)diagonal and `(eigenvalues, eigenvectors, converged)`
+/// is returned; eigenvector `k` is column `k` of the returned flat matrix, eigenvalues
+/// sorted **descending**. `converged == false` means [`JACOBI_SWEEPS`] was exhausted
+/// with off-diagonal energy still above tolerance — the spectrum is approximate and
+/// callers should treat the gallery as degenerate rather than trust the axes. Input is
+/// symmetrised defensively in case of rounding drift.
+pub(crate) fn jacobi_symmetric(a: &mut [f32], n: usize) -> (Vec<f32>, Vec<f32>, bool) {
     for i in 0..n {
         for j in 0..i {
             let avg = (a[i * n + j] + a[j * n + i]) * 0.5;
@@ -29,6 +32,7 @@ pub(crate) fn jacobi_symmetric(a: &mut [f32], n: usize) -> (Vec<f32>, Vec<f32>) 
         v[i * n + i] = 1.0;
     }
 
+    let mut converged = false;
     for _ in 0..JACOBI_SWEEPS {
         let mut max_off = 0.0f32;
         for p in 0..n {
@@ -37,13 +41,18 @@ pub(crate) fn jacobi_symmetric(a: &mut [f32], n: usize) -> (Vec<f32>, Vec<f32>) 
             }
         }
         let diag_scale = (0..n).map(|i| a[i * n + i].abs()).fold(0.0f32, f32::max);
-        if max_off <= diag_scale.max(1.0) * EIGEN_TOL_REL {
+        // f32 rotation noise floors around n*eps*|diag| (LAPACK-style tol);
+        // EIGEN_TOL_REL (1e-10) is for eigenvalue filtering downstream and is
+        // tighter than f32 Jacobi can deliver on off-diagonal energy.
+        let tol = (n.max(1) as f32) * f32::EPSILON * diag_scale.max(1.0);
+        if max_off <= tol {
+            converged = true;
             break;
         }
         for p in 0..n {
             for q in (p + 1)..n {
                 let apq = a[p * n + q];
-                if apq.abs() <= f32::EPSILON {
+                if apq.abs() <= tol {
                     continue;
                 }
                 let app = a[p * n + p];
@@ -91,7 +100,7 @@ pub(crate) fn jacobi_symmetric(a: &mut [f32], n: usize) -> (Vec<f32>, Vec<f32>) 
             sorted_vecs[row * n + out_col] = v[row * n + src_col];
         }
     }
-    (sorted_vals, sorted_vecs)
+    (sorted_vals, sorted_vecs, converged)
 }
 
 #[cfg(test)]
@@ -102,13 +111,14 @@ mod tests {
     fn jacobi_recovers_known_2x2_eigenvalues() {
         // diag(2, 3): already diagonal.
         let mut diag = vec![2.0, 0.0, 0.0, 3.0];
-        let (vals, _) = jacobi_symmetric(&mut diag, 2);
+        let (vals, _, converged) = jacobi_symmetric(&mut diag, 2);
         assert!((vals[0] - 3.0).abs() < 1e-5);
         assert!((vals[1] - 2.0).abs() < 1e-5);
+        assert!(converged);
 
         // [[2,1],[1,2]] eigenvalues {3, 1}, eigenvectors (1,1)/sqrt2 etc.
         let mut mix = vec![2.0, 1.0, 1.0, 2.0];
-        let (vals, vecs) = jacobi_symmetric(&mut mix, 2);
+        let (vals, vecs, converged) = jacobi_symmetric(&mut mix, 2);
         assert!((vals[0] - 3.0).abs() < 1e-5);
         assert!((vals[1] - 1.0).abs() < 1e-5);
         // Columns stay orthonormal.
@@ -116,6 +126,7 @@ mod tests {
         assert!(dot.abs() < 1e-5);
         let n0 = (vecs[0] * vecs[0] + vecs[2] * vecs[2]).sqrt();
         assert!((n0 - 1.0).abs() < 1e-5);
+        assert!(converged);
     }
 
     #[test]
@@ -126,10 +137,14 @@ mod tests {
             1.0, 2.0, 0.0, //
             2.0, 0.0, 3.0,
         ];
-        let (vals, _) = jacobi_symmetric(&mut a, 3);
+        let (vals, _, converged) = jacobi_symmetric(&mut a, 3);
         // Trace is preserved and eigenvalues sum to it.
         assert!((vals.iter().sum::<f32>() - 9.0).abs() < 1e-4);
         // Determinant is the product of eigenvalues: det(A) = 24 - 3 - 8 = 13.
         assert!((vals[0] * vals[1] * vals[2] - 13.0).abs() < 1e-3);
+        assert!(
+            converged,
+            "well-conditioned 3x3 must converge within sweep budget"
+        );
     }
 }

@@ -28,30 +28,27 @@ this document for the per-algorithm detail.
 |---|---|---|:-:|---|:-:|
 | `haar` | optional `.rfcf` cascade (zero-dep bundled demo) | Production | real-face drama clips (benchmarks) | ~4 KB cascade + libm | ✅ |
 | `luminance` | none | Production | synthetic + drama (benchmarks) | libm only | ✅ |
-| `cnn` | `weights/cnn_*.bin` required | **Scaffold** | n/a (placeholder weights) | ~few KB | ✅ once real weights |
-| `hog` | `weights/hog_face.bin` required | **Scaffold** | n/a | ~3 KB | ✅ once real weights |
-| `yunet` | `weights/yunet.bin` required (Apache-2.0 YuNet 2023mar) | **Scaffold** | n/a | ~340 KB | ✅ once real weights |
-| `mtcnn` | `weights/mtcnn_{p,r,o}net.bin` required | **Scaffold** | n/a | ~3 stages | ✅ once real weights |
+| `cnn` | none external — starter weights built in, retrainable via `cargo run --bin cnn_train` | **Experimental** | n/a (hand-crafted starter weights; not independently benchmarked) | ~few KB | ✅ |
 | `scrfd` | ONNX via `tools/fetch_models.sh` | Production (gated) | WIDER FACE AP 0.95/0.94/0.83 (paper); measured locally | ~80 MB | ⛔ research only |
 
-> **Maturity labels** come from `rsface::face_detector::Maturity`. The CLI's
-> `--list-algos` prints them; the Web UI uses them to badge each card. A
-> scaffold detector's architecture is correct and exercised by tests, but its
-> bundled weights are placeholders — drop in real weights via `*_with_*`
-> constructors (or `--cnn-weights`) to move it to Production.
+> **Maturity labels** come from `rsface::face_detector::Maturity`, which now
+> has only two levels: **Production** and **Experimental**. The CLI's
+> `--list-algos` prints them; the Web UI uses them to badge each card. An
+> experimental detector runs end-to-end and is exercised by tests, but its
+> accuracy has not been independently measured in this crate — the CNN's
+> built-in starter weights encode a simple face-like template; train real
+> weights with the `cnn_train` binary to move it toward Production.
 
 ### Recognition algorithm matrix
 
 | algorithm | what it does | weights? | measured here | binary footprint | commercial OK? |
 |---|---|---|:-:|---|:-:|
-| `lbph` | uniform LBP histograms (6×6 grid) + chi-square, incremental enrolment | none | **62/68 hard-gallery rank-1** (91.2 %), 33/33 easy; EER ≈ 22.5 % | libm only | ✅ |
+| `lbph` | OpenCV-`elbp_`-exact uniform LBP histograms (6×6 grid) + chi-square, incremental enrolment | none | **60/68 hard-gallery LOO rank-1** (88.2 %), 32/33 easy; EER ≈ 23.2 % | libm only | ✅ |
 | `eigenface` | PCA + Jacobi eigendecomp + nearest-neighbour | none (gallery-trained) | **58/68 hard rank-1 strict LOO** (the sweep-proven PCA ceiling), 33/33 easy; EER ≈ 14.0 % | libm only | ✅ |
 | `fisherface` | n−C PCA reduction → C−1 LDA axes (whitened scatter problem) + nearest-neighbour | none (gallery-trained) | **59/68 hard rank-1 strict LOO**, 33/33 easy; **best zero-dep EER ≈ 12.8 %**; descriptor ≤ C−1 f32 | libm only | ✅ |
 | `arcface` | 512-d L2-normalised embedding via ONNX | InsightFace `w600k_r50` / `w600k_mbf` | cosine margin measured on real faces (benchmarks) | ~250 MB ONNX | ⛔ research only |
 
 ---
-
-## 1. Integral image (summed-area table)
 
 ## 1. Integral image (summed-area table)
 

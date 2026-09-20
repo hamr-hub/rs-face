@@ -9,12 +9,12 @@
 //! Descriptors are stored verbatim as IEEE-754 `f32`: round-tripping is bit-exact,
 //! which keeps chi-square distances identical after reload.
 //!
-//! # File layout (version 1, all integers little-endian)
+//! # File layout (version 2, all integers little-endian)
 //!
 //! ```text
 //! offset  size       field
 //! 0       4          magic  b"RSLB"
-//! 4       2          format version (u16, currently 1)
+//! 4       2          format version (u16, currently 2)
 //! 6       4          radius (u32)
 //! 10      4          face_size (u32)
 //! 14      4          grid_x (u32)
@@ -32,6 +32,12 @@
 //!         4*n_values histogram f32 values
 //! ```
 //!
+//! Version 2 stores OpenCV-`elbp_`-exact descriptors (bit 0 at the 3 o'clock
+//! sample, bilinear ring interpolation, OpenCV spatial cells). Version 1 was only
+//! ever written by pre-release builds (a 6 o'clock nearest-pixel convention whose
+//! uniform-bin permutation is not distance-comparable), so the decoder rejects it
+//! with [`LbphStoreError::UnsupportedVersion`] rather than mixing conventions.
+//!
 //! Decoding validates every length, the magic/version, UTF-8 labels, finite scalars,
 //! config/descriptor shape agreement, unique labels, and that the blob ends exactly
 //! where the format says — trailing bytes are rejected rather than ignored.
@@ -40,13 +46,17 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::binio::{push_f32, push_u16, push_u32, BinError, Reader};
 use crate::lbph::{LbphConfig, LbphDescriptor, LbphIdentity, LbphRecognizer, BINS};
 
 /// File magic for an LBPH gallery blob.
 const MAGIC: &[u8; 4] = b"RSLB";
 
 /// Current on-disk format version.
-const FORMAT_VERSION: u16 = 1;
+///
+/// v2: OpenCV-`elbp_` sampling convention (3 o'clock bit 0, bilinear ring).
+/// v1 (pre-release): different neighbour order/nearest-pixel bins; rejected.
+const FORMAT_VERSION: u16 = 2;
 
 /// Fail-fast limits so a corrupt length header cannot force a pathological allocation.
 const MAX_IDENTITIES: u32 = 1_000_000;
@@ -104,19 +114,19 @@ impl std::error::Error for LbphStoreError {
     }
 }
 
-/// Serialize a recogniser's gallery to the version-1 binary format.
+/// Serialize a recogniser's gallery to the version-2 binary format.
 #[must_use]
 pub fn encode(rec: &LbphRecognizer) -> Vec<u8> {
     let cfg = rec.config();
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    push_u16(&mut out, FORMAT_VERSION);
     push_u32(&mut out, cfg.radius as u32);
     push_u32(&mut out, cfg.face_size as u32);
     push_u32(&mut out, cfg.grid_x as u32);
     push_u32(&mut out, cfg.grid_y as u32);
-    out.extend_from_slice(&cfg.max_distance.to_le_bytes());
-    out.extend_from_slice(&cfg.min_margin.to_le_bytes());
+    push_f32(&mut out, cfg.max_distance);
+    push_f32(&mut out, cfg.min_margin);
     out.push(u8::from(cfg.equalize));
     push_u32(&mut out, rec.len() as u32);
 
@@ -129,7 +139,7 @@ pub fn encode(rec: &LbphRecognizer) -> Vec<u8> {
             push_u32(&mut out, desc.cells() as u32);
             push_u32(&mut out, desc.as_slice().len() as u32);
             for &v in desc.as_slice() {
-                out.extend_from_slice(&v.to_le_bytes());
+                push_f32(&mut out, v);
             }
         }
     }
@@ -143,22 +153,22 @@ pub fn encode(rec: &LbphRecognizer) -> Vec<u8> {
 /// Any [`LbphStoreError`] variant describing a malformed blob.
 pub fn decode(bytes: &[u8]) -> Result<LbphRecognizer, LbphStoreError> {
     let mut r = Reader::new(bytes);
-    let magic = r.take(4)?;
+    let magic = tr(r.take(4))?;
     if magic != MAGIC {
         return Err(LbphStoreError::BadMagic);
     }
-    let version = r.u16()?;
+    let version = tr(r.u16())?;
     if version != FORMAT_VERSION {
         return Err(LbphStoreError::UnsupportedVersion(version));
     }
 
-    let radius = r.u32()? as usize;
-    let face_size = r.u32()? as usize;
-    let grid_x = r.u32()? as usize;
-    let grid_y = r.u32()? as usize;
-    let max_distance = r.f32()?;
-    let min_margin = r.f32()?;
-    let equalize = match r.u8()? {
+    let radius = tr(r.u32())? as usize;
+    let face_size = tr(r.u32())? as usize;
+    let grid_x = tr(r.u32())? as usize;
+    let grid_y = tr(r.u32())? as usize;
+    let max_distance = tr(r.f32())?;
+    let min_margin = tr(r.f32())?;
+    let equalize = match tr(r.u8())? {
         0 => false,
         1 => true,
         other => return Err(LbphStoreError::InvalidEqualizeByte(other)),
@@ -191,8 +201,8 @@ pub fn decode(bytes: &[u8]) -> Result<LbphRecognizer, LbphStoreError> {
         }
         let mut descriptors = Vec::with_capacity(n_desc as usize);
         for _ in 0..n_desc {
-            let cells = r.u32()? as usize;
-            let n_values = r.u32()? as usize;
+            let cells = tr(r.u32())? as usize;
+            let n_values = tr(r.u32())? as usize;
             if cells != cells_expected {
                 return Err(LbphStoreError::InvalidConfig(format!(
                     "descriptor cells {cells} != grid area {cells_expected}"
@@ -205,7 +215,7 @@ pub fn decode(bytes: &[u8]) -> Result<LbphRecognizer, LbphStoreError> {
             }
             let mut values = Vec::with_capacity(n_values);
             for _ in 0..n_values {
-                let v = r.f32()?;
+                let v = tr(r.f32())?;
                 if !v.is_finite() {
                     return Err(LbphStoreError::InvalidConfig(
                         "descriptor contains NaN/infinite values".into(),
@@ -218,8 +228,8 @@ pub fn decode(bytes: &[u8]) -> Result<LbphRecognizer, LbphStoreError> {
         identities.push(LbphIdentity { label, descriptors });
     }
 
-    if r.pos != bytes.len() {
-        return Err(LbphStoreError::TrailingBytes(bytes.len() - r.pos));
+    if r.remaining() != 0 {
+        return Err(LbphStoreError::TrailingBytes(r.remaining()));
     }
 
     let config = LbphConfig {
@@ -244,8 +254,8 @@ pub fn load(path: impl AsRef<Path>) -> Result<LbphRecognizer, LbphStoreError> {
     decode(&bytes)
 }
 
-/// Atomically write a gallery file: encode to a sibling temp file, fsync, then rename
-/// over the destination so a crash cannot leave a half-written gallery in place.
+/// Atomically write a gallery file: encode to a sibling temp file, then rename over
+/// the destination so a crash cannot leave a half-written gallery in place.
 ///
 /// # Errors
 ///
@@ -311,7 +321,7 @@ fn validate_config(
 /// later C-friendly FFI layer cannot truncate a stored identity.
 fn read_label(r: &mut Reader<'_>) -> Result<String, LbphStoreError> {
     let n = bounded_u32(r, MAX_LABEL_BYTES)? as usize;
-    let raw = r.take(n)?;
+    let raw = tr(r.take(n))?;
     if raw.contains(&0) {
         return Err(LbphStoreError::InvalidLabel);
     }
@@ -323,7 +333,7 @@ fn read_label(r: &mut Reader<'_>) -> Result<String, LbphStoreError> {
 }
 
 fn bounded_u32(r: &mut Reader<'_>, max: u32) -> Result<u32, LbphStoreError> {
-    let v = r.u32()?;
+    let v = tr(r.u32())?;
     if v > max {
         Err(LbphStoreError::InvalidConfig(format!(
             "count {v} exceeds sanity limit {max}"
@@ -333,52 +343,9 @@ fn bounded_u32(r: &mut Reader<'_>, max: u32) -> Result<u32, LbphStoreError> {
     }
 }
 
-fn push_u32(out: &mut Vec<u8>, v: u32) {
-    out.extend_from_slice(&v.to_le_bytes());
-}
-
-/// Cursor over a borrowed blob with bounds-checked reads.
-struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
-    }
-
-    fn take(&mut self, n: usize) -> Result<&'a [u8], LbphStoreError> {
-        let end = self.pos.checked_add(n).ok_or(LbphStoreError::Truncated)?;
-        let chunk = self
-            .buf
-            .get(self.pos..end)
-            .ok_or(LbphStoreError::Truncated)?;
-        self.pos = end;
-        Ok(chunk)
-    }
-
-    fn u8(&mut self) -> Result<u8, LbphStoreError> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn u16(&mut self) -> Result<u16, LbphStoreError> {
-        let mut a = [0u8; 2];
-        a.copy_from_slice(self.take(2)?);
-        Ok(u16::from_le_bytes(a))
-    }
-
-    fn u32(&mut self) -> Result<u32, LbphStoreError> {
-        let mut a = [0u8; 4];
-        a.copy_from_slice(self.take(4)?);
-        Ok(u32::from_le_bytes(a))
-    }
-
-    fn f32(&mut self) -> Result<f32, LbphStoreError> {
-        let mut a = [0u8; 4];
-        a.copy_from_slice(self.take(4)?);
-        Ok(f32::from_le_bytes(a))
-    }
+/// Map a fixed-width cursor failure onto the codec's truncation variant.
+fn tr<T>(r: Result<T, BinError>) -> Result<T, LbphStoreError> {
+    r.map_err(|BinError::Truncated| LbphStoreError::Truncated)
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +483,15 @@ mod tests {
         assert!(matches!(
             LbphRecognizer::from_bytes(&future),
             Err(LbphStoreError::UnsupportedVersion(999))
+        ));
+
+        // v1 carried the pre-OpenCV sampling convention; mixing its bins with v2
+        // would compare unrelated histograms, so it is rejected outright.
+        let mut legacy = bytes.clone();
+        legacy[4..6].copy_from_slice(&1u16.to_le_bytes());
+        assert!(matches!(
+            LbphRecognizer::from_bytes(&legacy),
+            Err(LbphStoreError::UnsupportedVersion(1))
         ));
 
         // Header layout: magic(4) + version(2) + radius(4) + face_size(4) + grid_x at 14.

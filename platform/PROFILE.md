@@ -224,5 +224,8 @@ pre-filter uses, but cheaper (one random-access read vs full O(W·H) scan).
 - **GPU OpenCL path is disabled by default on aarch64** because
   dispatch overhead dominates for images < 720p. For 4K streams,
   `RSFACE_USE_GPU=1` recovers ~20-30%.
-- **YuNet / MTCNN / HOG are listed as N/A in RESULTS.md** because the
-  zero-dep core has no DNN runtime; this is a hard product constraint.
+- **Only three detectors ship in the zero-dep build** (`haar` / `cnn` /
+  `luminance`). The earlier scaffold detectors (YuNet / MTCNN / HOG)
+  were deleted from core; the ONNX-based SCRFD detector exists behind a
+  core feature flag that `platform/Cargo.toml` deliberately does not
+  enable, so the server binary stays zero-dep.

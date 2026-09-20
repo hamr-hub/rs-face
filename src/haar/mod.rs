@@ -11,6 +11,7 @@
 //! cascade trained on a synthetic "face-like" pattern (for tests and demos) and
 //! for the loader.
 
+pub mod bundled;
 pub mod cascade;
 pub mod feature;
 pub mod params;

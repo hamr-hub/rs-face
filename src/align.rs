@@ -177,20 +177,39 @@ pub fn estimate_arcface_transform(lms: &Landmarks) -> Option<SimilarityTransform
     estimate_similarity(&lms.points, &ARCFACE_REFERENCE_LANDMARKS)
 }
 
-/// Bilinearly warp `src` through `t` into a `out_w` x `out_h` RGB image.
+/// How [`warp_similarity_fill`] colours destination pixels whose inverse-mapped
+/// sample lies outside the source image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BorderMode {
+    /// Fill with a constant colour — the `borderValue=0.0` behaviour of the
+    /// OpenCV `warpAffine` call in InsightFace's `norm_crop`. ArcFace-family
+    /// backbones were trained on black-bordered crops, so this is the default
+    /// and required for embedding parity.
+    Constant([u8; 3]),
+    /// Replicate the nearest edge pixel (`BORDER_REPLICATE`). Useful for
+    /// visualisation and for detectors fed back on their own crops, but NOT
+    /// what the ArcFace training distribution looks like.
+    Replicate,
+}
+
+/// Bilinearly warp `src` through `t` into a `out_w` x `out_h` RGB image,
+/// filling out-of-bounds samples per `border` (see [`BorderMode`]).
 ///
 /// Implemented as an *inverse* warp: we iterate destination pixels and pull from the
 /// source. A forward warp would scatter, leaving unwritten holes wherever the transform
 /// magnifies — a classic source of speckled crops that quietly degrade embeddings.
 ///
-/// Out-of-bounds samples clamp to the edge pixel rather than going black, so a face at
-/// the frame boundary yields a plausible crop instead of one with a hard black wedge
-/// that the backbone has never seen in training.
-pub fn warp_similarity(
+/// Coordinate convention matches OpenCV `warpAffine` exactly: destination pixel
+/// `(ox, oy)` (top-left origin, the same system detector landmarks are reported in)
+/// samples the source at `t⁻¹(ox, oy)` — there is deliberately **no** +0.5 pixel-centre
+/// shift. Adding one would translate every aligned crop by half a pixel relative to the
+/// canonical landmark layout the backbone was trained against.
+pub fn warp_similarity_fill(
     src: &RgbImage,
     t: &SimilarityTransform,
     out_w: usize,
     out_h: usize,
+    border: BorderMode,
 ) -> Option<RgbImage> {
     let inv = t.inverse()?;
     let (sw, sh) = (src.width(), src.height());
@@ -203,36 +222,61 @@ pub fn warp_similarity(
     let max_y = (sh - 1) as f32;
     let src_data = src.as_slice();
 
+    // One bilinear corner: the source pixel value, or per BorderMode a fill
+    // when the integer corner falls outside the image.
+    let sample = |x: isize, y: isize, ch: usize| -> f32 {
+        if x >= 0 && y >= 0 && (x as usize) < sw && (y as usize) < sh {
+            src_data[(y as usize * sw + x as usize) * 3 + ch] as f32
+        } else {
+            match border {
+                BorderMode::Constant(col) => col[ch] as f32,
+                // Clamp the corner to the nearest in-range pixel.
+                BorderMode::Replicate => {
+                    let cx = x.clamp(0, max_x as isize) as usize;
+                    let cy = y.clamp(0, max_y as isize) as usize;
+                    src_data[(cy * sw + cx) * 3 + ch] as f32
+                }
+            }
+        }
+    };
+
     for oy in 0..out_h {
         for ox in 0..out_w {
-            // Sample at pixel centres; the +0.5/-0.5 pair keeps the mapping
-            // consistent with OpenCV's warpAffine convention.
-            let (fx, fy) = inv.apply(ox as f32 + 0.5, oy as f32 + 0.5);
-            let fx = (fx - 0.5).clamp(0.0, max_x);
-            let fy = (fy - 0.5).clamp(0.0, max_y);
-
-            let x0 = fx.floor() as usize;
-            let y0 = fy.floor() as usize;
-            let x1 = (x0 + 1).min(sw - 1);
-            let y1 = (y0 + 1).min(sh - 1);
+            let (fx, fy) = inv.apply(ox as f32, oy as f32);
+            // Floor indices as signed so corners just outside the frame map to
+            // border pixels instead of wrapping via a usize cast.
+            let x0 = fx.floor() as isize;
+            let y0 = fy.floor() as isize;
             let wx = fx - x0 as f32;
             let wy = fy - y0 as f32;
-
-            let i00 = (y0 * sw + x0) * 3;
-            let i10 = (y0 * sw + x1) * 3;
-            let i01 = (y1 * sw + x0) * 3;
-            let i11 = (y1 * sw + x1) * 3;
             let o = (oy * out_w + ox) * 3;
 
             for c in 0..3 {
-                let top = src_data[i00 + c] as f32 * (1.0 - wx) + src_data[i10 + c] as f32 * wx;
-                let bot = src_data[i01 + c] as f32 * (1.0 - wx) + src_data[i11 + c] as f32 * wx;
+                let v00 = sample(x0, y0, c);
+                let v10 = sample(x0 + 1, y0, c);
+                let v01 = sample(x0, y0 + 1, c);
+                let v11 = sample(x0 + 1, y0 + 1, c);
+                let top = v00 * (1.0 - wx) + v10 * wx;
+                let bot = v01 * (1.0 - wx) + v11 * wx;
                 // +0.5 to round rather than truncate; truncation biases every crop dark.
                 out.as_mut_slice()[o + c] = (top * (1.0 - wy) + bot * wy + 0.5) as u8;
             }
         }
     }
     Some(out)
+}
+
+/// Bilinearly warp `src` through `t` with InsightFace/OpenCV parity: black
+/// (`[0,0,0]`) constant border, no half-pixel shift. This is the warp ArcFace
+/// crops must use; use [`warp_similarity_fill`] with [`BorderMode::Replicate`]
+/// only for visualisation.
+pub fn warp_similarity(
+    src: &RgbImage,
+    t: &SimilarityTransform,
+    out_w: usize,
+    out_h: usize,
+) -> Option<RgbImage> {
+    warp_similarity_fill(src, t, out_w, out_h, BorderMode::Constant([0, 0, 0]))
 }
 
 /// Full `norm_crop`: align a detected face to the canonical ArcFace 112x112 crop.
@@ -468,6 +512,56 @@ mod tests {
     fn warp_on_empty_source_returns_none() {
         let src = RgbImage::new(0, 0);
         assert!(warp_similarity(&src, &SimilarityTransform::IDENTITY, 8, 8).is_none());
+    }
+
+    #[test]
+    fn default_warp_fills_border_black_like_insightface_norm_crop() {
+        // 2x2 white source, identity warp into 4x4: in-range pixels stay
+        // white, everything beyond the source is borderValue=0 (the OpenCV
+        // warpAffine behaviour ArcFace crops were trained with) — never edge
+        // replication, which would invent facial texture at crop borders.
+        let mut src = RgbImage::new(2, 2);
+        for b in src.as_mut_slice().iter_mut() {
+            *b = 255;
+        }
+        let out = warp_similarity(&src, &SimilarityTransform::IDENTITY, 4, 4).unwrap();
+        let at = |x: usize, y: usize| {
+            let i = (y * 4 + x) * 3;
+            (
+                out.as_slice()[i],
+                out.as_slice()[i + 1],
+                out.as_slice()[i + 2],
+            )
+        };
+        assert_eq!(at(0, 0), (255, 255, 255));
+        assert_eq!(at(1, 1), (255, 255, 255));
+        assert_eq!(at(2, 2), (0, 0, 0), "out-of-range pixel must be black");
+        assert_eq!(at(3, 3), (0, 0, 0));
+    }
+
+    #[test]
+    fn replicate_border_extends_edge_pixels() {
+        let mut src = RgbImage::new(2, 2);
+        for b in src.as_mut_slice().iter_mut() {
+            *b = 200;
+        }
+        let out = warp_similarity_fill(
+            &src,
+            &SimilarityTransform::IDENTITY,
+            4,
+            4,
+            BorderMode::Replicate,
+        )
+        .unwrap();
+        let i = (3 * 4 + 3) * 3;
+        assert_eq!(
+            (
+                out.as_slice()[i],
+                out.as_slice()[i + 1],
+                out.as_slice()[i + 2]
+            ),
+            (200, 200, 200)
+        );
     }
 
     #[test]

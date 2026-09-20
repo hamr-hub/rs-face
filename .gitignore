@@ -7,10 +7,12 @@ Cargo.lock.bak
 platform/target/
 
 # ---- Build artifacts / generated files ----
-# Cascade converted from OpenCV XML via tools/convert_opencv_xml.py — re-run
-# the converter to regenerate. The XML itself is fetched from OpenCV's data
-# repo (see README).
+# Cascades converted from OpenCV XML via tools/convert_opencv_xml.py are local
+# build products — EXCEPT the one shipped in src/weights/, which is a
+# versioned source artifact embedded into the binary via include_bytes! (see
+# src/weights/NOTICE.md for the pinned source hash).
 *.rfcf
+!src/weights/*.rfcf
 
 # ---- Local-only user state ----
 .claude/
@@ -32,6 +34,7 @@ Thumbs.db
 test_output/
 test_out/
 out/
+rsface-demo/
 *.out.png
 *.test.png
 

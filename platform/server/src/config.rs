@@ -201,7 +201,7 @@ pub fn validate(cfg: &Config) -> Result<Vec<String>, String> {
 
     // Cascade: only a soft warning. Hard fail happens in run_job with a clear
     // error message; per-job algo override (added 2026-09-08) means a missing
-    // cascade is fine if the user only ever runs luminance / yunet / mtcnn.
+    // cascade is fine if the user only ever runs cnn / luminance.
     if !cfg.cascade_path.is_file() {
         warnings.push(format!(
             "cascade file missing at {} — Haar jobs will fail at runtime (use --algo for other detectors)",

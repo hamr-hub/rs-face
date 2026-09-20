@@ -12,15 +12,32 @@ pub struct SyntheticSource {
     height: usize,
 }
 
+/// Default frame count when the spec gives no parseable number.
+const DEFAULT_FRAMES: u64 = 60;
+
 impl SyntheticSource {
+    /// Parse a synthetic-source spec.
+    ///
+    /// Accepted forms (all render the same animated sine-grid):
+    /// - `test://N`                 → `N` frames, e.g. `test://10`
+    /// - `test://frames=N`          → `N` frames
+    /// - `test://grid?frames=N`     → named grid with `N` frames
+    /// - `test://grid` / `test://` → [`DEFAULT_FRAMES`] frames
+    ///
+    /// An unparsable count (e.g. `test://lots`) also falls back to the
+    /// default rather than failing — the source is a development fixture.
     pub fn new(spec: &str) -> Self {
-        let frames: u64 = spec
-            .strip_prefix("test://")
-            .unwrap_or("grid")
-            .split('?')
-            .next()
-            .and_then(|s| s.split('=').nth(1).and_then(|n| n.parse().ok()))
-            .unwrap_or(60);
+        let body = spec.strip_prefix("test://").unwrap_or("");
+        let (path, query) = body.split_once('?').map_or((body, ""), |(p, q)| (p, q));
+        let query_frames = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("frames="))
+            .and_then(|n| n.parse().ok());
+        let path_frames = path
+            .strip_prefix("frames=")
+            .and_then(|n| n.parse().ok())
+            .or_else(|| path.parse::<u64>().ok());
+        let frames = query_frames.or(path_frames).unwrap_or(DEFAULT_FRAMES);
         Self {
             frames,
             pos: 0,
@@ -55,5 +72,30 @@ impl FrameSource for SyntheticSource {
 
     fn total_hint(&self) -> Option<u64> {
         Some(self.frames)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SyntheticSource;
+
+    #[test]
+    fn parses_bare_frame_count() {
+        // The form the CLI help promises: test://N means N frames.
+        assert_eq!(SyntheticSource::new("test://10").frames, 10);
+        assert_eq!(SyntheticSource::new("test://1").frames, 1);
+    }
+
+    #[test]
+    fn parses_named_grid_forms() {
+        assert_eq!(SyntheticSource::new("test://frames=7").frames, 7);
+        assert_eq!(SyntheticSource::new("test://grid?frames=12").frames, 12);
+    }
+
+    #[test]
+    fn falls_back_to_default_frames() {
+        assert_eq!(SyntheticSource::new("test://grid").frames, 60);
+        assert_eq!(SyntheticSource::new("test://").frames, 60);
+        assert_eq!(SyntheticSource::new("test://lots").frames, 60);
     }
 }

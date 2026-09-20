@@ -11,49 +11,32 @@ use crate::face::FaceDetection;
 use crate::haar::Cascade;
 use crate::image::{GrayImage, RgbImage};
 
-/// How much trust a detector's output has earned.
-///
-/// This exists because the crate currently ships several detector *scaffolds* whose
-/// architecture is implemented but whose weights are random placeholders. Such a
-/// detector does not fail loudly — it returns an empty detection list, which is
-/// indistinguishable from "this frame genuinely contains no faces". Exposing those as
-/// peers of a real detector in a selection menu invites a user to conclude the images
-/// are at fault. Maturity is therefore part of the trait contract, so every surface
-/// (CLI, HTTP API, web UI) can label it instead of each one re-deriving it.
+/// How much trust a detector's output has earned. Part of the trait
+/// contract so every surface (CLI, HTTP API, web UI) can label detectors
+/// the same way instead of each one re-deriving a verdict.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Maturity {
     /// Real trained weights; accuracy measured and documented in `docs/benchmarks.md`.
     Production,
-    /// Real weights, but accuracy not yet independently verified in this crate.
+    /// Runnable end-to-end, but accuracy not yet independently measured in this
+    /// crate (e.g. a trainable toy net with starter weights).
     Experimental,
-    /// Architecture only — weights are random placeholders. **Detects nothing.**
-    ///
-    /// Retained for reference and as a wiring target for real weights, never as a
-    /// usable detector.
-    Scaffold,
 }
 
 impl Maturity {
-    /// Whether output from this detector is meaningful at all.
-    #[inline]
-    pub fn is_usable(&self) -> bool {
-        !matches!(self, Maturity::Scaffold)
-    }
-
     /// Stable lowercase token for JSON payloads and UI attributes.
     pub fn as_str(&self) -> &'static str {
         match self {
             Maturity::Production => "production",
             Maturity::Experimental => "experimental",
-            Maturity::Scaffold => "scaffold",
         }
     }
 }
 
 /// Which colour representation a detector actually wants.
 ///
-/// This is not cosmetic. Classical cascades (Haar, HoG) are defined on luminance and
-/// gain nothing from colour. Modern CNN detectors are *trained* on 3-channel RGB, and
+/// This is not cosmetic. Classical detectors (Haar cascades, LBP, the luminance
+/// heuristic) are defined on luminance and gain nothing from colour. Modern CNN detectors are *trained* on 3-channel RGB, and
 /// feeding them a grey plane replicated across all three channels is a measurable
 /// accuracy loss, not a free conversion — skin-tone and chroma edges carry real signal
 /// for the box/keypoint heads. Callers use this to route a frame down the cheapest
@@ -67,7 +50,7 @@ pub enum ColorInput {
 }
 
 /// Trait every face detector must implement. Implementors should:
-/// 1. Be cheap to construct (`YunetDetector::new(crate::yunet::YunetConfig::default())` is enough to run).
+/// 1. Be cheap to construct (`LuminanceFaceDetector::new(LuminanceConfig::default())` is enough to run).
 /// 2. Never panic on empty / uniform input (smoke-tested via `*_no_panic` tests).
 /// 3. Return detections sorted by descending score (so NMS in callers is sane).
 pub trait FaceDetector: Send {
@@ -189,79 +172,25 @@ mod tests {
         // renaming one silently breaks the badge rendering.
         assert_eq!(Maturity::Production.as_str(), "production");
         assert_eq!(Maturity::Experimental.as_str(), "experimental");
-        assert_eq!(Maturity::Scaffold.as_str(), "scaffold");
     }
 
+    /// The zero-dep classical detectors that ship by default must claim real
+    /// maturity; a new detector starts at `Experimental` and is promoted
+    /// consciously after measured accuracy lands in `docs/benchmarks.md`.
     #[test]
-    fn only_scaffold_is_unusable() {
-        assert!(Maturity::Production.is_usable());
-        assert!(Maturity::Experimental.is_usable());
-        assert!(!Maturity::Scaffold.is_usable());
-    }
-
-    /// Regression guard for the crate's central honesty invariant: a detector backed by
-    /// random placeholder weights must declare itself a scaffold. If someone wires real
-    /// weights into one of these, they must consciously update this test — which is
-    /// exactly the review checkpoint we want.
-    #[test]
-    fn dummy_weight_detectors_declare_themselves_scaffolds() {
-        use crate::hog_face::HogFaceDetector;
-        use crate::mtcnn::MtcnnDetector;
-        use crate::yunet::YunetDetector;
-
-        let dummies: Vec<Box<dyn FaceDetector>> = vec![
-            Box::new(MtcnnDetector::new(crate::mtcnn::MtcnnConfig::default())),
-            Box::new(YunetDetector::new(crate::yunet::YunetConfig::default())),
-            Box::new(HogFaceDetector::new(crate::hog_face::HogConfig::default())),
-        ];
-
-        for d in &dummies {
-            assert_eq!(
-                d.maturity(),
-                Maturity::Scaffold,
-                "detector '{}' uses placeholder weights and must report Scaffold",
-                d.name()
-            );
-            assert!(
-                d.description().contains("SCAFFOLD"),
-                "detector '{}' description must warn the user it is a scaffold",
-                d.name()
-            );
-        }
-    }
-
-    /// The scaffolds must also actually be inert, which is the fact that justifies the
-    /// `Scaffold` label. If one starts emitting boxes, its weights changed and both the
-    /// label and `docs/benchmarks.md` need revisiting.
-    #[test]
-    fn scaffold_detectors_return_nothing_on_a_real_gradient() {
-        use crate::image::GrayImage;
-
-        let (w, h) = (128usize, 128usize);
-        let mut img = GrayImage::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                img.as_mut_slice()[y * w + x] = ((x * 2 + y) % 256) as u8;
-            }
-        }
-
-        let mtcnn = crate::mtcnn::MtcnnDetector::new(crate::mtcnn::MtcnnConfig::default());
-        assert!(
-            mtcnn.detect(&img).is_empty(),
-            "mtcnn scaffold unexpectedly produced detections"
+    fn classical_detectors_are_gray_without_landmarks() {
+        let det = HaarDetector::new(
+            crate::haar::params::demo_face_cascade(),
+            crate::detector::DetectorConfig::default(),
         );
+        assert_eq!(det.color_input(), ColorInput::Gray);
+        assert!(!det.has_landmarks());
 
-        let hog = crate::hog_face::HogFaceDetector::new(crate::hog_face::HogConfig::default());
-        assert!(
-            hog.detect(&img).is_empty(),
-            "hog scaffold unexpectedly produced detections"
+        let lum = crate::luminance_face::LuminanceFaceDetector::new(
+            crate::luminance_face::LuminanceConfig::default(),
         );
-    }
-
-    #[test]
-    fn default_color_input_is_gray_for_classical_detectors() {
-        let hog = crate::hog_face::HogFaceDetector::new(crate::hog_face::HogConfig::default());
-        assert_eq!(hog.color_input(), ColorInput::Gray);
+        assert_eq!(lum.color_input(), ColorInput::Gray);
+        assert!(!lum.has_landmarks());
     }
 
     /// The HaarDetector adapter must report the canonical name + maturity, so
@@ -288,17 +217,11 @@ mod tests {
     fn default_rgb_path_delegates_to_gray_without_panic() {
         use crate::image::RgbImage;
 
-        let hog = crate::hog_face::HogFaceDetector::new(crate::hog_face::HogConfig::default());
+        let det = HaarDetector::new(
+            crate::haar::params::demo_face_cascade(),
+            crate::detector::DetectorConfig::default(),
+        );
         let rgb = RgbImage::new(64, 64);
-        let out = hog.detect_faces_rgb(&rgb);
-        assert!(out.is_empty());
-    }
-
-    /// A detector with no keypoint head must not claim landmark support, otherwise the
-    /// recognition pipeline would try to align against `None`.
-    #[test]
-    fn classical_detectors_do_not_claim_landmarks() {
-        let hog = crate::hog_face::HogFaceDetector::new(crate::hog_face::HogConfig::default());
-        assert!(!hog.has_landmarks());
+        let _ = det.detect_faces_rgb(&rgb);
     }
 }

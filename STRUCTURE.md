@@ -70,7 +70,7 @@ rs-face/
 | You're adding | Home directory |
 |---|---|
 | New algorithm module | `src/<algo>.rs` or `src/<algo>/` (multi-file) |
-| Bundled zero-dep weights (e.g. random scaffold blobs for `cnn`/`hog`/`yunet`/`mtcnn`) | `src/weights/<name>.bin` — referenced via `include_bytes!`. Real ONNX weights belong in gitignored `models/` at repo root. |
+| Bundled zero-dep weights (e.g. the real OpenCV frontal-face cascade `haarcascade_frontalface_default.rfcf`) | `src/weights/<name>.rfcf` (or `.bin`) + a `NOTICE.md` recording provenance/license — referenced via `include_bytes!`. The audit-only source XML is kept next to it and excluded from the crates.io package. Real ONNX weights belong in gitignored `models/` at repo root. |
 | New `[[bin]]` target | `src/bin/<name>.rs` (and list it in `Cargo.toml`) |
 | Integration test | `tests/<name>.rs` |
 | Criterion bench | `benches/<name>.rs` (`harness = false`) |

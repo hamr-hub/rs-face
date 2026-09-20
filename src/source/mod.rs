@@ -55,7 +55,8 @@ pub trait FrameSource: Send {
 /// - `http://host/stream`        → MJPEG if `?mjpeg=1`, else try PNG sequence
 /// - `https://...mp4` / `*.mp4`  → ffmpeg pipe (if `ffmpeg` on PATH)
 /// - `rtsp://...`                → ffmpeg pipe (if `ffmpeg` on PATH)
-/// - `test://grid`               → synthetic grid pattern
+/// - `test://N`                  → synthetic sine-grid, N frames (e.g. `test://60`)
+/// - `test://grid[?frames=N]`    → named synthetic grid (default 60 frames)
 pub fn open(source: &str) -> std::io::Result<Box<dyn FrameSource>> {
     if source.starts_with("test://") {
         return Ok(Box::new(SyntheticSource::new(source)));

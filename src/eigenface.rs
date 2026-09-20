@@ -90,14 +90,44 @@ pub struct EigenfaceConfig {
     pub variance_kept: f32,
     /// Hard cap on the number of retained components.
     pub max_components: usize,
-    /// Maximum accepted match distance.
+    /// Maximum accepted match distance, in the units of [`EigenfaceConfig::metric`].
+    ///
+    /// [`DEFAULT_MAX_DISTANCE`] is calibrated for [`EigenMetric::Euclidean`];
+    /// whitened Mahalanobis distances live on a completely different scale, so
+    /// a Euclidean number cannot be reused. Prefer
+    /// [`EigenfaceConfig::with_metric`] (it switches [`EigenfaceConfig::auto_threshold`]
+    /// on for Mahalanobis) or recalibrate per deployment.
     pub max_distance: f32,
+    /// Derive the accept threshold from the training gallery instead of
+    /// [`EigenfaceConfig::max_distance`]. The derived value is the nearest
+    /// between-class (impostor) coefficient distance observed at train time —
+    /// i.e. the largest threshold with zero FAR on the gallery itself — which
+    /// is metric-independent in the sense that it is measured in whichever
+    /// distance [`EigenfaceConfig::metric`] produces. Inspect it via
+    /// [`EigenfaceRecognizer::suggested_threshold`]. When the gallery contains
+    /// a single class, `max_distance` is used as fallback.
+    pub auto_threshold: bool,
     /// Require the best identity to beat the runner-up by at least this distance.
     pub min_margin: f32,
     /// Apply histogram equalisation before vectorising.
     pub equalize: bool,
     /// Distance metric in coefficient space.
     pub metric: EigenMetric,
+}
+
+impl EigenfaceConfig {
+    /// Build a default config for the given metric. The Euclidean config is
+    /// identical to [`Default::default`]; the Mahalanobis config turns
+    /// [`EigenfaceConfig::auto_threshold`] on because the calibrated
+    /// [`DEFAULT_MAX_DISTANCE`] (6.3) only has meaning for Euclidean distances.
+    #[must_use]
+    pub fn with_metric(metric: EigenMetric) -> Self {
+        Self {
+            metric,
+            auto_threshold: metric == EigenMetric::Mahalanobis,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for EigenfaceConfig {
@@ -107,6 +137,7 @@ impl Default for EigenfaceConfig {
             variance_kept: DEFAULT_VARIANCE_KEPT,
             max_components: DEFAULT_MAX_COMPONENTS,
             max_distance: DEFAULT_MAX_DISTANCE,
+            auto_threshold: false,
             min_margin: 0.0,
             equalize: false,
             metric: EigenMetric::default(),
@@ -120,7 +151,8 @@ pub enum EigenfaceError {
     /// Fewer than two crops were supplied — no within/across-identity axis exists.
     TooFewSamples(usize),
     /// Every crop vectorises identically (e.g. all-constant images); the Gram matrix
-    /// has no usable positive eigenvalue.
+    /// has no usable positive eigenvalue, or the Jacobi eigensolver exhausted its
+    /// sweep budget without reaching tolerance.
     DegenerateGallery,
 }
 
@@ -131,7 +163,10 @@ impl std::fmt::Display for EigenfaceError {
                 write!(f, "eigenfaces needs >= 2 crops, got {n}")
             }
             EigenfaceError::DegenerateGallery => {
-                write!(f, "degenerate gallery: all crops vectorise identically")
+                write!(
+                    f,
+                    "degenerate gallery: crops vectorise identically or eigensolver did not converge"
+                )
             }
         }
     }
@@ -142,54 +177,47 @@ impl std::error::Error for EigenfaceError {}
 /// One labelled training crop.
 pub type EigenSample<'a> = (&'a str, &'a GrayImage);
 
-/// Outcome of an eigenfaces gallery query, mirroring [`crate::lbph::LbphMatch`].
-#[derive(Clone, Debug, PartialEq)]
-pub enum EigenMatch {
-    /// Best identity is within [`EigenfaceConfig::max_distance`] (and the margin policy).
-    Match {
-        label: String,
-        distance: f32,
-        margin: f32,
-    },
-    /// Nearest identity was farther than `max_distance`.
-    BelowThreshold { best: Option<(String, f32)> },
-    /// Within threshold but too close to another identity to call safely.
-    Ambiguous {
-        first: String,
-        second: String,
-        margin: f32,
-    },
-    /// The recogniser has no trained model.
-    NoCandidates,
-}
+/// Outcome of an eigenfaces gallery query.
+///
+/// All zero-dep recognisers share [`crate::recognizer::Recognition`]; this
+/// alias keeps the per-recogniser name working and lets eigenfaces
+/// dispatch through [`crate::recognizer::FaceRecognizer`].
+pub use crate::recognizer::Recognition as EigenMatch;
 
 /// One retained principal component, stored in pixel space for probe projection.
 #[derive(Clone, Debug)]
-struct Component {
+pub(crate) struct Component {
     /// Unit eigenface in the `d`-dimensional pixel space.
-    axis: Vec<f32>,
+    pub(crate) axis: Vec<f32>,
     /// Whitening factor `1 / √λ_cov` for [`EigenMetric::Mahalanobis`].
-    inv_scale: f32,
+    pub(crate) inv_scale: f32,
 }
 
 /// One enrolled crop with its projection coefficients.
 #[derive(Clone, Debug)]
-struct Member {
-    label: String,
-    coeffs: Vec<f32>,
+pub(crate) struct Member {
+    pub(crate) label: String,
+    pub(crate) coeffs: Vec<f32>,
 }
 
 /// Trained PCA recogniser.
 ///
 /// Adding or removing identities changes the subspace, so this is deliberately a
 /// train-once value: call [`EigenfaceRecognizer::train`] again with the new crop list.
+/// The trained model can be persisted without the original crops via
+/// [`EigenfaceRecognizer::to_bytes`] / [`EigenfaceRecognizer::save`] (format documented
+/// in `docs/gallery-persistence.md`).
 #[derive(Clone, Debug)]
 pub struct EigenfaceRecognizer {
     config: EigenfaceConfig,
-    mean: Vec<f32>,
-    components: Vec<Component>,
-    members: Vec<Member>,
+    pub(crate) mean: Vec<f32>,
+    pub(crate) components: Vec<Component>,
+    pub(crate) members: Vec<Member>,
     by_label: HashMap<String, usize>,
+    /// Nearest between-class training distance (zero-training-FAR point),
+    /// used when [`EigenfaceConfig::auto_threshold`] is set. `None` for a
+    /// single-class gallery.
+    pub(crate) suggested_threshold: Option<f32>,
 }
 
 impl EigenfaceRecognizer {
@@ -235,7 +263,10 @@ impl EigenfaceRecognizer {
                 gram[j * n + i] = g;
             }
         }
-        let (eigvals, eigvecs) = jacobi_symmetric(&mut gram, n);
+        let (eigvals, eigvecs, converged) = jacobi_symmetric(&mut gram, n);
+        if !converged {
+            return Err(EigenfaceError::DegenerateGallery);
+        }
 
         // Positive eigenvalues, strongest first.
         let lambda_max = eigvals.iter().cloned().fold(0.0f32, f32::max);
@@ -287,13 +318,118 @@ impl EigenfaceRecognizer {
             });
         }
 
+        // Nearest between-class coefficient distance: the largest threshold
+        // that mis-accepts no training impostor. Computed in the configured
+        // metric, so it is valid for both Euclidean and Mahalanobis scales.
+        let mut suggested_threshold: Option<f32> = None;
+        for a in 0..n {
+            for b in (a + 1)..n {
+                if members[a].label != members[b].label {
+                    let d = coeff_metric_distance(
+                        &members[a].coeffs,
+                        &members[b].coeffs,
+                        &components,
+                        config.metric,
+                    );
+                    suggested_threshold =
+                        Some(suggested_threshold.map_or(d, |cur: f32| cur.min(d)));
+                }
+            }
+        }
+
         Ok(Self {
             config,
             mean,
             components,
             members,
             by_label,
+            suggested_threshold,
         })
+    }
+
+    /// Rebuild from persisted trained-model parts; the codec in
+    /// [`crate::subspace_store`] has already validated every shape. The label
+    /// index is rebuilt to first-occurrence member indices exactly as `train`
+    /// builds it from the input order.
+    pub(crate) fn from_parts(
+        config: EigenfaceConfig,
+        mean: Vec<f32>,
+        components: Vec<Component>,
+        members: Vec<Member>,
+        suggested_threshold: Option<f32>,
+    ) -> Self {
+        let mut by_label = HashMap::with_capacity(members.len());
+        for (i, m) in members.iter().enumerate() {
+            by_label.entry(m.label.clone()).or_insert(i);
+        }
+        Self {
+            config,
+            mean,
+            components,
+            members,
+            by_label,
+            suggested_threshold,
+        }
+    }
+
+    /// Serialize the trained model (mean, eigenfaces, projected gallery,
+    /// config) to the compact binary format documented in
+    /// `docs/gallery-persistence.md`; the original crops are not needed.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        crate::subspace_store::encode_eigen(self)
+    }
+
+    /// Rebuild a recogniser from [`EigenfaceRecognizer::to_bytes`] output,
+    /// validating the whole blob. Distances after a reload are bit-identical.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::subspace_store::SubspaceStoreError`] for a truncated, corrupt,
+    /// wrong-version, or internally inconsistent blob.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::subspace_store::SubspaceStoreError> {
+        crate::subspace_store::decode_eigen(bytes)
+    }
+
+    /// Atomically write the trained model (temp file then rename).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::subspace_store::SubspaceStoreError::Io`] on filesystem failure.
+    pub fn save(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), crate::subspace_store::SubspaceStoreError> {
+        crate::subspace_store::save(&self.to_bytes(), path)
+    }
+
+    /// Load a trained model written by [`EigenfaceRecognizer::save`].
+    ///
+    /// # Errors
+    ///
+    /// Filesystem errors or any [`crate::subspace_store::SubspaceStoreError`].
+    pub fn load(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, crate::subspace_store::SubspaceStoreError> {
+        crate::subspace_store::load(path, crate::subspace_store::decode_eigen)
+    }
+
+    /// The gallery-derived zero-training-FAR threshold (nearest between-class
+    /// coefficient distance), measured in the configured metric. Used
+    /// automatically when [`EigenfaceConfig::auto_threshold`] is set; callers
+    /// can also read it to calibrate an explicit `max_distance`. `None` when
+    /// the gallery contains a single identity.
+    pub fn suggested_threshold(&self) -> Option<f32> {
+        self.suggested_threshold
+    }
+
+    /// Threshold actually applied to an identification decision.
+    fn accept_threshold(&self) -> f32 {
+        if self.config.auto_threshold {
+            self.suggested_threshold.unwrap_or(self.config.max_distance)
+        } else {
+            self.config.max_distance
+        }
     }
 
     pub fn config(&self) -> &EigenfaceConfig {
@@ -365,7 +501,7 @@ impl EigenfaceRecognizer {
         let Some((best_label, best_dist)) = ranked.first().cloned() else {
             return EigenMatch::NoCandidates;
         };
-        if best_dist > self.config.max_distance {
+        if best_dist > self.accept_threshold() {
             return EigenMatch::BelowThreshold {
                 best: Some((best_label, best_dist)),
             };
@@ -414,20 +550,32 @@ impl EigenfaceRecognizer {
     }
 
     fn coeff_distance(&self, a: &[f32], b: &[f32]) -> f32 {
-        let sum: f32 = a
-            .iter()
-            .zip(b)
-            .enumerate()
-            .map(|(i, (x, y))| {
-                let mut d = x - y;
-                if self.config.metric == EigenMetric::Mahalanobis {
-                    d *= self.components[i].inv_scale;
-                }
-                d * d
-            })
-            .sum();
-        sum.sqrt()
+        coeff_metric_distance(a, b, &self.components, self.config.metric)
     }
+}
+
+/// L2 between coefficient vectors, optionally whitened by each component's
+/// `1/√λ` ([`EigenMetric::Mahalanobis`]). Shared by matching and by the
+/// train-time threshold derivation.
+fn coeff_metric_distance(
+    a: &[f32],
+    b: &[f32],
+    components: &[Component],
+    metric: EigenMetric,
+) -> f32 {
+    let sum: f32 = a
+        .iter()
+        .zip(b)
+        .enumerate()
+        .map(|(i, (x, y))| {
+            let mut d = x - y;
+            if metric == EigenMetric::Mahalanobis {
+                d *= components[i].inv_scale;
+            }
+            d * d
+        })
+        .sum();
+    sum.sqrt()
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +717,106 @@ mod tests {
         let mah = EigenfaceRecognizer::train(mah_cfg, refs).unwrap();
         assert_eq!(eu.rank_crop(&probe)[0].0, "a");
         assert_eq!(mah.rank_crop(&probe)[0].0, "a");
+    }
+
+    #[test]
+    fn with_metric_enables_auto_threshold_only_for_mahalanobis() {
+        let eu = EigenfaceConfig::with_metric(EigenMetric::Euclidean);
+        assert_eq!(eu.metric, EigenMetric::Euclidean);
+        assert!(!eu.auto_threshold);
+        let mah = EigenfaceConfig::with_metric(EigenMetric::Mahalanobis);
+        assert_eq!(mah.metric, EigenMetric::Mahalanobis);
+        assert!(mah.auto_threshold);
+    }
+
+    #[test]
+    fn suggested_threshold_is_nearest_impostor_distance() {
+        let cfg = EigenfaceConfig {
+            face_size: 24,
+            variance_kept: 1.0,
+            ..EigenfaceConfig::default()
+        };
+        let imgs = [
+            half_lit(24, true, 0),
+            half_lit(24, true, 2),
+            half_lit(24, false, 0),
+            half_lit(24, false, 2),
+        ];
+        let crops: Vec<(&str, &GrayImage)> = vec![
+            ("a", &imgs[0]),
+            ("a", &imgs[1]),
+            ("b", &imgs[2]),
+            ("b", &imgs[3]),
+        ];
+        let rec = EigenfaceRecognizer::train(cfg, crops).unwrap();
+        let suggested = rec.suggested_threshold().expect("multi-class gallery");
+        assert!(suggested.is_finite() && suggested > 0.0);
+        // Every cross-class pair must sit at or above the derived threshold,
+        // which is defined as their minimum (`distance > thr` rejects).
+        let a_proj = rec.project(&half_lit(24, true, 0));
+        let b_proj = rec.project(&half_lit(24, false, 0));
+        let d = rec.coefficient_distance(&a_proj, &b_proj);
+        assert!(
+            d >= suggested - 1e-4,
+            "cross-class distance {d} must not be below the threshold {suggested}"
+        );
+    }
+
+    #[test]
+    fn mahalanobis_auto_threshold_identifies_separable_gallery() {
+        // Regression: Mahalanobis distances are on a different scale than
+        // Euclidean, so the calibrated 6.3 default would be meaningless; the
+        // auto threshold must follow the whitened scale and keep a separable
+        // gallery identifiable.
+        let cfg = EigenfaceConfig::with_metric(EigenMetric::Mahalanobis);
+        let imgs = [
+            half_lit(24, true, 0),
+            half_lit(24, true, 2),
+            half_lit(24, false, 0),
+            half_lit(24, false, 2),
+        ];
+        let crops: Vec<(&str, &GrayImage)> = vec![
+            ("a", &imgs[0]),
+            ("a", &imgs[1]),
+            ("b", &imgs[2]),
+            ("b", &imgs[3]),
+        ];
+        let rec = EigenfaceRecognizer::train(
+            EigenfaceConfig {
+                face_size: 24,
+                variance_kept: 1.0,
+                ..cfg
+            },
+            crops,
+        )
+        .unwrap();
+        assert!(rec.suggested_threshold().is_some());
+        match rec.identify_crop(&half_lit(24, true, 1)) {
+            EigenMatch::Match { label, .. } => assert_eq!(label, "a"),
+            other => panic!("expected Match(a) under Mahalanobis auto threshold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_class_gallery_has_no_suggested_threshold_and_falls_back() {
+        let cfg = EigenfaceConfig {
+            face_size: 24,
+            auto_threshold: true,
+            max_distance: 50.0,
+            variance_kept: 1.0,
+            ..EigenfaceConfig::default()
+        };
+        let rec = EigenfaceRecognizer::train(
+            cfg,
+            vec![("a", &half_lit(24, true, 0)), ("a", &half_lit(24, true, 2))],
+        )
+        .unwrap();
+        assert_eq!(rec.suggested_threshold(), None);
+        // Fallback is the explicit max_distance, not a panic / zero threshold.
+        match rec.identify_crop(&half_lit(24, true, 4)) {
+            EigenMatch::Match { label, .. } => assert_eq!(label, "a"),
+            other => panic!("expected fallback acceptance, got {other:?}"),
+        }
     }
 
     #[test]

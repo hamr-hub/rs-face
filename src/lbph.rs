@@ -43,8 +43,13 @@
 //! # Reference
 //!
 //! Ahonen, Hadid, Pietikäinen — *Face Recognition with Local Binary Patterns* (ECCV
-//! 2004). OpenCV's `face::LBPHFaceRecognizer` uses the same uniform-pattern mapping and
-//! chi-square distance; our uniform lookup table is generated identically.
+//! 2004). The sampler matches OpenCV's `face::LBPHFaceRecognizer` `elbp_` bit-for-bit:
+//! neighbour `n` at angle `2πn/P` with column offset `r·cos` and row offset
+//! `−r·sin` (bit 0 at 3 o'clock), bilinear interpolation at every radius, the same
+//! epsilon-tie comparison, identical 59-label uniform lookup, and spatial cells cut
+//! as fixed `interior/grid` rectangles. Descriptors from older builds with a
+//! different sampling convention are not distance-compatible (the on-disk gallery
+//! format was bumped to version 2 for this change).
 
 use std::collections::HashMap;
 
@@ -69,16 +74,20 @@ const CHI_EPS: f32 = 1e-10;
 /// sets (see `docs/recognition-lbph.md`; labels from offline ArcFace clustering, the
 /// evaluated path never touches ONNX):
 ///
-/// * 35 crops / 8 identities (85 same / 510 different pairs): FAR 1.2 %, FRR 16.5 %;
+/// * 35 crops / 8 identities (85 same / 510 different pairs): FAR 0.0 %, FRR 17.6 %;
 /// * 77 crops / 21 identities (195 same / 2 731 different pairs, harder pose/lighting):
-///   FAR 0.3 %, FRR 48.7 % at 16.7; the EER point is ≈ 22.5 (FAR ≈ FRR ≈ 20 %).
+///   FAR 0.0 %, FRR 50.8 % at 16.7; the closest impostor distance is 17.5 and the EER
+///   point is ≈ 23.2 (FAR ≈ FRR ≈ 20 %).
 ///
-/// The distributions overlap on the harder gallery, so no threshold gives both low FAR
-/// and low FRR there; this constant deliberately buys a low false-accept rate and lets
+/// Numbers above use the OpenCV-`elbp_` sampler (3 o'clock bit 0, bilinear ring) and
+/// sorted-path bench order; see `docs/recognition-lbph.md`. The distributions overlap on
+/// the harder gallery, so no threshold gives both low FAR and low FRR there; this
+/// constant deliberately buys a zero measured false-accept rate and lets
 /// `LbphMatch::BelowThreshold` reject uncertain probes. Close-set identification does
-/// not need it — rank-1 LOO is 91 % on the hard set — so prefer `rank_crop` when the
-/// probe is known to be enrolled. The scale is descriptor-specific (grid and crop
-/// size); recalibrate with `bench_lbph` per deployment rather than trusting it blindly.
+/// not need it — rank-1 LOO is 88 % (60/68) on the hard set — so prefer `rank_crop`
+/// when the probe is known to be enrolled. The scale is descriptor-specific (grid and
+/// crop size); recalibrate with `bench_lbph` per deployment rather than trusting it
+/// blindly.
 /// `f32::MAX` would be the OpenCV default ("always identify"), useless for verification.
 pub const DEFAULT_MAX_DISTANCE: f32 = 16.7;
 
@@ -110,11 +119,13 @@ pub struct LbphConfig {
 impl Default for LbphConfig {
     /// radius 1, 6×6 histogram grid, 120 px crops.
     ///
-    /// OpenCV's `face::LBPHFaceRecognizer` ships an 8×8 grid; the measured LOO rank-1
-    /// on the repo's hard 21-identity gallery is 62/68 with 6×6 vs 59/68 with 8×8
-    /// (coarser cells pool the box-crop localisation jitter of an unaligned pipeline),
-    /// with no regression on the easier 8-identity gallery (33/33 either way). 8×8 and
-    /// 10×10 remain one field away for deployments with landmark-aligned crops.
+    /// OpenCV's `face::LBPHFaceRecognizer` ships an 8×8 grid. Under the OpenCV-exact
+    /// sampler the hard 21-identity gallery lands at 60/68 LOO rank-1 for both 6×6 and
+    /// 8×8 at 120 px (59/68 for 8×8 at 90 px), with several other cells tying within
+    /// ±4 probes — differences at that size are sampling noise, and 6×6 keeps the
+    /// descriptor compact. On the easier 8-identity gallery 6×6 is 32/33 while finer
+    /// grids reach 33/33. 8×8 and 10×10 remain one field away for deployments with
+    /// landmark-aligned crops; the full sweep is in `docs/recognition-lbph.md`.
     fn default() -> Self {
         Self {
             radius: 1,
@@ -161,9 +172,14 @@ impl LbphDescriptor {
     /// Chi-square distance: 0 for identical descriptors, larger for more different ones.
     ///
     /// Returns `None` on dimension mismatch (descriptors from different grid shapes)
-    /// rather than comparing a prefix.
+    /// rather than comparing a prefix, and `None` when **both** descriptors carry no
+    /// histogram mass (degenerate/blank crops): the statistic would otherwise be 0/0
+    /// and read as a perfect match, letting two blank probes "identify" as anything.
     pub fn chi_square(&self, other: &LbphDescriptor) -> Option<f32> {
         if self.values.len() != other.values.len() {
+            return None;
+        }
+        if is_zero_mass(&self.values) && is_zero_mass(&other.values) {
             return None;
         }
         let d: f32 = self
@@ -183,6 +199,11 @@ impl LbphDescriptor {
     }
 }
 
+/// True when no bin in any cell carries mass (a blank/degenerate-crop descriptor).
+fn is_zero_mass(values: &[f32]) -> bool {
+    values.iter().all(|&v| v == 0.0)
+}
+
 /// One enrolled identity with one or more reference descriptors.
 #[derive(Clone, Debug)]
 pub struct LbphIdentity {
@@ -190,29 +211,14 @@ pub struct LbphIdentity {
     pub descriptors: Vec<LbphDescriptor>,
 }
 
-/// Outcome of an LBPH gallery query, distance-valued analogue of
-/// [`crate::embedding::MatchOutcome`].
-#[derive(Clone, Debug, PartialEq)]
-pub enum LbphMatch {
-    /// Best identity is within [`LbphConfig::max_distance`] (and the margin policy).
-    Match {
-        label: String,
-        distance: f32,
-        /// Distance gap to the runner-up (`f32::INFINITY` with one identity).
-        margin: f32,
-    },
-    /// Nearest identity was farther than `max_distance`. The candidate is reported so
-    /// callers can log near-misses and retune instead of only getting "no".
-    BelowThreshold { best: Option<(String, f32)> },
-    /// Within threshold but too close to another identity to call safely.
-    Ambiguous {
-        first: String,
-        second: String,
-        margin: f32,
-    },
-    /// No identities enrolled.
-    NoCandidates,
-}
+/// Outcome of an LBPH gallery query.
+///
+/// All zero-dep recognisers share the distance-valued
+/// [`crate::recognizer::Recognition`] enum (its analogue for cosine
+/// similarity is [`crate::embedding::MatchOutcome`]); this alias keeps the
+/// per-recogniser name working while letting LBPH dispatch through
+/// [`crate::recognizer::FaceRecognizer`].
+pub use crate::recognizer::Recognition as LbphMatch;
 
 /// In-memory nearest-neighbour LBPH recogniser.
 ///
@@ -342,7 +348,7 @@ impl LbphRecognizer {
             return false;
         };
         self.identities.remove(idx);
-        // Rebuild indices after the swap_remove-style shift.
+        // Vec::remove shifts every later identity, so the whole index map is rebuilt.
         self.by_label.clear();
         for (i, id) in self.identities.iter().enumerate() {
             self.by_label.insert(id.label.clone(), i);
@@ -457,37 +463,40 @@ pub fn extract(img: &GrayImage, config: &LbphConfig) -> LbphDescriptor {
         };
     }
 
-    // OpenCV samples neighbour i at angle 2 pi i / P, starting at the top and going
-    // clockwise: (dx,dy) = (-r sin a, +r cos a). Radius 1 hits exact pixel centres.
-    let offsets: [(isize, isize); NEIGHBORS] = std::array::from_fn(|i| {
-        let angle = 2.0 * std::f32::consts::PI * i as f32 / NEIGHBORS as f32;
-        let dx = (-(r as f32) * angle.sin()).round() as isize;
-        let dy = (r as f32 * angle.cos()).round() as isize;
-        (dx, dy)
-    });
+    // Neighbour ring sampled exactly like OpenCV's `elbp_` (facerec/lbph_faces.cpp):
+    // neighbour n sits at angle 2 pi n / P with COLUMN offset x = r cos a and ROW
+    // offset y = -r sin a — bit 0 is the 3 o'clock sample — and every neighbour at
+    // every radius is bilinearly interpolated from its four surrounding pixels.
+    let ring = neighbor_ring(r);
 
     let lut = uniform_lut();
-    // Interior region size (pixels that have a full neighbour ring).
+    // Spatial cells match OpenCV's spatial_histogram: the interior (border-stripped
+    // region) is split into fixed Rects of `interior / grid` pixels; the leftover
+    // border of up to grid-1 pixels is dropped rather than folded into the last cell.
     let (iw, ih) = (w - 2 * r, h - 2 * r);
+    let (cell_w, cell_h) = (iw / config.grid_x, ih / config.grid_y);
+    let (covered_w, covered_h) = (cell_w * config.grid_x, cell_h * config.grid_y);
     for iy in r..h - r {
         for ix in r..w - r {
-            let center = face.row(iy)[ix];
+            // Pixels outside the OpenCV Rect coverage are not in any cell.
+            let (px, py) = (ix - r, iy - r);
+            if px >= covered_w || py >= covered_h {
+                continue;
+            }
+            let center = f32::from(face.row(iy)[ix]);
             let mut code: u8 = 0;
-            for (i, &(dx, dy)) in offsets.iter().enumerate() {
-                let nx = ix as isize + dx;
-                let ny = iy as isize + dy;
-                // Offsets are within ±radius; bounds hold over the interior region.
-                let v = face.row(ny as usize)[nx as usize];
-                if v >= center {
-                    code |= 1 << i;
+            for (n, s) in ring.iter().enumerate() {
+                let v = s.weighted_sum(&face, iy, ix);
+                // OpenCV tie rule: bit set when strictly greater, or equal within one
+                // f32 epsilon (its float-precision guard against 0/1 jitter).
+                if v > center || (v - center).abs() < f32::EPSILON {
+                    code |= 1 << n;
                 }
             }
             let bin = lut[code as usize] as usize;
-            // Cell membership by position inside the border-stripped interior, which is
-            // exactly the region the histogram covers.
-            let cx = (ix - r) * config.grid_x / iw;
-            let cy = (iy - r) * config.grid_y / ih;
-            let cell = cy.min(config.grid_y - 1) * config.grid_x + cx.min(config.grid_x - 1);
+            let gx = px / cell_w;
+            let gy = py / cell_h;
+            let cell = gy * config.grid_x + gx;
             hist[cell * BINS + bin] += 1;
         }
     }
@@ -511,6 +520,69 @@ pub fn extract(img: &GrayImage, config: &LbphConfig) -> LbphDescriptor {
 
 fn clone_gray(img: &GrayImage) -> GrayImage {
     GrayImage::from_vec(img.as_slice().to_vec(), img.width(), img.height())
+}
+
+/// One precomputed bilinear sample position on the neighbour ring.
+///
+/// Column offsets come from `x = r cos a` and row offsets from `y = -r sin a`
+/// (OpenCV `elbp_` convention); weights are the four standard bilinear
+/// coefficients `w1` (floor row, floor col) … `w4` (ceil row, ceil col).
+#[derive(Clone, Copy, Debug)]
+struct NeighborSample {
+    fx: isize,
+    cx: isize,
+    fy: isize,
+    cy: isize,
+    w1: f32,
+    w2: f32,
+    w3: f32,
+    w4: f32,
+}
+
+impl NeighborSample {
+    /// Interpolated grey value around center `(iy, ix)`. The caller only runs
+    /// over the interior region and every offset is in `[-radius, radius]`, so
+    /// all four lookups stay in bounds.
+    fn weighted_sum(&self, face: &GrayImage, iy: usize, ix: usize) -> f32 {
+        let p = |ry: isize, rx: isize| -> f32 {
+            let y = (iy as isize + ry) as usize;
+            let x = (ix as isize + rx) as usize;
+            f32::from(face.row(y)[x])
+        };
+        self.w1 * p(self.fy, self.fx)
+            + self.w2 * p(self.fy, self.cx)
+            + self.w3 * p(self.cy, self.fx)
+            + self.w4 * p(self.cy, self.cx)
+    }
+}
+
+/// Build the [`NEIGHBORS`] bilinear sample positions for `radius`.
+///
+/// Trig is evaluated in `f64` and the point cast to `f32`, matching OpenCV's
+/// `static_cast<float>(radius * cos(...))`, so r=1 diagonals carry the same
+/// 0.7071… fractional parts and r=2+ arc positions land identically too.
+fn neighbor_ring(radius: usize) -> [NeighborSample; NEIGHBORS] {
+    std::array::from_fn(|n| {
+        let angle = 2.0 * std::f64::consts::PI * n as f64 / NEIGHBORS as f64;
+        let x = (radius as f64 * angle.cos()) as f32;
+        let y = (-(radius as f64) * angle.sin()) as f32;
+        let fx = x.floor() as isize;
+        let cx = x.ceil() as isize;
+        let fy = y.floor() as isize;
+        let cy = y.ceil() as isize;
+        let tx = x - fx as f32;
+        let ty = y - fy as f32;
+        NeighborSample {
+            fx,
+            cx,
+            fy,
+            cy,
+            w1: (1.0 - tx) * (1.0 - ty),
+            w2: tx * (1.0 - ty),
+            w3: (1.0 - tx) * ty,
+            w4: tx * ty,
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +719,80 @@ mod tests {
         };
         let b = extract(&gradient_crop(40, 1), &other_cfg);
         assert!(a.chi_square(&b).is_none());
+    }
+
+    #[test]
+    fn neighbor_ring_matches_opencv_elbp_convention() {
+        let ring = neighbor_ring(1);
+        // n = 0: pure east, exact pixel, unit weight.
+        assert_eq!((ring[0].fx, ring[0].cx), (1, 1));
+        assert_eq!((ring[0].fy, ring[0].cy), (0, 0));
+        assert!((ring[0].w1 - 1.0).abs() < 1e-6);
+        // n = 1: north-east diagonal at (0.7071, -0.7071). Because OpenCV floors
+        // the negative row offset, ty = y - floor(y) = 0.2929 while tx = 0.7071:
+        // w2 (the NE pixel) carries 0.5, w1/w4 carry 0.2071, w3 (center) 0.0858.
+        let s = &ring[1];
+        assert_eq!((s.fx, s.cx), (0, 1));
+        assert_eq!((s.fy, s.cy), (-1, 0));
+        assert!((s.w2 - 0.5).abs() < 1e-6);
+        assert!((s.w1 - 0.2071).abs() < 1e-4);
+        assert!((s.w4 - 0.2071).abs() < 1e-4);
+        assert!((s.w3 - 0.0858).abs() < 1e-4);
+        // Diagonal samples really interpolate: no single weight is 1 or 0.
+        assert!(s.w1 > 0.0 && s.w2 < 1.0 && s.w3 > 0.0 && s.w4 > 0.0);
+        // n = 2: pure north (row -1); n = 4: pure west (col -1).
+        assert_eq!((ring[2].fy, ring[2].cy), (-1, -1));
+        assert_eq!((ring[4].fx, ring[4].cx), (-1, -1));
+        // n = 6: pure south (row +1).
+        assert_eq!((ring[6].fy, ring[6].cy), (1, 1));
+    }
+
+    #[test]
+    fn bit_zero_is_the_three_oclock_sample() {
+        // 3x3 crop: grey center on black surround, only the east pixel is white.
+        // The single interior pixel's code must set bits 0 (pure east) and 1
+        // (north-east blend reaches the east pixel). Old 6 o'clock convention
+        // put this pattern at bits 5/6, so this pins the OpenCV orientation.
+        let cfg = LbphConfig {
+            face_size: 3,
+            grid_x: 1,
+            grid_y: 1,
+            ..LbphConfig::default()
+        };
+        let mut img = GrayImage::new(3, 3);
+        img.as_mut_slice()[4] = 100; // center (1,1)
+        img.as_mut_slice()[5] = 255; // east (row 1, col 2)
+        let d = extract(&img, &cfg);
+        assert_eq!(d.as_slice()[uniform_lut()[0b0000_0001] as usize], 1.0);
+
+        // Lighting the north-east pixel too flips bit 1 (its w2 weight is 0.5),
+        // and no other sample crosses the center — proving the n = 1 geometry.
+        let mut img2 = GrayImage::new(3, 3);
+        img2.as_mut_slice()[4] = 100; // center
+        img2.as_mut_slice()[5] = 255; // east
+        img2.as_mut_slice()[2] = 255; // north-east (row 0, col 2)
+        let d2 = extract(&img2, &cfg);
+        assert_eq!(d2.as_slice()[uniform_lut()[0b0000_0011] as usize], 1.0);
+    }
+
+    #[test]
+    fn chi_square_rejects_pair_of_zero_mass_descriptors() {
+        let cfg = LbphConfig {
+            face_size: 1,
+            ..LbphConfig::default()
+        };
+        let blank = extract(&GrayImage::new(1, 1), &cfg);
+        assert!(is_zero_mass(blank.as_slice()));
+        assert_eq!(blank.chi_square(&blank), None); // no fake perfect match
+                                                    // One-sided zero mass still yields a finite positive distance: each cell
+                                                    // contributes its L1 mass, so the answer is Some(36.0) for a 6x6 grid.
+        let other = extract(&gradient_crop(40, 3), &LbphConfig::default());
+        assert_eq!(blank.dim(), other.dim()); // same 6x6 grid -> comparable
+        let d = blank.chi_square(&other).unwrap();
+        assert!(
+            (d - 36.0).abs() < 1e-3,
+            "distance to full-mass descriptor {d}"
+        );
     }
 
     #[test]

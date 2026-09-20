@@ -12,7 +12,7 @@ libm.so.6
 libc.so.6
 ```
 
-> One crate, six detectors, three zero-dep recognisers, one ONNX path to
+> One crate, four detectors, three zero-dep recognisers, one ONNX path to
 > industrial accuracy. Every algorithm implements the same `FaceDetector`
 > trait, so swapping implementations is a one-line change.
 
@@ -22,12 +22,12 @@ libc.so.6
 |---|---|:-:|---|
 | **haar** | Viola–Jones AdaBoost cascade, 5 Haar feature families, OpenCV XML → `.rfcf` | ✅ | real-face drama footage |
 | **luminance** | band-pattern + mirror-symmetry detector | ✅ | real-face drama footage |
-| **cnn** / **hog** / **yunet** / **mtcnn** | correct architectures + NMS, placeholder weights | ✅ (scaffold) | n/a — drop in real weights via `*_with_*` |
+| **cnn** | tiny 24×24 Conv→ReLU→Pool→FC net with a zero-dep trainer | ✅ | starter weights — train your own (`cnn_train`, `--cnn-weights`) |
 | **scrfd** | SCRFD-10G via ONNX Runtime / tract | opt-in | measured, WIDER-FACE AP 0.95/0.94/0.83 |
 
 | recogniser | what it is | zero-dep? | measured here |
 |---|---|:-:|---|
-| **lbph** | uniform LBP histograms + chi-square, zero deps, no weights; incremental enrolment, atomic on-disk gallery persistence (`save`/`load`, crops not required) | ✅ | **62/68** hard-gallery LOO rank-1, 33/33 easy |
+| **lbph** | OpenCV-`elbp_`-exact uniform LBP histograms + chi-square, zero deps, no weights; incremental enrolment, atomic on-disk gallery persistence (`save`/`load`, crops not required) | ✅ | **60/68** hard-gallery LOO rank-1, 32/33 easy |
 | **fisherface** | Fisherfaces/LDA — n−C PCA reduction then C−1 class-discriminant axes, pure `std` | ✅ | **59/68** hard-gallery LOO rank-1, **best zero-dep EER ≈ 12.8 %**, 33/33 easy |
 | **eigenface** | PCA / Turk-Pentland, Jacobi eigendecomp in pure `std` | ✅ | **58/68** hard-gallery strict LOO (PCA ceiling), 33/33 easy |
 | **arcface** | ArcFace R50 / MobileFaceNet via ONNX Runtime / tract | opt-in | cosine margin measured on real faces |
@@ -96,7 +96,7 @@ tools/fetch_models.sh                              # downloads pinned ONNX model
 | No external input, smoke-test the pipeline | `--algo haar` (default) or `test://60` |
 | Frontal portrait, controlled lighting, no extra deps | `--algo haar` with an OpenXML-converted `.rfcf` cascade |
 | Variable face sizes in drama / Reels / vertical video | `--algo haar --scale 1.4 --stride 3 --only-with-face` |
-| Need a real accuracy on unconstrained faces | `--features ort-backend --algo scrfd` |
+| Need real accuracy on unconstrained faces | build with `--features ort-backend` and drive `rsface::scrfd_detector::ScrfdDetector` (see the `detect_scrfd_arcface` example) |
 | Recognise identities with no downloads | use `rsface::lbph::LbphRecognizer` (incremental enrolment) or the train-once `rsface::eigenface::EigenfaceRecognizer` / `rsface::fisherface::FisherfaceRecognizer` |
 | Lowest verification EER with zero deps | `rsface::fisherface::FisherfaceRecognizer` (EER ≈ 12.8 % on the hard drama gallery; rerun `bench_fisherface` on your own data) |
 | Need verification under pose / lighting drift | `--features ort-backend` + `rsface::arcface_recognizer::ArcFaceRecognizer` |
@@ -105,17 +105,17 @@ tools/fetch_models.sh                              # downloads pinned ONNX model
 
 ```rust
 use rsface::face_detector::{FaceDetector, HaarDetector};
-use rsface::hog_face::{HogConfig, HogFaceDetector};
+use rsface::luminance_face::{LuminanceConfig, LuminanceFaceDetector};
 
 let haar: Box<dyn FaceDetector> = Box::new(HaarDetector::new(
     rsface::haar::params::demo_face_cascade(),
     Default::default(),
 ));
-let hog: Box<dyn FaceDetector> =
-    Box::new(HogFaceDetector::new(HogConfig::default()));
+let luminance: Box<dyn FaceDetector> =
+    Box::new(LuminanceFaceDetector::new(LuminanceConfig::default()));
 
 // Dispatch any number of algorithms through one trait.
-for det in &[haar, hog] {
+for det in &[haar, luminance] {
     let hits = det.detect(&gray_frame);
     println!("[{}] {} hits", det.name(), hits.len());
 }
@@ -131,8 +131,8 @@ design / accuracy / operations document in the repo.
 - [Algorithm matrix](docs/algorithms.md) — per-algorithm details, weights requirements, known limits.
 - [Architecture](docs/architecture.md) — crate map + multi-threaded pipeline plumbing.
 - [Format reference](docs/format.md) — `.rfcf` cascade binary format, manifest JSON schema.
-- [GPU backends](docs/GPU_BACKENDS.md) — `cpu` / `metal` / `cuda` / `rocm` / `mlu` / `ascend`.
-- [Recognition LBPH](docs/recognition-lbph.md) / [Recognition Eigenface](docs/recognition-eigenface.md) / [Recognition Fisherface](docs/recognition-fisherface.md) / [Gallery persistence](docs/gallery-persistence.md) (the `RSLB` binary format behind `LbphRecognizer::save`/`load`).
+- [GPU backends](docs/GPU_BACKENDS.md) — zero-dlopen-dep OpenCL (Linux/BSD) plus `metal` / `cuda` behind cargo features; adding another vendor = one new file implementing `GpuBackend`.
+- [Recognition LBPH](docs/recognition-lbph.md) / [Recognition Eigenface](docs/recognition-eigenface.md) / [Recognition Fisherface](docs/recognition-fisherface.md) / [Gallery persistence](docs/gallery-persistence.md) (the `RSLB` v2 gallery format and the `RSEF`/`RSLD` trained-model formats behind `save`/`load`).
 - [Benchmarks](docs/benchmarks.md) — reproducible scripts.
 
 ## Algorithm (Viola-Jones path)
@@ -171,16 +171,20 @@ Recognition backbones we wire up:
 |-------------------------|--------------------|------------------------------------------|----------------|
 | **ArcFace R50** (w600k_r50, `buffalo_l`) | InsightFace model zoo | **99.83 / 99.33 / 98.23 / 97.25** | cosine(lena, lena) = **1.0000**, cosine(lena, biden) = **0.0685**, cosine(person A, person B) = **-0.0256**, scale invariance 0.9733 |
 | ArcFace MobileFaceNet (w600k_mbf, `buffalo_s`) | InsightFace model zoo | 99.70 / 98.00 / 96.58 / 95.02 | not in this fixture set; available via `tools/fetch_models.sh` |
-| **LBPH (zero-dep, in the default build)** | `src/lbph.rs` — no weights | n/a | **62/68 = 91.2 % LOO rank-1** on 77 ArcFace-labelled drama crops (21 identities; 33/33 on the easier 8-identity no-regression gallery); 96.5 % pair accuracy at the conservative low-FAR default distance 16.7 (FAR 0.3 %, FRR 49 %); EER ≈ 20 % — given a correct detector box. 6×6 grid chosen by a 9-point sweep over OpenCV's 8×8 default. Full methodology and the detector caveat: [`docs/recognition-lbph.md`](docs/recognition-lbph.md) |
+| **LBPH (zero-dep, in the default build)** | `src/lbph.rs` — no weights; sampler matches OpenCV's `elbp_` bit-for-bit | n/a | **60/68 = 88.2 % LOO rank-1** on 77 ArcFace-labelled drama crops (21 identities; 32/33 on the easier 8-identity no-regression gallery); 96.6 % pair accuracy at the conservative low-FAR default distance 16.7 (FAR 0.0 %, FRR 50.8 %); EER ≈ 20 % (FAR ≈ FRR ≈ 19.7 % at ≈ 23.2) — given a correct detector box. Under the exact sampler 6×6 is statistically tied with 8×8/10×10 across the 9-point sweep and stays default for its smaller descriptor. Full methodology and the detector caveat: [`docs/recognition-lbph.md`](docs/recognition-lbph.md) |
 | **Eigenfaces/PCA (zero-dep, in the default build)** | `src/eigenface.rs` — no weights, Jacobi eigendecomposition in pure `std` (Turk–Pentland 1991) | n/a | **58/68 = 85.3 % rank-1** under strict per-probe LOO retraining on the same 77 crops (21 identities) — the measured PCA ceiling across a 16-point crop-size/energy sweep, which the shipped defaults already reach; 95.1 % pair accuracy at the conservative low-FAR default 6.3 (FAR 1.5 %, FRR 52 %); 33/33 on the easy gallery. Methodology and caveats: [`docs/recognition-eigenface.md`](docs/recognition-eigenface.md) |
-| **Fisherfaces/LDA (zero-dep, in the default build)** | `src/fisherface.rs` — no weights, Gram-trick PCA reduction to n−C directions then ≤ C−1 Fisher axes via `S_W^{−1/2} S_B S_W^{−1/2}` (Belhumeur–Hespanha–Kriegman 1997) | n/a | **59/68 = 86.8 % rank-1** under strict per-probe LOO retraining — one probe above the PCA ceiling, three below LBPH; the **best zero-dep pair EER ≈ 12.8 %** (vs 14.0 % PCA, 22.5 % LBPH); 96.4 % pair accuracy at the conservative low-FAR default 3.0 (FAR 0.4 %, FRR 48 %); 33/33 and FAR 0 % on the easy gallery; descriptor is only ≤ 20 f32 but the model needs retraining when identities change. Methodology and caveats: [`docs/recognition-fisherface.md`](docs/recognition-fisherface.md) |
+| **Fisherfaces/LDA (zero-dep, in the default build)** | `src/fisherface.rs` — no weights, Gram-trick PCA reduction to n−C directions then ≤ C−1 Fisher axes via `S_W^{−1/2} S_B S_W^{−1/2}` (Belhumeur–Hespanha–Kriegman 1997) | n/a | **59/68 = 86.8 % rank-1** under strict per-probe LOO retraining — one probe above the PCA ceiling, three below LBPH; the **best zero-dep pair EER ≈ 12.8 %** (vs 14.0 % PCA, 23.2 % LBPH); 96.4 % pair accuracy at the conservative low-FAR default 3.0 (FAR 0.4 %, FRR 48 %); 33/33 and FAR 0 % on the easy gallery; descriptor is only ≤ 20 f32 but the model needs retraining when identities change. Methodology and caveats: [`docs/recognition-fisherface.md`](docs/recognition-fisherface.md) |
 
-> **Detector combinations that detect nothing.** Of the algorithms the README used to
-> list as first-class (`cnn`, `mtcnn`, `yunet`, `hog`), three — `mtcnn`, `yunet`, `hog` —
-> ship RANDOM placeholder weights and return zero detections for every frame. They now
-> report `Maturity::Scaffold` and are visibly labelled `[SCAFFOLD — detects nothing]` in
-> their descriptions. The hand-crafted `cnn` detector looks for a bright-centre / dark-
-> border pattern and will fire on that, but it is not a face detector.
+> **What the default build can and cannot do.** The zero-dependency build ships three
+> detectors: `haar` (real Viola–Jones cascade, production baseline), `luminance`
+> (weight-free classical heuristic — a genuinely different second opinion, not a
+> face-specific trained model), and `cnn` (a small trainable net with starter weights;
+> train it on real faces with `cargo run --release --bin cnn_train` before trusting it). Earlier
+> revisions also listed MTCNN, YuNet and HoG detectors — those shipped random placeholder
+> weights and returned zero detections on every frame, so they were **deleted** rather
+> than labelled. Industrial accuracy lives behind the opt-in ONNX features: SCRFD
+> today, and the Apache-2.0 YuNet weights stay pinned in the model registry for the
+> ONNX YuNet runner on the roadmap.
 
 ### Re-running these numbers
 
@@ -211,7 +215,7 @@ INPUTs
                       (requires `ffmpeg` on PATH)
 
 ALGORITHMS  (pick with --algo <NAME>, default: haar)
-  haar, cnn, yunet, mtcnn, hog, luminance,
+  haar, cnn, luminance,
   scrfd (requires --features ort-backend | tract-backend)
 
 OPTIONS
@@ -268,7 +272,7 @@ required:
 | example | what it shows |
 |---|---|
 | `detect_haar` | smallest end-to-end Haar run on a synthetic frame |
-| `detect_uniform` | the "swiss army knife" demo: dispatch Haar + HoG via `FaceDetector` trait |
+| `detect_uniform` | the "swiss army knife" demo: dispatch Haar + luminance via `FaceDetector` trait |
 | `recognise_lbph` | enrol + identify with LBPH, no weights; ends with an atomic save/load round-trip |
 | `recognise_eigenface` | train + identify with eigenfaces/PCA, no weights |
 | `recognise_fisherface` | train + identify with fisherfaces/LDA, no weights |
@@ -297,7 +301,7 @@ Crate map (25+ modules, see `src/lib.rs` for full descriptions):
 | ring | modules |
 |---|---|
 | core numerical | `integral`, `image`, `haar` |
-| detection (zero-dep) | `detector`, `cnn`, `hog_face`, `yunet`, `mtcnn`, `luminance_face` |
+| detection (zero-dep) | `detector`, `cnn`, `luminance_face` |
 | detection (ONNX) | `scrfd`, `scrfd_detector`, `onnx` |
 | recognition (zero-dep) | `eigenface`, `fisherface`, `lbph`, `lbph_store` (versioned binary gallery persistence), `linalg` (shared Jacobi eigensolver) |
 | recognition (ONNX) | `arcface`, `arcface_recognizer` |

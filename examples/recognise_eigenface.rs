@@ -84,4 +84,29 @@ fn main() {
     // 4. Verification: does this crop look like alice?
     let score = rec.verify("alice", &probe).unwrap_or(f32::INFINITY);
     println!("eigenfaces verify(alice, probe) = {score:.3}");
+
+    // 5. Persistence: the trained model (mean, eigenvectors, projections)
+    //    survives a restart as the zero-dependency `RSEF` blob — no retrain
+    //    and no original crops needed to reload. Reload is bit-exact.
+    let model_path = std::env::temp_dir().join(format!(
+        "rsface_example_eigen_{}_{}.eigen",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    rec.save(&model_path).expect("save eigenfaces model");
+    let before = rec.rank_crop(&probe);
+    drop(rec);
+
+    let reloaded = EigenfaceRecognizer::load(&model_path).expect("load eigenfaces model");
+    println!(
+        "eigenfaces model reloaded: {} identities, {} crop(s)",
+        reloaded.len(),
+        reloaded.crop_count()
+    );
+    assert_eq!(reloaded.rank_crop(&probe), before);
+    std::fs::remove_file(&model_path).expect("cleanup model");
+    println!("eigenfaces persistence round-trip OK (ranking unchanged)");
 }

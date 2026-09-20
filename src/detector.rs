@@ -62,6 +62,14 @@ pub struct DetectorConfig {
     pub scale_factor: f32,
     /// Window stride in pixels at the original image scale.
     pub window_stride: usize,
+    /// Minimum number of mutually-similar raw detections (plus children
+    /// contained inside the merged box) required for a face to be reported.
+    /// This is OpenCV `detectMultiScale(..., minNeighbors)`: raw sliding-window
+    /// hits are clustered across ALL pyramid levels, and clusters with at most
+    /// `min_neighbors` supporting hits are discarded as noise. `0` disables the
+    /// requirement (every raw hit survives into the final NMS pass).
+    /// Defaults to `3`, the OpenCV default.
+    pub min_neighbors: i32,
     /// Final NMS IoU threshold; overlapping detections above this are merged.
     pub nms_iou_threshold: f32,
     /// Cascade score threshold — detections below this are dropped.
@@ -77,7 +85,10 @@ pub struct DetectorConfig {
     /// equalized data — without this, real photographs with low contrast or
     /// shifted luminance get silently rejected at stage 0 because the
     /// per-feature thresholds were calibrated for the equalized range.
-    /// Defaults to `true`; set to `false` to compare with raw input.
+    /// Defaults to `false`, matching OpenCV's C++ `detectMultiScale` (which
+    /// does not equalize; the canonical Python samples call `equalizeHist`
+    /// explicitly). Enable for low-contrast inputs where stage 0 rejects too
+    /// many windows.
     pub equalize_hist: bool,
     /// If `true`, attempt to use the GPU for the squared-integral computation
     /// and variance pre-filter. Falls back to CPU silently if no GPU/OpenCL
@@ -97,11 +108,14 @@ impl Default for DetectorConfig {
             max_size: 1024,
             scale_factor: 1.2,
             window_stride: 4,
+            min_neighbors: 3,
             nms_iou_threshold: 0.3,
             min_score: 0.0,
             variance_threshold: 200,
             equalize_hist: false,
-            use_gpu: true,
+            // Opt-in: a library `detect()` call must not dlopen/JIT a GPU
+            // stack unexpectedly. CLIs and the pipeline flip this on.
+            use_gpu: false,
             gpu_min_pixels: 250_000,
         }
     }
@@ -149,6 +163,9 @@ impl DetectorConfig {
             self.scale_factor = 2.0;
         }
         self.window_stride = self.window_stride.max(1);
+        if self.min_neighbors < 0 {
+            self.min_neighbors = 0;
+        }
         self
     }
 
@@ -174,6 +191,12 @@ impl DetectorConfig {
     /// Builder-style override of `window_stride`.
     pub fn with_window_stride(mut self, window_stride: usize) -> Self {
         self.window_stride = window_stride;
+        self
+    }
+
+    /// Builder-style override of `min_neighbors` (0 disables grouping).
+    pub fn with_min_neighbors(mut self, min_neighbors: i32) -> Self {
+        self.min_neighbors = min_neighbors;
         self
     }
 
@@ -309,14 +332,8 @@ impl Detector {
         // allocation that was the dominant cost.
         let mut cache = EvalCache::new(self.cascade.features.len());
 
-        // Build pyramid by repeated downscaling.
-        // OpenCV's Haar cascade is trained on histogram-equalized images
-        // (the canonical "Lena face detector" workflow applies
-        // `cv::equalizeHist` before `detectMultiScale`). Without it the
-        // integral-image sums land in a different numerical range than the
-        // cascade's learned thresholds/varianceNormFactor and most real
-        // faces silently fail stage 0. The equalization is a deterministic
-        // O(W*H) per pixel pass — cheap relative to the cascade eval.
+        // Optional histogram equalization (off by default to match OpenCV's
+        // C++ detectMultiScale; see `DetectorConfig::equalize_hist`).
         let eq_storage: Option<GrayImage> = if self.config.equalize_hist {
             let mut eq = img.clone();
             eq.equalize_hist_inplace();
@@ -326,15 +343,20 @@ impl Detector {
         };
         let current: &GrayImage = eq_storage.as_ref().unwrap_or(img);
         let mut downscaled: Option<GrayImage> = None;
-        let mut current_scale: f32 = 1.0;
+        // Per-axis level→original scale. Both start at 1 and stay within a
+        // rounding of each other, but the level dimensions are rounded
+        // independently (as does OpenCV), so mapping y/height with the
+        // width-based scale was off by ~1 px on deeper levels.
+        let mut scale_x: f32 = 1.0;
+        let mut scale_y: f32 = 1.0;
         loop {
             // `current` is the original (or equalized) image on the first
             // iteration and the owned pyramid level afterwards.
             let current: &GrayImage = downscaled.as_ref().unwrap_or(current);
             let cw = current.width();
             let ch = current.height();
-            let det_w_at_cur = (win_w as f32 * current_scale).round() as usize;
-            let det_h_at_cur = (win_h as f32 * current_scale).round() as usize;
+            let det_w_at_cur = (win_w as f32 * scale_x).round() as usize;
+            let det_h_at_cur = (win_h as f32 * scale_y).round() as usize;
             if det_w_at_cur > self.config.max_size || det_h_at_cur > self.config.max_size {
                 break;
             }
@@ -351,7 +373,9 @@ impl Detector {
             // feature responses (i.e. the current pyramid level). On GPU we
             // get both for free in one pass; on CPU we make them separately.
             let (ii, ii_sq) = if let Some(g) = self.gpu() {
-                if self.gpu_worthwhile(cw, ch) {
+                // The GPU kernels emit a u32 integral table; on images whose
+                // prefix sums can wrap u32 we must stay on the CPU u64 path.
+                if self.gpu_worthwhile(cw, ch) && crate::integral::prefix_sums_fit_u32(cw, ch) {
                     let (ii_data, ii_sq_data) = g.compute_dual(&current);
                     (
                         IntegralImage::from_owned(ii_data, cw, ch),
@@ -381,27 +405,39 @@ impl Detector {
             } else {
                 RotatedIntegralImage::empty()
             };
-            // Integer-scaled stride: stride_at_scale = base_stride * current_scale
-            // approximated by the nearest integer; the (.max(2)) keeps us from
-            // sliding window on every pixel for big detections.
-            let stride = ((self.config.window_stride as f32) * current_scale)
+            // `window_stride` is documented in ORIGINAL-image pixels. A window
+            // step of `b` original pixels is `b / s` pixels on a level shrunk by
+            // scale s. Multiplying instead (the previous formulation) advanced
+            // the window up to 30 px on the smallest level, so faces visible on
+            // only one pyramid level had essentially a single sample point and
+            // were missed almost entirely (lena: 0 hits at default settings).
+            // Stride on the level uses the x scale; with isotropic pyramid
+            // resizes both axes share it to within rounding.
+            let stride = ((self.config.window_stride as f32) / scale_x)
                 .round()
-                .max(2.0) as usize;
+                .max(1.0) as usize;
             let use_variance = self.config.variance_threshold < u64::MAX;
 
             // GPU fast-path: run the full cascade on GPU when worth it.
             // The kernel handles variance normalisation + per-stage eval +        // early rejection in parallel across all (x, y) windows.
             if stride == 1 {
                 if let Some(g) = self.gpu() {
-                    if self.gpu_worthwhile(cw, ch) {
+                    // Same u32-overflow guard as the integral-build path:
+                    // the GPU kernel's table cannot represent wide images.
+                    if self.gpu_worthwhile(cw, ch) && crate::integral::prefix_sums_fit_u32(cw, ch) {
                         let max_dets = ((cw - win_w + 1) * (ch - win_h + 1)).min(8192);
                         let gpu_dets = g.detect_windows(&self.cascade, current, max_dets);
                         for d in gpu_dets {
                             if d.score < self.config.min_score {
                                 continue;
                             }
-                            let ox = (d.x as f32 / current_scale).round() as usize;
-                            let oy = (d.y as f32 / current_scale).round() as usize;
+                            // Level-space window coords map back to the
+                            // original image by MULTIPLYING by the per-axis
+                            // level scales (s = orig_dim / level_dim);
+                            // dividing placed every face near the top-left
+                            // corner regardless of its true position.
+                            let ox = (d.x as f32 * scale_x).round() as usize;
+                            let oy = (d.y as f32 * scale_y).round() as usize;
                             let ox = ox.min(img.width().saturating_sub(det_w_at_cur));
                             let oy = oy.min(img.height().saturating_sub(det_h_at_cur));
                             raw.push(Detection {
@@ -479,9 +515,11 @@ impl Detector {
                     };
                     if let Some(score) = score_opt {
                         if score >= self.config.min_score {
-                            // Map (x, y) at current scale back to original image space.
-                            let ox = (x as f32 / current_scale).round() as usize;
-                            let oy = (y as f32 / current_scale).round() as usize;
+                            // Map (x, y) at this level back to original image
+                            // space with the per-axis scales (see the GPU
+                            // fast-path note above).
+                            let ox = (x as f32 * scale_x).round() as usize;
+                            let oy = (y as f32 * scale_y).round() as usize;
                             let ow = det_w_at_cur;
                             let oh = det_h_at_cur;
                             // Clamp to image bounds.
@@ -520,18 +558,163 @@ impl Detector {
                 downscaled = Some(current.resize_bilinear(next_w, next_h));
             }
             let next = downscaled.as_ref().expect("just stored");
-            current_scale = img.width() as f32 / next.width() as f32;
+            scale_x = img.width() as f32 / next.width() as f32;
+            scale_y = img.height() as f32 / next.height() as f32;
             if next.width() <= win_w || next.height() <= win_h {
                 break;
             }
         }
 
+        // OpenCV semantics (`detectMultiScale`): cluster raw hits across ALL
+        // pyramid levels first and discard clusters without enough supporting
+        // hits (minNeighbors), then resolve the rare survivor overlap with
+        // greedy IoU NMS. The old code ran only the IoU pass, so a single
+        // weak window anywhere in the image was reported as a face.
+        let grouped = group_rectangles(raw, self.config.min_neighbors);
         (
-            non_max_suppression(raw, self.config.nms_iou_threshold),
+            non_max_suppression(grouped, self.config.nms_iou_threshold),
             levels,
             windows_evaluated,
         )
     }
+}
+
+/// Relative position/size tolerance for two raw hits to count as the same
+/// face. Matches OpenCV's `groupRectangles(..., eps=0.2)`.
+const GROUP_EPS: f64 = 0.2;
+
+/// OpenCV 4.x `cv::groupRectangles` port: cluster the raw multi-scale
+/// sliding-window hits with an equivalence predicate (union-find, so the
+/// relation is transitive across pyramid levels), average each cluster,
+/// then discard clusters that are either too weak on their own
+/// (`members <= min_neighbors`) or are swallowed by a stronger containing
+/// cluster. The surviving box is the unchanged cluster average; the
+/// reported score is the maximum member score (OpenCV has no score — its
+/// `levelWeights` play that role).
+///
+/// `min_neighbors <= 0` returns the input untouched, exactly like OpenCV
+/// when `groupThreshold <= 0` (the downstream IoU NMS still runs).
+pub fn group_rectangles(dets: Vec<Detection>, min_neighbors: i32) -> Vec<Detection> {
+    if dets.is_empty() || min_neighbors <= 0 {
+        return dets;
+    }
+    let threshold = min_neighbors as usize;
+
+    // 1. Union-find partition under OpenCV's SimilarRects predicate.
+    let n = dets.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], mut a: usize) -> usize {
+        while parent[a] != a {
+            parent[a] = parent[parent[a]];
+            a = parent[a];
+        }
+        a
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if similar_rects(&dets[i], &dets[j], GROUP_EPS) {
+                let ri = find(&mut parent, i);
+                let rj = find(&mut parent, j);
+                if ri != rj {
+                    parent[rj] = ri;
+                }
+            }
+        }
+    }
+
+    // 2. Average rect + member count + best score per class, preserving
+    // first-appearance (== OpenCV class-index) order.
+    let mut class_of: Vec<usize> = vec![0; n];
+    let mut roots: Vec<usize> = Vec::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        match roots.iter().position(|&c| c == root) {
+            Some(k) => class_of[i] = k,
+            None => {
+                class_of[i] = roots.len();
+                roots.push(root);
+            }
+        }
+    }
+    let classes = roots.len();
+    let mut sums = vec![(0u64, 0u64, 0u64, 0u64); classes];
+    let mut counts = vec![0usize; classes];
+    let mut best_score = vec![f32::NEG_INFINITY; classes];
+    for (i, d) in dets.iter().enumerate() {
+        let c = class_of[i];
+        let s = &mut sums[c];
+        s.0 += d.x as u64;
+        s.1 += d.y as u64;
+        s.2 += d.w as u64;
+        s.3 += d.h as u64;
+        counts[c] += 1;
+        if d.score > best_score[c] {
+            best_score[c] = d.score;
+        }
+    }
+    let avg: Vec<Detection> = (0..classes)
+        .map(|c| Detection {
+            // OpenCV truncates the scaled float; all terms are >= 0 so
+            // integer division is the same rounding.
+            x: (sums[c].0 as usize) / counts[c],
+            y: (sums[c].1 as usize) / counts[c],
+            w: (sums[c].2 as usize) / counts[c],
+            h: (sums[c].3 as usize) / counts[c],
+            score: best_score[c],
+        })
+        .collect();
+
+    // 3. Threshold + containment suppression (OpenCV 4.x semantics).
+    let mut out: Vec<Detection> = Vec::new();
+    for i in 0..classes {
+        let n1 = counts[i];
+        if n1 <= threshold {
+            continue;
+        }
+        let r1 = &avg[i];
+        let mut swallowed = false;
+        for j in 0..classes {
+            if i == j || counts[j] <= threshold {
+                continue;
+            }
+            let n2 = counts[j];
+            let r2 = &avg[j];
+            // Inflate r2 by eps on every side; integer truncation like
+            // saturate_cast<int> on non-negative values.
+            let dx = (r2.w as f64 * GROUP_EPS) as i64;
+            let dy = (r2.h as f64 * GROUP_EPS) as i64;
+            let l = r2.x as i64 - dx;
+            let t = r2.y as i64 - dy;
+            let rr = r2.x as i64 + r2.w as i64 + dx;
+            let b = r2.y as i64 + r2.h as i64 + dy;
+            let inside = r1.x as i64 >= l
+                && r1.y as i64 >= t
+                && r1.x as i64 + r1.w as i64 <= rr
+                && r1.y as i64 + r1.h as i64 <= b;
+            // A small (n1 < 3) cluster is absorbed by ANY populated
+            // containing cluster; larger ones only by a strictly stronger one.
+            if inside && (n2 > 3.max(n1) || n1 < 3) {
+                swallowed = true;
+                break;
+            }
+        }
+        if !swallowed {
+            out.push(avg[i].clone());
+        }
+    }
+    out
+}
+
+/// OpenCV `SimilarRects`: same position/extent within a size-scaled delta.
+/// Compares both top-left and bottom-right corners, so boxes of different
+/// sizes at the same origin are NOT considered similar.
+fn similar_rects(a: &Detection, b: &Detection, eps: f64) -> bool {
+    let delta = eps * (a.w.min(b.w) as f64 + a.h.min(b.h) as f64) * 0.5;
+    let close = |p: i64, q: i64| (p - q).abs() as f64 <= delta;
+    close(a.x as i64, b.x as i64)
+        && close(a.y as i64, b.y as i64)
+        && close((a.x + a.w) as i64, (b.x + b.w) as i64)
+        && close((a.y + a.h) as i64, (b.y + b.h) as i64)
 }
 
 /// Standard greedy NMS: pick the highest-score box, suppress all with IoU > threshold.
@@ -776,9 +959,9 @@ mod tests {
     /// Honest about the demo cascade: it is calibrated for synthetic test
     /// patterns, so this test is intentionally lax — it would only fail if the
     /// detector panicked, returned NaN scores, or produced boxes outside the
-    /// image. The full real-face measurement lives in
-    /// `docs/CASCADE_FIX.md` + `docs/bench-results.md` for users who load a
-    /// trained `.rfcf` cascade.
+    /// image. The production path uses the bundled OpenCV cascade
+    /// (`crate::haar::bundled`); measured numbers for trained `.rfcf`
+    /// cascades live in `docs/bench-results.md`.
     #[test]
     fn demo_cascade_runs_on_real_face_fixture() {
         let fixture = Path::new("tests/fixtures/lena.ppm");
@@ -814,5 +997,108 @@ mod tests {
         }
         // The fixture must be a real PPM, not the test-suite placeholder.
         assert!(w > 100 && h > 100, "fixture suspiciously small: {w}x{h}");
+    }
+
+    fn det(x: usize, y: usize, w: usize, h: usize, score: f32) -> Detection {
+        Detection { x, y, w, h, score }
+    }
+
+    #[test]
+    fn group_rectangles_passthrough_when_disabled() {
+        let raw = vec![det(10, 10, 24, 24, 5.0), det(200, 200, 24, 24, 1.0)];
+        assert_eq!(group_rectangles(raw.clone(), 0).len(), 2);
+        assert_eq!(group_rectangles(raw, -1).len(), 2);
+        assert!(group_rectangles(Vec::new(), 3).is_empty());
+    }
+
+    #[test]
+    fn group_rectangles_requires_more_than_threshold_hits() {
+        // OpenCV: n1 <= groupThreshold rejects. Exactly 3 hits with
+        // min_neighbors=3 must therefore NOT survive.
+        let raw = vec![
+            det(100, 100, 50, 50, 1.0),
+            det(102, 101, 50, 50, 2.0),
+            det(101, 103, 51, 50, 3.0),
+        ];
+        assert!(group_rectangles(raw, 3).is_empty());
+
+        // A fourth similar hit clears the threshold; the output is the
+        // truncated average and the best member score survives.
+        let raw = vec![
+            det(100, 100, 50, 50, 1.0),
+            det(102, 101, 50, 50, 2.0),
+            det(101, 103, 51, 50, 3.0),
+            det(103, 100, 50, 51, 9.5),
+        ];
+        let out = group_rectangles(raw, 3);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].x, (100 + 102 + 101 + 103) / 4);
+        assert_eq!(out[0].w, (50 + 50 + 51 + 50) / 4);
+        assert_eq!(out[0].score, 9.5);
+    }
+
+    #[test]
+    fn group_rectangles_clusters_transitively_across_scales() {
+        // Two pyramid-level clouds, offset by far more than one eps-delta but
+        // chained through intermediate boxes -> one class via union-find.
+        let mut raw = Vec::new();
+        for (x, y) in [(100, 100), (106, 102), (112, 104), (118, 106)] {
+            raw.push(det(x, y, 60, 60, 1.0));
+        }
+        for (x, y) in [(400, 300), (405, 303), (409, 299), (403, 306)] {
+            raw.push(det(x, y, 80, 80, 4.0));
+        }
+        let out = group_rectangles(raw, 3);
+        assert_eq!(out.len(), 2, "two distinct faces must stay separate");
+    }
+
+    #[test]
+    fn group_rectangles_drops_isolated_weak_hit() {
+        // One weak singleton far from anything: with min_neighbors=3 even a
+        // strong cluster can't save it, and singletons are always filtered.
+        let mut raw = vec![
+            det(500, 500, 40, 40, 0.1), // isolated FP
+        ];
+        for (x, y) in [(100, 100), (102, 101), (101, 102), (103, 100)] {
+            raw.push(det(x, y, 50, 50, 5.0));
+        }
+        let out = group_rectangles(raw, 3);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].x, 101);
+    }
+
+    #[test]
+    fn group_rectangles_absorbs_contained_small_cluster() {
+        // min_neighbors=1 lets a 2-member cluster (n1 < 3) reach OpenCV's
+        // containment pass, where the stronger containing cluster swallows it.
+        let mut raw = Vec::new();
+        for (x, y) in [(100, 100), (104, 100), (100, 104), (104, 104), (108, 102)] {
+            raw.push(det(x, y, 100, 100, 5.0));
+        }
+        raw.push(det(130, 130, 30, 30, 1.0));
+        raw.push(det(131, 131, 30, 30, 1.0));
+        let out = group_rectangles(raw, 1);
+        assert_eq!(out.len(), 1, "contained weak cluster must be absorbed");
+
+        // A 2-member cluster of equal strength that is NOT contained must
+        // survive under the same threshold.
+        let mut raw2 = Vec::new();
+        for (x, y) in [(100, 100), (104, 100), (100, 104), (104, 104)] {
+            raw2.push(det(x, y, 60, 60, 5.0));
+        }
+        raw2.push(det(300, 300, 40, 40, 1.0));
+        raw2.push(det(302, 301, 40, 40, 1.0));
+        let out2 = group_rectangles(raw2, 1);
+        assert_eq!(out2.len(), 2, "disjoint clusters must both survive");
+    }
+
+    #[test]
+    fn similar_rects_tolerance_matches_opencv() {
+        let a = det(100, 100, 50, 50, 0.0);
+        // delta = 0.2 * (50 + 50) / 2 = 10; 10 is still similar (<=).
+        assert!(similar_rects(&a, &det(110, 100, 50, 50, 0.0), GROUP_EPS));
+        assert!(!similar_rects(&a, &det(111, 100, 50, 50, 0.0), GROUP_EPS));
+        // Same origin but a size delta beyond eps is NOT similar.
+        assert!(!similar_rects(&a, &det(100, 100, 72, 72, 0.0), GROUP_EPS));
     }
 }

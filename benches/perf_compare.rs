@@ -8,9 +8,8 @@
 //! 算法覆盖:
 //! - `haar`  :核心库 Detector(多尺度滑动窗口 + Viola-Jones 级联 + NMS)
 //! - `cnn`   :核心库 CnnDetector(24×24 窗口 + CNN 前向 + NMS)
-//! - `yunet` :**未实现**(零依赖约束下无法引入 dnn 模块)。表中填 N/A。
-//! - `mtcnn` :**未实现**(同上)。
-//! - `hog`   :**未实现**(同上)。
+//!
+//! ONNX 后端的 SCRFD 不在本零依赖基准内;见 `tests/real_model_e2e.rs`。
 //!
 //! 真实跑测:5 次取中位数(中位数比 mean 更抗一次抖动)。
 //!
@@ -328,21 +327,7 @@ fn main() {
         rows.push((algo.name().to_string(), lena_ms, tp_ms, v_ms, v_fps));
     }
 
-    // 3) 占位行(YuNet / MTCNN / HOG —— 零依赖约束下不可用)
-    for name in &["yunet", "mtcnn", "hog"] {
-        if let Some(ref f) = filter {
-            if name != &f.as_str() {
-                continue;
-            }
-        }
-        println!(
-            "{:<7} | {:>11} | {:>13} | {:>17} | {:>8}",
-            name, "N/A", "N/A", "N/A", "N/A"
-        );
-        rows.push((name.to_string(), None, None, None, None));
-    }
-
-    // 4) 写 markdown
+    // 3) 写 markdown
     if std::env::var("RSFACE_BENCH_WRITE_MD").ok().as_deref() == Some("1") {
         let path = repo_root().join("benches").join("RESULTS.md");
         let mut s = String::new();
@@ -351,12 +336,12 @@ fn main() {
         s.push_str(
             "Each cell: median of 3 runs (per-frame ms; video = ms/frame over 1 frame).\n\n",
         );
-        s.push_str("YuNet / MTCNN / HOG are listed as N/A because the zero-dep core has no DNN runtime.\n\n");
-        s.push_str("CNN uses template weights and is very slow on large images (stride=8 on 512x512 ~ 9.6s/frame on aarch64);\n");
+        s.push_str("Only implemented zero-dep detectors are benchmarked; the ONNX SCRFD path is covered by tests/real_model_e2e.rs.\n\n");
+        s.push_str("CNN uses starter weights and is very slow on large images (stride=8 on 512x512 ~ 9.6s/frame on aarch64);\n");
         s.push_str(
             "`cnn/lena` reports a 64x64 baseline (`*` suffix) so the bench finishes in seconds.\n",
         );
-        s.push_str("On a real GPU or with SIMD it would match Haar; here it's a known limitation of the hand-crafted weights.\n\n");
+        s.push_str("On a real GPU or with SIMD it would match Haar; train the starter weights (cnn_train) before trusting accuracy.\n\n");
         s.push_str("| algo | lena.jpg ms | two-people.jpg ms | video 1f ms/frame | video fps |\n");
         s.push_str("|------|------------:|------------------:|-------------------:|----------:|\n");
         for (name, l, t, vf, vfps) in &rows {

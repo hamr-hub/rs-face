@@ -104,6 +104,8 @@ pub enum FisherfaceError {
     SingleClass,
     /// Every identity has exactly one crop (`n − C = 0`): there is no within-class
     /// subspace to discriminatively whiten, so train at least one identity twice.
+    /// Also returned when a Jacobi eigendecomposition fails to converge within
+    /// the sweep budget (singular/ill-conditioned scatter matrices).
     DegenerateGallery,
 }
 
@@ -129,45 +131,34 @@ impl std::error::Error for FisherfaceError {}
 /// One labelled training crop.
 pub type FisherSample<'a> = (&'a str, &'a GrayImage);
 
-/// Outcome of a fisherfaces gallery query, mirroring [`crate::lbph::LbphMatch`].
-#[derive(Clone, Debug, PartialEq)]
-pub enum FisherMatch {
-    /// Best identity is within [`FisherfaceConfig::max_distance`] (and margin policy).
-    Match {
-        label: String,
-        distance: f32,
-        margin: f32,
-    },
-    /// Nearest identity was farther than `max_distance`.
-    BelowThreshold { best: Option<(String, f32)> },
-    /// Within threshold but too close to another identity to call safely.
-    Ambiguous {
-        first: String,
-        second: String,
-        margin: f32,
-    },
-    /// The recogniser has no trained model.
-    NoCandidates,
-}
+/// Outcome of a fisherfaces gallery query.
+///
+/// All zero-dep recognisers share [`crate::recognizer::Recognition`]; this
+/// alias keeps the per-recogniser name working and lets Fisherfaces
+/// dispatch through [`crate::recognizer::FaceRecognizer`].
+pub use crate::recognizer::Recognition as FisherMatch;
 
 /// One enrolled crop with its projection coefficients.
 #[derive(Clone, Debug)]
-struct Member {
-    label: String,
-    coeffs: Vec<f32>,
+pub(crate) struct Member {
+    pub(crate) label: String,
+    pub(crate) coeffs: Vec<f32>,
 }
 
 /// Trained Fisher-LDA recogniser.
 ///
 /// Adding or removing identities changes the discriminant subspace, so this is a
 /// train-once value: call [`FisherfaceRecognizer::train`] again with the new crop list.
+/// The trained model can be persisted without the original crops via
+/// [`FisherfaceRecognizer::to_bytes`] / [`FisherfaceRecognizer::save`] (format
+/// documented in `docs/gallery-persistence.md`).
 #[derive(Clone, Debug)]
 pub struct FisherfaceRecognizer {
     config: FisherfaceConfig,
-    mean: Vec<f32>,
+    pub(crate) mean: Vec<f32>,
     /// Unit discriminant axes in the `d`-dimensional pixel space.
-    axes: Vec<Vec<f32>>,
-    members: Vec<Member>,
+    pub(crate) axes: Vec<Vec<f32>>,
+    pub(crate) members: Vec<Member>,
     by_label: HashMap<String, usize>,
 }
 
@@ -264,7 +255,10 @@ impl FisherfaceRecognizer {
         }
 
         // Generalised eigenproblem via symmetric whitening of S_W.
-        let (sw_vals, sw_vecs) = jacobi_symmetric(&mut sw, p);
+        let (sw_vals, sw_vecs, converged) = jacobi_symmetric(&mut sw, p);
+        if !converged {
+            return Err(FisherfaceError::DegenerateGallery);
+        }
         let sw_max = sw_vals.first().copied().unwrap_or(0.0).abs();
         let floor = sw_max.max(1.0) * 1e-9;
         // W_w columns: v_k / sqrt(lambda_k); zeroed for the rank-deficient tail.
@@ -300,7 +294,10 @@ impl FisherfaceRecognizer {
                 sb_white[j * p + i] = acc;
             }
         }
-        let (lda_vals, lda_vecs) = jacobi_symmetric(&mut sb_white, p);
+        let (lda_vals, lda_vecs, converged) = jacobi_symmetric(&mut sb_white, p);
+        if !converged {
+            return Err(FisherfaceError::DegenerateGallery);
+        }
 
         // Keep the leading C−1 discriminant axes (config cap applied), transform back
         // to PCA space (W_w q), then to pixel space (U_pca a), and unit-normalise.
@@ -363,6 +360,70 @@ impl FisherfaceRecognizer {
             members,
             by_label,
         })
+    }
+
+    /// Rebuild from persisted trained-model parts; the codec in
+    /// [`crate::subspace_store`] has already validated every shape. The label
+    /// index is rebuilt to first-occurrence member indices exactly as `train`.
+    pub(crate) fn from_parts(
+        config: FisherfaceConfig,
+        mean: Vec<f32>,
+        axes: Vec<Vec<f32>>,
+        members: Vec<Member>,
+    ) -> Self {
+        let mut by_label = HashMap::with_capacity(members.len());
+        for (i, m) in members.iter().enumerate() {
+            by_label.entry(m.label.clone()).or_insert(i);
+        }
+        Self {
+            config,
+            mean,
+            axes,
+            members,
+            by_label,
+        }
+    }
+
+    /// Serialize the trained model (mean, discriminant axes, projected
+    /// gallery, config) to the compact binary format documented in
+    /// `docs/gallery-persistence.md`; the original crops are not needed.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        crate::subspace_store::encode_fisher(self)
+    }
+
+    /// Rebuild a recogniser from [`FisherfaceRecognizer::to_bytes`] output,
+    /// validating the whole blob. Distances after a reload are bit-identical.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::subspace_store::SubspaceStoreError`] for a truncated, corrupt,
+    /// wrong-version, or internally inconsistent blob.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::subspace_store::SubspaceStoreError> {
+        crate::subspace_store::decode_fisher(bytes)
+    }
+
+    /// Atomically write the trained model (temp file then rename).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::subspace_store::SubspaceStoreError::Io`] on filesystem failure.
+    pub fn save(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), crate::subspace_store::SubspaceStoreError> {
+        crate::subspace_store::save(&self.to_bytes(), path)
+    }
+
+    /// Load a trained model written by [`FisherfaceRecognizer::save`].
+    ///
+    /// # Errors
+    ///
+    /// Filesystem errors or any [`crate::subspace_store::SubspaceStoreError`].
+    pub fn load(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, crate::subspace_store::SubspaceStoreError> {
+        crate::subspace_store::load(path, crate::subspace_store::decode_fisher)
     }
 
     pub fn config(&self) -> &FisherfaceConfig {
@@ -543,7 +604,10 @@ fn pca_basis(
             gram[j * n + i] = g;
         }
     }
-    let (eigvals, eigvecs) = jacobi_symmetric(&mut gram, n);
+    let (eigvals, eigvecs, converged) = jacobi_symmetric(&mut gram, n);
+    if !converged {
+        return Err(FisherfaceError::DegenerateGallery);
+    }
     let lambda_max = eigvals.first().copied().unwrap_or(0.0).abs();
     let tol = lambda_max.max(1.0) * EIGEN_TOL_REL;
 

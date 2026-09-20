@@ -5,8 +5,11 @@
 //! Then the sum over rectangle `[x1, x2) × [y1, y2)` is:
 //!   `II[x2, y2] - II[x1, y2] - II[x2, y1] + II[x1, y1]`.
 //!
-//! We use `u32` accumulation; for `1920 × 1080 × 255` the max value is ~5.3e8,
-//! well within u32 range. A `u64` variant is offered for safety.
+//! Prefix sums normally use a pooled `u32` table (for `1920 × 1080 × 255`
+//! the max value is ~5.3e8, well within u32). Images with `W*H*255 >
+//! u32::MAX` (~16.8 Mp) would wrap and silently corrupt Haar scores, so
+//! [`IntegralImage::from_gray`] automatically switches to a non-pooled
+//! `u64` table for them; all sum queries return `u64` regardless.
 //!
 //! Layout: row-major, with `width + 1` columns and `height + 1` rows.
 //! Total memory = `(W+1) * (H+1) * sizeof(u32)` bytes.
@@ -30,23 +33,60 @@
 
 use crate::image::GrayImage;
 
-/// Integral image stored as a flat `Vec<u32>` of shape `(H+1, W+1)`.
+/// Backing storage for [`IntegralImage`].
+///
+/// Prefix sums of an 8-bit image fit in u32 whenever `W*H*255 <= u32::MAX`
+/// (~16.8 M pixels) — true for everything up to and above 4K. Bigger images
+/// (large camera raw frames, stitched panoramas) can wrap a u32 table, and
+/// because rectangle sums are inclusion–exclusion differences a wrapped
+/// corner corrupts Haar scores silently. Such images take the `Wide` u64
+/// path; it is not pooled (a rare, large allocation).
+#[derive(Clone)]
+enum IntegralTable {
+    /// Flat `(H+1, W+1)` u32 buffer.
+    Narrow(Vec<u32>),
+    /// Flat `(H+1, W+1)` u64 buffer.
+    Wide(Vec<u64>),
+}
+
+impl Default for IntegralTable {
+    fn default() -> Self {
+        // Empty narrow buffer; used only by buffer-stealing `into_data`.
+        IntegralTable::Narrow(Vec::new())
+    }
+}
+
+/// Integral image of shape `(H+1, W+1)`.
 /// Index `(x, y)` (0 <= x <= W, 0 <= y <= H) lives at `y * stride + x`.
+///
+/// Storage is u32 for images whose prefix sums cannot overflow and u64
+/// otherwise (see [`IntegralTable`]); all sum queries return `u64`.
 #[derive(Clone)]
 pub struct IntegralImage {
-    data: Vec<u32>,
+    data: IntegralTable,
     width: usize,  // original image width
     height: usize, // original image height
     stride: usize, // = width + 1
 }
 
+/// True when every possible prefix sum of an 8-bit image of this size fits
+/// in a u32 table. Equalization cannot push pixels past 255, so the
+/// worst-case bound `W*H*255` is exact.
+#[inline]
+pub(crate) fn prefix_sums_fit_u32(w: usize, h: usize) -> bool {
+    (w as u128) * (h as u128) * 255 <= u32::MAX as u128
+}
+
 impl IntegralImage {
     /// Construct from a precomputed `(W+1) × (H+1)` u32 buffer (as returned by
     /// the GPU kernel). The buffer layout must be row-major with stride = W+1.
+    ///
+    /// The caller guarantees the table does not wrap u32 (the GPU detector
+    /// path checks [`prefix_sums_fit_u32`] before invoking the kernel).
     pub fn from_owned(data: Vec<u32>, width: usize, height: usize) -> Self {
         let stride = width + 1;
         Self {
-            data,
+            data: IntegralTable::Narrow(data),
             width,
             height,
             stride,
@@ -71,6 +111,31 @@ impl IntegralImage {
         let w = img.width();
         let h = img.height();
         let stride = w + 1;
+        if prefix_sums_fit_u32(w, h) {
+            let data = Self::build_narrow(img, w, h, stride);
+            Self {
+                data: IntegralTable::Narrow(data),
+                width: w,
+                height: h,
+                stride,
+            }
+        } else {
+            // 2026-09-18 /goal: images with W*H*255 > u32::MAX overflowed the
+            // u32 table and the inclusion–exclusion reads silently produced
+            // giant underflowed "sums", corrupting every Haar score with no
+            // error. Build a u64 table on this rare path instead.
+            let data = Self::build_wide(img, w, h, stride);
+            Self {
+                data: IntegralTable::Wide(data),
+                width: w,
+                height: h,
+                stride,
+            }
+        }
+    }
+
+    /// Pooled u32 fused single-pass build (the common, fast path).
+    fn build_narrow(img: &GrayImage, w: usize, h: usize, stride: usize) -> Vec<u32> {
         let mut data = crate::pool::acquire_integral(w, h);
         debug_assert_eq!(data.len(), stride * (h + 1));
         for v in data.iter_mut().take(stride) {
@@ -89,20 +154,48 @@ impl IntegralImage {
             }
             add_assign_u32_dispatch(cur, prev);
         }
-        Self {
-            data,
-            width: w,
-            height: h,
-            stride,
+        data
+    }
+
+    /// Non-pooled u64 fused single-pass build for overflow-sized images.
+    /// Same formulation as [`Self::build_narrow`]; overflow is impossible
+    /// (u64 holds prefix sums up to ~72 Gp), so adds are plain `+=`.
+    fn build_wide(img: &GrayImage, w: usize, h: usize, stride: usize) -> Vec<u64> {
+        let mut data = vec![0u64; stride * (h + 1)];
+        for y in 0..h {
+            // Mirror the narrow split so both builds stay structurally equal.
+            let (head, tail) = data.split_at_mut((y + 1) * stride);
+            let prev = &head[y * stride..];
+            let cur = &mut tail[..stride];
+            cur[0] = 0;
+            let mut acc: u64 = 0;
+            let body = &mut cur[1..];
+            for (s, d) in img.row(y).iter().zip(body.iter_mut()) {
+                acc += *s as u64;
+                *d = acc;
+            }
+            add_assign_u64_dispatch(cur, prev);
         }
+        data
     }
 
     /// Extract the raw `(W+1) × (H+1)` backing buffer **without** returning
     /// it to the thread-local pool (the normal `Drop` recycles it). The
     /// returned Vec is exactly the table as built.
+    ///
+    /// # Panics
+    ///
+    /// Only for an image too large for a u32 table (the wide u64 path);
+    /// callers are GPU/CPU comparison helpers that only handle the narrow
+    /// case, and such images are never routed to the u32 GPU kernels.
     pub fn into_data(mut self) -> Vec<u32> {
-        // Steal the buffer so the pool-recycling Drop sees an empty Vec.
-        std::mem::take(&mut self.data)
+        // Steal the table so the pool-recycling Drop sees an empty one.
+        match std::mem::take(&mut self.data) {
+            IntegralTable::Narrow(v) => v,
+            IntegralTable::Wide(_) => {
+                panic!("into_data() called on a u64 (wide) integral image")
+            }
+        }
     }
 
     #[inline]
@@ -115,10 +208,38 @@ impl IntegralImage {
         self.height
     }
 
+    /// Whether this table uses the wide u64 storage (image too large for u32
+    /// prefix sums).
+    #[inline]
+    pub fn is_wide(&self) -> bool {
+        matches!(self.data, IntegralTable::Wide(_))
+    }
+
+    #[inline]
+    fn corner(&self, idx: usize) -> u64 {
+        match &self.data {
+            IntegralTable::Narrow(v) => v[idx] as u64,
+            IntegralTable::Wide(v) => v[idx],
+        }
+    }
+
+    /// [`Self::corner`] with no bounds checks; the caller guarantees `idx`
+    /// is in the table (same contract as [`Self::rect_sum_unchecked`]).
+    #[inline]
+    unsafe fn corner_unchecked(&self, idx: usize) -> u64 {
+        // SAFETY: caller guarantees idx is in bounds for both variants.
+        unsafe {
+            match &self.data {
+                IntegralTable::Narrow(v) => *v.get_unchecked(idx) as u64,
+                IntegralTable::Wide(v) => *v.get_unchecked(idx),
+            }
+        }
+    }
+
     /// Raw access to `(x, y)` accumulator (0 <= x <= W, 0 <= y <= H).
     #[inline]
-    pub fn at(&self, x: usize, y: usize) -> u32 {
-        self.data[y * self.stride + x]
+    pub fn at(&self, x: usize, y: usize) -> u64 {
+        self.corner(y * self.stride + x)
     }
 
     /// Sum of pixels in rectangle `[x1, x2) × [y1, y2)`.
@@ -154,10 +275,10 @@ impl IntegralImage {
         debug_assert!(x1 < x2 && x2 <= self.width && y1 < y2 && y2 <= self.height);
         // SAFETY: documented contract above; debug_assert pins it in test builds.
         unsafe {
-            let a = *self.data.get_unchecked(y1 * self.stride + x1) as u64;
-            let b = *self.data.get_unchecked(y1 * self.stride + x2) as u64;
-            let c = *self.data.get_unchecked(y2 * self.stride + x1) as u64;
-            let d = *self.data.get_unchecked(y2 * self.stride + x2) as u64;
+            let a = self.corner_unchecked(y1 * self.stride + x1);
+            let b = self.corner_unchecked(y1 * self.stride + x2);
+            let c = self.corner_unchecked(y2 * self.stride + x1);
+            let d = self.corner_unchecked(y2 * self.stride + x2);
             d + a - b - c
         }
     }
@@ -208,8 +329,11 @@ impl IntegralImage {
 impl Drop for IntegralImage {
     fn drop(&mut self) {
         // Recycle the backing buffer. `try_with` degrades gracefully if the
-        // thread-local pool is already torn down at thread exit.
-        crate::pool::release_integral(self.width, self.height, std::mem::take(&mut self.data));
+        // thread-local pool is already torn down at thread exit. The rare u64
+        // wide table is not pooled — its Vec frees normally.
+        if let IntegralTable::Narrow(buf) = std::mem::take(&mut self.data) {
+            crate::pool::release_integral(self.width, self.height, buf);
+        }
     }
 }
 
@@ -1040,7 +1164,10 @@ mod tests {
         ] {
             let img = lcg_image(w, h);
             let ii = IntegralImage::from_gray(&img);
-            assert_eq!(ii.data, naive_integral_data(&img), "mismatch at {w}x{h}");
+            let IntegralTable::Narrow(data) = &ii.data else {
+                panic!("small images must use the narrow u32 table");
+            };
+            assert_eq!(data, &naive_integral_data(&img), "mismatch at {w}x{h}");
             // Spot-check rectangle sums against direct summation.
             for &(x1, y1, x2, y2) in &[(0, 0, w, h), (1, 1, w - 1, h - 1), (0, 0, 1, 1)] {
                 let expect: u64 = (y1..y2)
@@ -1162,6 +1289,27 @@ mod tests {
     }
 
     #[test]
+    fn wide_integral_survives_u32_overflow_sized_image() {
+        // 4096*4113 = 16_846_848 pixels; an all-white sum is 4_295_946_240,
+        // which WRAPS a u32 prefix table (max 4_294_967_295). The detector
+        // must select the u64 wide path and every inclusion–exclusion read
+        // must still return the exact sum (regression for silently corrupted
+        // Haar scores on large bright images).
+        let (w, h) = (4096usize, 4113usize);
+        assert!(!prefix_sums_fit_u32(w, h));
+        assert!(prefix_sums_fit_u32(4096, 4096));
+        let mut img = GrayImage::new(w, h);
+        img.as_mut_slice().fill(255);
+        let ii = IntegralImage::from_gray(&img);
+        assert!(ii.is_wide(), "overflow-sized image must use u64 table");
+        assert_eq!(ii.at(w, h), (w as u64) * (h as u64) * 255);
+        // Full-window and interior rect sums must be exact.
+        assert_eq!(ii.rect_sum(0, 0, w, h), (w as u64) * (h as u64) * 255);
+        assert_eq!(ii.rect_sum(100, 200, 100 + 24, 200 + 24), 24 * 24 * 255);
+        assert_eq!(ii.rect_sum(w - 1, h - 1, w, h), 255);
+    }
+
+    #[test]
     fn rotated_empty_is_safe() {
         let ri = RotatedIntegralImage::empty();
         // Empty 0×0 table: every non-empty rect is clamped away to 0 before
@@ -1175,14 +1323,18 @@ mod tests {
     fn integral_buffers_recycle_through_pool() {
         crate::pool::clear();
         let img = lcg_image(20, 14);
+        let narrow_ptr = |ii: &IntegralImage| match &ii.data {
+            IntegralTable::Narrow(v) => v.as_ptr(),
+            IntegralTable::Wide(_) => panic!("20x14 must use the narrow table"),
+        };
         let p1 = {
             let ii = IntegralImage::from_gray(&img);
-            ii.data.as_ptr()
+            narrow_ptr(&ii)
         };
         let ii2 = IntegralImage::from_gray(&img);
         // After dropping the first image its buffer returns to the pool and
         // the next same-size build reuses it (same backing allocation).
-        assert_eq!(p1, ii2.data.as_ptr());
+        assert_eq!(p1, narrow_ptr(&ii2));
         // Same for the squared integral.
         let q1 = {
             let sq = SquaredIntegralImage::from_gray(&img);
@@ -1219,7 +1371,10 @@ mod tests {
             crate::pool::release_integral_u64(23, 7, v);
         }
         let ii = IntegralImage::from_gray(&img);
-        assert_eq!(ii.data, naive_integral_data(&img));
+        let IntegralTable::Narrow(ii_data) = &ii.data else {
+            panic!("23x7 must use the narrow table");
+        };
+        assert_eq!(ii_data, &naive_integral_data(&img));
         let sq = SquaredIntegralImage::from_gray(&img);
         let w_ = img.width();
         let h_ = img.height();
