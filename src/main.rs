@@ -471,7 +471,7 @@ fn main() {
             }
         },
         "luminance" => {
-            match run_algo_pipeline(&mut *src, &out, &cfg, |img: &GrayImage| {
+            match run_with_detector(&mut *src, &out, &cfg, |img: &GrayImage| {
                 LuminanceFaceDetector::new(LuminanceConfig::default()).detect(img)
             }) {
                 Ok(s) => s,
@@ -611,10 +611,7 @@ fn run_cnn_pipeline(
     weights_path: Option<&std::path::Path>,
 ) -> std::io::Result<rsface::pipeline::PipelineStats> {
     use rsface::cnn::{CnnConfig, CnnDetector, CnnWeights};
-    use rsface::output::PipelineSummary;
-    use rsface::pipeline::PipelineStats;
 
-    std::fs::create_dir_all(out_dir)?;
     let cfg_cnn = CnnConfig {
         window_w: 24,
         window_h: 24,
@@ -633,101 +630,35 @@ fn run_cnn_pipeline(
         None => CnnDetector::new(cfg_cnn),
     };
 
-    let start = std::time::Instant::now();
-    let mut records = Vec::<rsface::output::DetectionRecord>::new();
-    let mut frames_with_face: u64 = 0;
-    let mut total_detections: u64 = 0;
-
-    loop {
-        let frame_opt = src.next_frame()?;
-        let Some(frame) = frame_opt else {
-            break;
-        };
-        let w = frame.gray.width();
-        let h = frame.gray.height();
-        // Convert u8 grayscale → f32 in [0, 1] for the CNN.
+    // The CNN detector works on f32 [0,1] data and returns CnnDetection;
+    // adapt it to the GrayImage-in / Detection-out contract that the shared
+    // pipeline driver expects.
+    run_with_detector(src, out_dir, cfg, move |gray: &GrayImage| {
+        let w = gray.width();
+        let h = gray.height();
         let mut f32_img = vec![0.0f32; w * h];
-        for (i, &p) in frame.gray.as_slice().iter().enumerate() {
+        for (i, &p) in gray.as_slice().iter().enumerate() {
             f32_img[i] = p as f32 / 255.0;
         }
-        let dets = det.detect(&f32_img, w, h);
-        let n = dets.len() as u64;
-        if n > 0 {
-            frames_with_face += 1;
-        }
-        total_detections += n;
-
-        // Build RGB representation: prefer the source's RGB, fall back to
-        // gray-to-RGB replication (one byte per channel, same value).
-        let rgb = if let Some(arc) = &frame.rgb {
-            (**arc).clone()
-        } else {
-            let mut rgb = rsface::image::RgbImage::new(w, h);
-            for y in 0..h {
-                let row = rgb.row_mut(y);
-                let gray_row = frame.gray.row(y);
-                for (x, &v) in gray_row.iter().enumerate() {
-                    row[x * 3] = v;
-                    row[x * 3 + 1] = v;
-                    row[x * 3 + 2] = v;
-                }
-            }
-            rgb
-        };
-        let rec = rsface::output::DetectionRecord {
-            frame_index: frame.index,
-            timestamp_ms: frame.timestamp_ms,
-            image_file: String::new(),
-            width: w,
-            height: h,
-            detections: dets
-                .iter()
-                .map(|d| rsface::Detection {
-                    x: d.x,
-                    y: d.y,
-                    w: d.w,
-                    h: d.h,
-                    score: d.confidence,
-                })
-                .collect(),
-            detect_ms: 0.0,
-        };
-        let fname = rsface::output::write_annotated_png(out_dir, &rec, &rgb)?;
-        let mut rec = rec;
-        rec.image_file = fname;
-        if cfg.only_with_face && rec.detections.is_empty() {
-            // Don't accumulate empty frames in the manifest when --only-with-face
-            // is set (mirrors the Viola-Jones pipeline behaviour).
-        } else {
-            records.push(rec);
-        }
-    }
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-    let processed = records.len() as u64;
-    rsface::output::write_manifest(
-        &out_dir.join("manifest.json"),
-        &records,
-        &PipelineSummary {
-            frames_processed: processed,
-            frames_with_face,
-            total_detections,
-            elapsed_ms,
-            detect_ms_total: 0.0,
-        },
-    )?;
-    Ok(PipelineStats {
-        frames_processed: processed,
-        frames_with_face,
-        total_detections,
-        elapsed_ms,
-        detect_ms_avg: 0.0,
+        det.detect(&f32_img, w, h)
+            .into_iter()
+            .map(|d| rsface::Detection {
+                x: d.x,
+                y: d.y,
+                w: d.w,
+                h: d.h,
+                score: d.confidence,
+            })
+            .collect()
     })
 }
 
-/// Generic pipeline for closure-supplied detectors (currently the
-/// luminance heuristic). Handles frame I/O, RGB fallback, annotated PNG
-/// write, and manifest generation; output matches the haar/cnn paths.
-fn run_algo_pipeline<F>(
+/// Shared frame-sink driver used by every closure-supplied detector (CNN and
+/// luminance heuristic). Handles frame I/O, gray→RGB fallback, annotated-PNG
+/// write, optional `--only-with-face` manifest filtering, and the final
+/// JSON manifest emission. The output layout matches the native Viola-Jones
+/// `Pipeline::run` so downstream tooling sees one consistent shape.
+fn run_with_detector<F>(
     src: &mut dyn rsface::source::FrameSource,
     out_dir: &std::path::Path,
     cfg: &rsface::pipeline::PipelineConfig,
@@ -745,11 +676,7 @@ where
     let mut frames_with_face: u64 = 0;
     let mut total_detections: u64 = 0;
 
-    loop {
-        let frame_opt = src.next_frame()?;
-        let Some(frame) = frame_opt else {
-            break;
-        };
+    while let Some(frame) = src.next_frame()? {
         let w = frame.gray.width();
         let h = frame.gray.height();
         let dets = detect_fn(&frame.gray);
@@ -759,6 +686,7 @@ where
         }
         total_detections += n;
 
+        // Build RGB: prefer the source's RGB, fall back to gray replication.
         let rgb = if let Some(arc) = &frame.rgb {
             (**arc).clone()
         } else {
@@ -786,8 +714,9 @@ where
         let fname = rsface::output::write_annotated_png(out_dir, &rec, &rgb)?;
         let mut rec = rec;
         rec.image_file = fname;
-        if cfg.only_with_face && rec.detections.is_empty() {
-        } else {
+        // When --only-with-face is set, skip empty frames in the manifest
+        // (mirrors the Viola-Jones pipeline behaviour).
+        if !(cfg.only_with_face && rec.detections.is_empty()) {
             records.push(rec);
         }
     }
