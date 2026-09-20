@@ -18,7 +18,9 @@
 //! tensors' trailing dimensions (1 for scores, 4 for boxes, 10 for keypoints) and their
 //! lengths, which is self-describing and testable without a model file.
 
-use crate::detector::Detection;
+// 从 `crate::face` 引入而非 `crate::detector`:后者整个模块 gate 在
+// `detector-haar` 后,tract-backend 单独组合(无 haar)会编译失败。
+use crate::face::Detection;
 use crate::face::FaceDetection;
 use crate::face_detector::{ColorInput, FaceDetector, Maturity};
 use crate::image::{GrayImage, RgbImage};
