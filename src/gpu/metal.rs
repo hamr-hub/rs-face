@@ -43,7 +43,10 @@
 //!
 //! The MSL kernels are kept compiled and probed in this module for
 //! future expansion (e.g. when MPS provides a higher-throughput path
-//! for the per-window feature responses — see `// FIXME` below).
+//! for the per-window feature responses). Until then, the cascade
+//! acceptance / rejection step runs on the host-side Rust cascade
+//! using the GPU-computed integral images (see
+//! `MetalBackend::detect_windows_cpu` below).
 
 #[cfg(feature = "metal-backend")]
 mod imp {

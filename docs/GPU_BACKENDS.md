@@ -179,8 +179,7 @@ For Mac users who need GPU acceleration today, the path is:
    JIT-compiles the MSL port of the cascade kernels and runs the final
    cascade acceptance on the host, so GPU/CPU boxes stay bit-identical.
 2. Optionally expose MPS (`MPSImageIntegral`, `MPSImageThreshold`) for
-   faster prefiltering on devices with the Neural Engine (see the
-   `FIXME` in `src/gpu/metal.rs`).
+   faster prefiltering on devices with the Neural Engine.
 3. Default (feature-less) builds keep the graceful CPU-only fallback —
    with OpenCL gone and the vendor features off, `auto()` selects CPU.
 

@@ -39,10 +39,12 @@
 //! current detector). Trains with Adam + BCE-with-logits loss.
 //!
 //! Usage:
-//!   cargo run --release --bin cnn_train -- [epochs] [out_path] [seed]
+//! ```text
+//! cargo run --release --bin cnn_train -- <epochs> <out_path> <seed>
+//! ```
 //!
-//! Saves weights in `.cnn.bin` format that [`CnnDetector`] can load via
-//! `--cnn-weights`.
+//! Saves weights in `.cnn.bin` format that the [`rsface::cnn::CnnDetector`]
+//! can load via `--cnn-weights`.
 
 use rsface::cnn::{conv2d_into, fc_into, maxpool2_into, relu, CnnScratch, CnnWeights};
 use rsface::image::GrayImage;

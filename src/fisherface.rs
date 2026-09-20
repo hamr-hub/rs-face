@@ -17,7 +17,7 @@
 //!    singular in `d`-space (d ≫ n). The textbook reduction projects onto the leading
 //!    `n − C` principal directions of the total scatter first (the Gram-matrix trick
 //!    from [`crate::eigenface`], solved with the shared Jacobi routine in
-//!    [`crate::linalg`]). The projected within-class scatter is generically
+//!    `crate::linalg`). The projected within-class scatter is generically
 //!    non-singular.
 //! 3. In the PCA space the scatter matrices are built directly:
 //!    `S_W = Σ_k Σ_{i∈k} (z_i − μ_k)(z_i − μ_k)ᵀ`,

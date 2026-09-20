@@ -397,7 +397,7 @@ impl JobRegistry {
         self.jobs.lock().unwrap().remove(id).is_some()
     }
 
-    /// 批量删除(ids → Vec<bool> 表示每个 id 是否被删)。
+    /// 批量删除(ids → `Vec<bool>` 表示每个 id 是否被删)。
     pub fn remove_many(&self, ids: &[String]) -> Vec<bool> {
         let mut jobs = self.jobs.lock().unwrap();
         ids.iter().map(|id| jobs.remove(id).is_some()).collect()
@@ -1227,7 +1227,7 @@ pub enum DetectorKind {
 
 impl DetectorKind {
     /// 统一 `detect` 接口:Haar/Cnn/Luminance 各自调 core 的 detect,
-    /// Cnn 先把 GrayImage → f32 [0,1] 缓冲,其它直接用 GrayImage。
+    /// Cnn 先把 GrayImage → f32 \[0,1\] 缓冲,其它直接用 GrayImage。
     /// 3 个 detector 都返回 `Vec<Detection>`,run_job 不需要任何分支。
     pub fn detect(&self, gray: &GrayImage) -> Vec<Detection> {
         match self {

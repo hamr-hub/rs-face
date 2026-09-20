@@ -60,7 +60,8 @@ impl Default for IntegralTable {
 /// Index `(x, y)` (0 <= x <= W, 0 <= y <= H) lives at `y * stride + x`.
 ///
 /// Storage is u32 for images whose prefix sums cannot overflow and u64
-/// otherwise (see [`IntegralTable`]); all sum queries return `u64`.
+/// otherwise (see the internal `IntegralTable` enum); all sum queries
+/// return `u64`.
 #[derive(Clone)]
 pub struct IntegralImage {
     data: IntegralTable,
@@ -82,7 +83,7 @@ impl IntegralImage {
     /// the GPU kernel). The buffer layout must be row-major with stride = W+1.
     ///
     /// The caller guarantees the table does not wrap u32 (the GPU detector
-    /// path checks [`prefix_sums_fit_u32`] before invoking the kernel).
+    /// path checks `prefix_sums_fit_u32` before invoking the kernel).
     pub fn from_owned(data: Vec<u32>, width: usize, height: usize) -> Self {
         let stride = width + 1;
         Self {

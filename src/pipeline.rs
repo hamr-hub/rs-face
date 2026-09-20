@@ -279,6 +279,3 @@ fn sink_loop(
     }
     Ok(records)
 }
-
-#[allow(dead_code)]
-fn _ensure_grayimage_send(_: &GrayImage) {}
