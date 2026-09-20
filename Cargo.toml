@@ -185,6 +185,10 @@ name = "integral_image_tests"
 required-features = ["detector-haar"]
 
 [[test]]
+name = "algo_compat"
+required-features = ["detector-haar", "detector-luminance"]
+
+[[test]]
 name = "bench_detect"
 required-features = ["detector-haar"]
 
