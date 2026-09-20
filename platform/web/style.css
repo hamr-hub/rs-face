@@ -311,6 +311,30 @@ body {
 .sb-dot.cancelled { background: var(--danger); }
 @keyframes pulse { 50% { opacity: .35; } }
 
+/* 侧栏卡片底部进度条(SSE 驱动;running 时显示)
+   设计:非常细(2px),不抢占主信息行;running 用脉动动画,
+   done 满绿停,error/cancelled 红色停。 */
+.sb-prog {
+  position: relative;
+  height: 2px; margin-top: 4px;
+  background: var(--bg-4); border-radius: 1px;
+  overflow: hidden;
+}
+.sb-prog-fill {
+  height: 100%; width: 0;
+  background: var(--accent);
+  transition: width .25s ease;
+  border-radius: 1px;
+}
+.sb-prog[data-state="running"] .sb-prog-fill { animation: sb-prog-shimmer 1.6s linear infinite; }
+.sb-prog[data-state="done"] .sb-prog-fill { background: var(--success); animation: none; }
+.sb-prog[data-state="error"] .sb-prog-fill { background: var(--danger); animation: none; }
+@keyframes sb-prog-shimmer {
+  0%   { opacity: 1; }
+  50%  { opacity: 0.55; }
+  100% { opacity: 1; }
+}
+
 .sb-empty {
   padding: 32px 16px; text-align: center;
   color: var(--fg-dim); font-size: 12px;

@@ -610,6 +610,7 @@ const sidebar = (() => {
           <span class="sb-frames"></span><span>·</span>
           <span class="sb-faces"></span>
         </div>
+        <div class="sb-prog" data-state="idle" aria-hidden="true"><div class="sb-prog-fill"></div></div>
       </div>
       <button class="sb-pin-btn" type="button" tabindex="-1" aria-label="置顶/取消置顶" title="置顶/取消置顶">📌</button>`;
     el.querySelector('.sb-pin-btn').addEventListener('click', (e) => {
@@ -626,6 +627,7 @@ const sidebar = (() => {
     return [
       j.id, j.status, j.display_name || '',
       st.frames_processed || 0,
+      j.frame_count || 0,
       j.face_count || 0,
       state.selectedIds.has(j.id) ? 1 : 0,
       j.id === state.currentJobId ? 1 : 0,
@@ -684,6 +686,32 @@ const sidebar = (() => {
       pinBtn.title = pinned ? '取消置顶' : '置顶此任务';
       pinBtn.setAttribute('aria-label', pinned ? '取消置顶' : '置顶此任务');
       pinBtn.setAttribute('aria-pressed', pinned ? 'true' : 'false');
+    }
+    // 进度条:仅在 running / queued 时显示;done/error 折成 100% / 隐藏
+    const prog = el.querySelector('.sb-prog');
+    const progFill = prog && prog.querySelector('.sb-prog-fill');
+    if (prog && progFill) {
+      const total = j.frame_count || (st.frames_processed > 0 ? st.frames_processed : 0);
+      let pct = 0, state = 'idle';
+      if (j.status === 'running' || j.status === 'queued') {
+        if (total > 0) {
+          pct = Math.max(2, Math.min(99, Math.round((st.frames_processed / total) * 100)));
+        } else {
+          // 流任务 / 视频未拿到 total:走心跳估算(每帧约 1%)
+          pct = Math.min(95, 2 + (st.frames_processed || 0) % 95);
+        }
+        state = 'running';
+      } else if (j.status === 'done') {
+        pct = 100; state = 'done';
+      } else if (j.status === 'error' || j.status === 'cancelled') {
+        pct = 100; state = 'error';
+      }
+      if (prog.dataset.state !== state) {
+        prog.dataset.state = state;
+        prog.setAttribute('aria-hidden', state === 'idle' ? 'true' : 'false');
+      }
+      const want = pct + '%';
+      if (progFill.style.width !== want) progFill.style.width = want;
     }
   }
 
