@@ -39,6 +39,10 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: rsface-postgres
+    # 以 hyx (UID:GID = 1000:1000) 运行,跟 rustfs + server 对齐,
+    # 这样 bind mount 到 ../data/pg/pgdata/ 创建的文件也是 1000:1000,
+    # host hyx 可读 / 可备份,无需 root 介入。
+    user: "1000:1000"
     environment:
       POSTGRES_DB: rsface
       POSTGRES_USER: rsface
@@ -63,6 +67,12 @@ services:
       dockerfile: platform/Dockerfile
     image: rsface-server:latest
     container_name: rsface-server
+    # 以 hyx (UID:GID = 1000:1000) 运行 —— 跟 rustfs + postgres 对齐,
+    # 这样 bind mount 到 ../data/media/ 创建的对象宿主侧也是 1000:1000,
+    # host hyx 可读可删可备份;之前镜像内 UID 10001 落到 host "other"
+    # (data/media 是 775 / owner=1000) 会触发 Permission denied,导致
+    # 所有 original.jpg 走 inline fallback → 前端 404。
+    user: "1000:1000"
     # host 网络模式:server 直接绑 host 的 0.0.0.0:20080,绕开 docker iptables NAT。
     # 跟 rustfs / postgres 走 127.0.0.1:<host-mapped-port> 通信。
     network_mode: host

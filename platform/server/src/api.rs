@@ -1355,6 +1355,19 @@ async fn media(
         return (StatusCode::BAD_REQUEST, "bad key").into_response();
     }
 
+    // `inline://` 兜底:这种 key 表示数据 base64 嵌在 SSE 事件的 `inline`
+    // 字段里(见 jobs.rs 的 `put_with_inline_fallback`),前端必须通过 SSE
+    // 拿到 base64 然后拼 `data:` URL,而不是走 /media/。这里返回 410 + 明确
+    // 提示,避免前端误用 `/media/inline%3A%2F%2F...` 拿到空 404 后不知道
+    // 是配置问题还是数据问题。
+    if cleaned.starts_with("inline://") || key.starts_with("inline://") {
+        return (
+            StatusCode::GONE,
+            "inline:// keys must be fetched via SSE replay (look for `inline` field in frame events)",
+        )
+            .into_response();
+    }
+
     // Range 支持(视频拖动进度条):浏览器 / <video> 控件会发
     // `Range: bytes=N-M`。命中时回 206 + Content-Range;不支持/无头时
     // 维持旧版 200 全量行为。
