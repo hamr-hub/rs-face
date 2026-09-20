@@ -114,7 +114,9 @@ impl PlatformMetrics {
                 JobStatus::Error => err += 1,
                 JobStatus::Cancelled => cancelled += 1,
             }
-            let st = j.stats.lock().unwrap().clone();
+            // poison 容忍:跨所有 job 聚合,单个死 job 的锁中毒不应让
+            // /metrics 和 /api/metrics 永久 panic。
+            let st = j.stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
             total_frames += st.frames_processed;
             total_faces_frames += st.frames_with_face;
             total_dets += st.total_detections;
@@ -256,63 +258,10 @@ pub fn to_prometheus(m: &PlatformMetrics) -> String {
         m,
         &|m| m.total_detections as f64,
     );
-    push_g(
-        &mut out,
-        "rsface_gpu_levels_total",
-        "Cumulative pyramid levels dispatched to GPU",
-        m,
-        &|m| m.total_gpu_levels as f64,
-    );
-    push_g(
-        &mut out,
-        "rsface_cpu_levels_total",
-        "Cumulative pyramid levels dispatched to CPU",
-        m,
-        &|m| m.total_cpu_levels as f64,
-    );
-    push_g(&mut out, "rsface_gpu_skipped_levels_total", "Cumulative pyramid levels skipped (GPU available but image too small for GPU to be worthwhile)", m, &|m| m.total_gpu_skipped_levels as f64);
-    push_g(
-        &mut out,
-        "rsface_gpu_pct",
-        "Fraction of pyramid levels handled by GPU (0..100)",
-        m,
-        &|m| m.gpu_pct as f64,
-    );
-    push_g(
-        &mut out,
-        "rsface_live_fps_max",
-        "Max instantaneous fps across running jobs",
-        m,
-        &|m| m.live_fps_max as f64,
-    );
-    push_g(
-        &mut out,
-        "rsface_live_fps_avg",
-        "Mean instantaneous fps across running jobs",
-        m,
-        &|m| m.live_fps_avg as f64,
-    );
-    push_g(
-        &mut out,
-        "rsface_cascade_evals_total",
-        "Cumulative cascade window evaluations",
-        m,
-        &|m| m.total_cascade_evals as f64,
-    );
-    push_g(
-        &mut out,
-        "rsface_cascade_passes_total",
-        "Cumulative cascade windows passing min_score",
-        m,
-        &|m| m.total_cascade_passes as f64,
-    );
-    push_g(
-        &mut out,
-        "rsface_cascade_pass_rate",
-        "cascade_passes / cascade_evals",
-        m,
-        &|m| m.cascade_pass_rate as f64,
-    );
+    // 下列指标在 JSON 契约中保留(前端有降级展示),但尚未在 JobStats 上
+    // 建模、恒为 0,不向 Prometheus 输出空序列:gpu/cpu_levels、
+    // gpu_skipped、gpu_pct、live_fps、cascade_evals/passes/pass_rate。
+    // run_job 真正打点后再恢复对应 series。
     push_g(
         &mut out,
         "rsface_avg_job_ms",

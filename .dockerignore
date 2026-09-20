@@ -4,3 +4,12 @@ platform/target/
 .claude/
 docs/samples/
 *.log
+# 构建上下文排除:这些目录不进镜像(Dockerfile 只 COPY src/ platform/
+# Cargo.* cascade.rfcf),留着会把 GB 级数据发给 daemon。
+data/
+out/
+models/
+rsface-demo/
+web-dist/
+# 本地密钥不进构建上下文
+.env
