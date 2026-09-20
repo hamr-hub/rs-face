@@ -1182,8 +1182,28 @@ async fn start_stream(
         );
     }
     // 解析一遍确认 host 非空(挡掉 `rtsp:///garbage` 这类畸形输入)。
-    if !url.starts_with("test://") && url_authority_host(&url).is_none() {
-        return error_response(StatusCode::BAD_REQUEST, "url has no host");
+    if !url.starts_with("test://") {
+        if let Some(host) = url_authority_host(&url) {
+            // 安全 #1+#2:`::ffff:127.0.0.1` / `%31%32%37.0.0.1` 在
+            // `is_blocked_host` 之前先规范化;规范化后 reject 则 400。
+            match normalize_host_for_check(host) {
+                Some(norm) if is_blocked_host(norm.as_str()) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "url host is blocked (loopback/link-local/private/metadata)",
+                    );
+                }
+                None => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "url host contains forbidden characters",
+                    );
+                }
+                _ => {}
+            }
+        } else {
+            return error_response(StatusCode::BAD_REQUEST, "url has no host");
+        }
     }
     let display = url.clone();
     let job = match state.create(JobKind::Stream, display) {
@@ -2086,9 +2106,20 @@ async fn import_video_url(
     }
     // 简单的 SSRF 防御:不允许内网 loopback / link-local / private 地址。
     // 平台本身是 LAN 部署,所以这个限制相对宽松 — 仍挡掉 169.254 / IPv6 link-local / 0.0.0.0。
-    if let Some(host) = url.split("://").nth(1).and_then(|s| s.split('/').next()) {
-        if is_blocked_host(host) {
-            return error_response(StatusCode::FORBIDDEN, "url host is in a blocked range");
+    // 安全 #1+#2+#3:`::ffff:127.0.0.1` / `%31%32%37.0.0.1` / `user:pass@127.0.0.1`
+    // 先规范化再 `is_blocked_host`,挡得住 SSRF 绕过。
+    if let Some(host) = url_authority_host(&url) {
+        match normalize_host_for_check(host) {
+            Some(norm) if is_blocked_host(norm.as_str()) => {
+                return error_response(StatusCode::FORBIDDEN, "url host is in a blocked range");
+            }
+            None => {
+                return error_response(
+                    StatusCode::FORBIDDEN,
+                    "url host contains forbidden characters",
+                );
+            }
+            _ => {}
         }
     }
 
@@ -2202,6 +2233,48 @@ async fn import_urls(
 /// `host` 接受三种写法:
 /// 1) `[ipv6]:port` — 剥 `[]`,得到 ipv6 字面量
 /// 2) `host:port`   — 单冒号,取 `:` 之前
+
+/// 把 URL 里抽出的 host 规范化为 `is_blocked_host` 能直接判断的形式:
+/// 1. percent-decode (`%31%32%37.0.0.1` → `127.0.0.1`);
+/// 2. IPv4-mapped IPv6 (`[::ffff:127.0.0.1]` → `127.0.0.1`,再走 IPv4 规则);
+/// 3. 拒绝含非 ASCII 字符的 host(ffmpeg 会 IDN 解码,字符串规则看不到);
+/// 4. 含 `..`(截断路径 / DNS rebinding 候选)直接拒。
+///
+/// 安全 #1+#2:闭包见审查报告;`is_blocked_host` 收到的是规范化后的 host,
+/// `::ffff:127.0.0.1` / `%31%32%37.0.0.1` 不再绕开。
+fn normalize_host_for_check(host: &str) -> Option<String> {
+    if host.is_empty() || host.contains("..") {
+        return None;
+    }
+    if !host.is_ascii() {
+        return None;
+    }
+    let mut out = String::with_capacity(host.len());
+    let bytes = host.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push(((hi << 4) | lo) as u8 as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    if let Some(stripped) = out.strip_prefix('[') {
+        let inner = stripped.split(']').next().unwrap_or(stripped);
+        if let Some(mapped) = inner.strip_prefix("::ffff:") {
+            return Some(mapped.to_string());
+        }
+        return Some(format!("[{inner}]"));
+    }
+    Some(out)
+}
 /// 3) 裸 ipv6 字面量 (`::1` / `fe80::1`) — 多于一个冒号即视为 ipv6
 fn is_blocked_host(host: &str) -> bool {
     let h = if let Some(stripped) = host.strip_prefix('[') {

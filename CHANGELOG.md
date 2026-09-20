@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — docs honesty & rustdoc gate
+- **`cargo doc` is now warning-free for both crates and enforced in CI**:
+  crate-level docs linked feature-gated ONNX modules (`scrfd`, `arcface`,
+  `onnx`, `align`, `models`) with intra-doc links that break on the default
+  build — they are now plain code references; the stale “`std` feature” claim
+  in `src/lib.rs` was corrected (the crate is `std`-only; threading lives
+  behind the `pipeline`/`source` cargo features). Two private-item links in
+  `haar/cascade.rs` and four Chinese-doc angle-bracket cases in the platform
+  crate (`jobs.rs`, `cache.rs`, `metrics.rs`) were fixed the same way. CI and
+  `tools/pre-push.sh` now run
+  `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items`
+  for both the core and platform crates.
+- **Stale GPU/vendor docs refreshed**: `docs/CPU_VS_GPU_REPORT.md` no longer
+  lists the deleted `rocm.rs` / `ascend.rs` / `mlu.rs` stubs; CUDA is
+  documented as the real `cuda-backend` implementation, and DirectML points
+  at the `ort-directml` execution provider. `docs/INDEX.md` says “three
+  zero-dep detectors” instead of the long-gone “six detectors”.
+
 ### Fixed — correctness audit (Haar / video tracking / PNG)
 - **Pyramid `min_size` no longer returns zero detections when the minimum is
   above the 24 px base window.** Footprints grow as the image shrinks, so
