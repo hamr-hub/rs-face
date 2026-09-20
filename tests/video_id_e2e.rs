@@ -11,8 +11,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rsface::detector::Detection;
 use rsface::embedding::Embedding;
+use rsface::face::Detection;
 use rsface::image::{GrayImage, RgbImage};
 use rsface::source::{Frame, FrameSource};
 use rsface::video_id::{identify_video, Identify, VideoIdConfig};

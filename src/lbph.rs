@@ -622,6 +622,41 @@ fn is_uniform(code: u8) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Uniform trait dispatch — the impl lives next to the algorithm so the
+// recognizer trait module does not pull LBPH into every feature selection.
+// ---------------------------------------------------------------------------
+
+impl crate::recognizer::FaceRecognizer for LbphRecognizer {
+    fn name(&self) -> &'static str {
+        "lbph"
+    }
+    fn identify_crop(&self, crop: &GrayImage) -> crate::recognizer::Recognition {
+        self.identify_crop(crop)
+    }
+    fn rank_crop(&self, crop: &GrayImage) -> Vec<(String, f32)> {
+        self.rank_crop(crop)
+    }
+    fn verify(&self, label: &str, crop: &GrayImage) -> Option<f32> {
+        self.verify(label, crop)
+    }
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn crop_count(&self) -> usize {
+        self.crop_count()
+    }
+}
+
+impl crate::recognizer::IncrementalRecognizer for LbphRecognizer {
+    fn enroll(&mut self, label: String, crop: &GrayImage) {
+        self.enroll(label, crop);
+    }
+    fn remove(&mut self, label: &str) -> bool {
+        self.remove(label)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
