@@ -3,19 +3,24 @@
 //! Why a trait here
 //! ----------------
 //! The original GPU module talked directly to OpenCL via FFI. That worked
-//! on Apple Silicon (Metal-OpenCL), Intel iGPUs, AMD, and NVIDIA on
-//! Linux/Windows. To add first-class Metal (Apple Silicon, native
-//! throughput), CUDA, ROCm, and Chinese-domestic-GPU SDKs (Huawei Ascend
-//! CANN, Cambricon MLU) without duplicating the kernel code, the new
-//! design introduces a ``GpuBackend`` trait and one adapter per vendor.
+//! on Intel iGPUs, AMD, and NVIDIA on Linux/BSD. First-class Metal
+//! (Apple Silicon) and CUDA (NVIDIA) adapters sit behind the
+//! ``metal-backend`` / ``cuda-backend`` cargo features.
 //!
 //! Adding a new vendor
 //! -------------------
-//! 1. Implement ``GpuBackend`` on a new struct (see the CUDA stub for the
-//!    minimal skeleton).
-//! 2. Append the descriptor to ``BACKENDS`` below in the priority order
+//! 1. Implement ``GpuBackend`` on a new struct in ``src/gpu/<vendor>.rs``
+//!    (see the non-feature fallback in ``cuda.rs`` for the minimal
+//!    skeleton, and the feature-gated ``imp`` module for a full one).
+//! 2. Gate any third-party SDK binding behind a cargo feature.
+//! 3. Append the descriptor to ``BACKENDS`` below in the priority order
 //!    you want ``auto()`` to probe.
-//! 3. Optionally add a CLI alias in ``bin/rs_face_detect``.
+//! 4. Optionally add a CLI alias in ``bin/rs_face_detect``.
+//!
+//! Descriptors that can never probe successfully (no SDK binding at all) do
+//! NOT get a registry slot — earlier revisions shipped ROCm/Ascend/MLU
+//! stubs here; they were removed because an unselectable option is worse
+//! than a documented extension recipe (this module comment).
 //!
 //! The trait only exposes the primitives the detector actually needs:
 //!   * ``variance_prefilter`` — one work-item per (x, y) window; returns a
@@ -112,11 +117,8 @@ pub trait GpuBackend: Send + Sync {
 // Vendors live alongside this file at `src/gpu/<vendor>.rs`. Reference
 // them via their crate path so the linker picks them up regardless of
 // where this module is included.
-use crate::gpu::ascend;
 use crate::gpu::cuda;
 use crate::gpu::metal;
-use crate::gpu::mlu;
-use crate::gpu::rocm;
 
 /// Static descriptor for each backend. Lets the dispatcher probe without
 /// importing the implementation types directly.
@@ -130,12 +132,9 @@ pub trait BackendDescriptor: Sync {
 pub const BACKENDS: &[&dyn BackendDescriptor] = &[
     &metal::METAL,
     &cuda::CUDA,
-    &rocm::ROCM,
-    &ascend::ASCEND,
-    &mlu::MLU,
-    // OpenCL is the cross-platform fallback (Apple/Intel/AMD/NVIDIA ICD).
-    // Listed last so a vendor-specific Metal/CUDA backend is preferred when
-    // both are present.
+    // OpenCL is the cross-platform fallback (Intel/AMD/NVIDIA ICD on
+    // Linux/BSD). Listed last so the vendor-specific Metal/CUDA backend is
+    // preferred when both are present.
     &OPENCL_DESCRIPTOR,
 ];
 
@@ -266,28 +265,14 @@ mod tests {
         assert!(get("definitely-not-a-real-backend").is_none());
     }
 
-    /// The dispatcher's BACKENDS list always registers every vendor
-    /// descriptor, even when the host has no SDK installed. Probe is
-    /// expected to filter them down at runtime.
+    /// The dispatcher registers exactly the backends that have an
+    /// implementation in the crate: Metal + CUDA descriptors (their probe
+    /// filters them out at runtime when the matching cargo feature is off)
+    /// and the always-available OpenCL fallback.
     #[test]
     fn backends_list_contains_expected_ids() {
         let ids: Vec<&'static str> = BACKENDS.iter().map(|d| d.id()).collect();
-        // The cross-platform fallback must always be present.
-        assert!(
-            ids.contains(&"opencl"),
-            "BACKENDS missing opencl: {:?}",
-            ids
-        );
-        // Every vendor stub exposes an id; we don't require them to probe
-        // successfully on this host, just to be registered.
-        for expected in ["metal", "cuda", "rocm", "ascend", "mlu"].iter() {
-            assert!(
-                ids.contains(expected),
-                "BACKENDS missing {}: {:?}",
-                expected,
-                ids
-            );
-        }
+        assert_eq!(ids, vec!["metal", "cuda", "opencl"]);
     }
 
     /// Each BACKENDS entry has a non-empty vendor label — `print_help` and
@@ -323,16 +308,21 @@ mod tests {
         let _ = auto(); // No assertion on the result; just must not panic.
     }
 
-    /// `metal-backend` is an opt-in Cargo feature. On the default build
-    /// (the one `cargo test --lib` runs), Metal is registered in BACKENDS
-    /// but its probe returns None. Verify that contract.
+    /// `metal-backend` / `cuda-backend` are opt-in Cargo features. On the
+    /// default build (the one `cargo test --lib` runs) both descriptors are
+    /// registered but their probe returns None. Verify that contract.
     #[test]
-    fn get_metal_returns_none_when_feature_off() {
+    fn vendor_lookup_returns_none_when_feature_off() {
         if !cfg!(feature = "metal-backend") {
-            // Default build: no Metal SDK at runtime, no probe success.
             assert!(
                 get("metal").is_none(),
                 "get(\"metal\") should be None without --features metal-backend",
+            );
+        }
+        if !cfg!(feature = "cuda-backend") {
+            assert!(
+                get("cuda").is_none(),
+                "get(\"cuda\") should be None without --features cuda-backend",
             );
         }
     }
@@ -350,35 +340,31 @@ mod tests {
         let _ = get("opencl");
     }
 
-    /// Every stub vendor (CUDA/ROCm/Ascend/MLU) has a stable id. If any of
-    /// these change the CLI aliases break, so guard the contract.
+    /// The vendor descriptors have stable ids — if either changes the CLI
+    /// aliases break, so guard the contract.
     #[test]
-    fn stub_vendor_ids_are_stable() {
+    fn vendor_ids_are_stable() {
+        assert_eq!(metal::METAL.id(), "metal");
         assert_eq!(cuda::CUDA.id(), "cuda");
-        assert_eq!(rocm::ROCM.id(), "rocm");
-        assert_eq!(ascend::ASCEND.id(), "ascend");
-        assert_eq!(mlu::MLU.id(), "mlu");
     }
 
-    /// The CUDA/ROCm/Ascend/MLU descriptors are stubs that always probe
-    /// as unavailable (`probe() -> None`). Verify that contract — they're
-    /// kept in the registry so the dispatcher can enumerate them, even
-    /// though none has an SDK checked in.
+    /// Without the matching cargo feature the vendor descriptors always
+    /// probe as unavailable, so `auto()` falls through to OpenCL instead
+    /// of pretending an absent SDK exists.
     #[test]
-    fn stub_vendors_probe_returns_none() {
-        assert!(
-            cuda::CUDA.probe().is_none(),
-            "CUDA stub should probe as None"
-        );
-        assert!(
-            rocm::ROCM.probe().is_none(),
-            "ROCm stub should probe as None"
-        );
-        assert!(
-            ascend::ASCEND.probe().is_none(),
-            "Ascend stub should probe as None"
-        );
-        assert!(mlu::MLU.probe().is_none(), "MLU stub should probe as None");
+    fn vendor_probe_returns_none_without_feature() {
+        if !cfg!(feature = "metal-backend") {
+            assert!(
+                metal::METAL.probe().is_none(),
+                "Metal should probe as None without --features metal-backend"
+            );
+        }
+        if !cfg!(feature = "cuda-backend") {
+            assert!(
+                cuda::CUDA.probe().is_none(),
+                "CUDA should probe as None without --features cuda-backend"
+            );
+        }
     }
 
     /// OpenClDescriptor is the cross-platform fallback. Its id is the
@@ -463,6 +449,7 @@ mod tests {
             max_size: 1024,
             scale_factor: 1.2,
             window_stride: 4,
+            min_neighbors: 3,
             nms_iou_threshold: 0.3,
             min_score: 0.0,
             variance_threshold: u64::MAX, // disable pre-filter for uniform image

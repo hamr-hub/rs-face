@@ -101,6 +101,11 @@ impl ScrfdConfig {
 /// **bottom and right only**, leaving the image origin at `(0, 0)`. That is why this
 /// struct carries a scale but no offset: recovering original coordinates is a single
 /// division, with no translation term to get backwards.
+///
+/// One reference quirk is reproduced on purpose: InsightFace's `scrfd.py` computes
+/// `det_scale = new_height / img_h` and divides **both** x and y coordinates by it,
+/// even when the width was the side pinned to the input. See
+/// [`Letterbox::compute`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Letterbox {
     /// Uniform factor applied to the original image to fit the input square.
@@ -115,6 +120,11 @@ pub struct Letterbox {
 
 impl Letterbox {
     /// Compute the mapping for an image of `w` x `h` into an `input_size` square.
+    ///
+    /// Mirrors `SCRFD.detect` in InsightFace's `scrfd.py` step for step: the
+    /// long side is pinned to `input_size` exactly (never off by one from f32
+    /// rounding) and the short side is Python-`int()`-truncated. The back-map
+    /// factor is `new_height / h` regardless of which side was pinned.
     pub fn compute(w: usize, h: usize, input_size: usize) -> Self {
         if w == 0 || h == 0 {
             return Self {
@@ -124,13 +134,20 @@ impl Letterbox {
                 input_size,
             };
         }
-        // Fit the longer side; the shorter side is padded.
-        let scale = (input_size as f32 / w as f32).min(input_size as f32 / h as f32);
+        let im_ratio = h as f32 / w as f32;
+        let (new_w, new_h) = if im_ratio > 1.0 {
+            // Portrait: height pinned, width truncated.
+            let nw = ((input_size as f32 * w as f32) / h as f32) as usize;
+            (nw.max(1).min(input_size), input_size)
+        } else {
+            // Landscape/square: width pinned, height truncated.
+            let nh = ((input_size as f32 * h as f32) / w as f32) as usize;
+            (input_size, nh.max(1).min(input_size))
+        };
         Self {
-            scale,
-            // Truncate, matching cv2.resize on an int target computed the same way.
-            resized_w: (w as f32 * scale) as usize,
-            resized_h: (h as f32 * scale) as usize,
+            scale: new_h as f32 / h as f32,
+            resized_w: new_w,
+            resized_h: new_h,
             input_size,
         }
     }
@@ -147,11 +164,18 @@ impl Letterbox {
 
 /// Build the SCRFD input tensor: NCHW `f32`, RGB, `(x - 127.5) / 128`.
 ///
-/// Returns the flat tensor of length `3 * input_size * input_size` alongside the
-/// [`Letterbox`] needed to map detections back. Padded regions are filled with the
-/// normalised value of pixel 0 (i.e. `-127.5/128`), matching a zero-padded uint8 buffer
-/// as the reference implementation produces — padding with normalised *zero* instead
-/// would inject a grey border the model never saw during training.
+/// The resize is **bilinear with OpenCV's centre mapping**
+/// (`src = (dst + 0.5) * src_size/dst_size - 0.5`, edge pixels replicated),
+/// exactly what the reference's `cv2.resize(..., INTER_LINEAR)` produces;
+/// nearest-neighbour sampling measurably shifts small-face AP because a
+/// large share of SCRFD's workload is faces tens of pixels wide. (OpenCV's
+/// 8-bit fixed-point kernel can differ from this f32 evaluation by one byte
+/// level at most.) Returns the flat tensor of length
+/// `3 * input_size * input_size` alongside the [`Letterbox`] needed to map
+/// detections back. Padded regions are filled with the normalised value of
+/// pixel 0 (i.e. `-127.5/128`), matching a zero-padded uint8 buffer as the
+/// reference implementation produces — padding with normalised *zero*
+/// instead would inject a grey border the model never saw during training.
 pub fn preprocess(img: &RgbImage, input_size: usize) -> (Vec<f32>, Letterbox) {
     let lb = Letterbox::compute(img.width(), img.height(), input_size);
     let plane = input_size * input_size;
@@ -159,26 +183,43 @@ pub fn preprocess(img: &RgbImage, input_size: usize) -> (Vec<f32>, Letterbox) {
     let pad = (0.0 - INPUT_MEAN) / INPUT_STD;
     let mut out = vec![pad; 3 * plane];
 
-    if lb.resized_w == 0 || lb.resized_h == 0 {
+    let dw = lb.resized_w.min(input_size);
+    let dh = lb.resized_h.min(input_size);
+    if dw == 0 || dh == 0 {
         return (out, lb);
     }
 
     let (sw, sh) = (img.width(), img.height());
     let src = img.as_slice();
 
-    for y in 0..lb.resized_h.min(input_size) {
-        // Nearest-neighbour sampling of the source row/column. SCRFD is robust to the
-        // interpolation kernel at this stage; bilinear costs ~3x for no measurable AP.
-        let sy = ((y as f32 + 0.5) / lb.scale) as usize;
-        let sy = sy.min(sh - 1);
-        for x in 0..lb.resized_w.min(input_size) {
-            let sx = ((x as f32 + 0.5) / lb.scale) as usize;
-            let sx = sx.min(sw - 1);
-            let si = (sy * sw + sx) * 3;
+    // Precompute the two clamped source taps and the blend weight per
+    // destination row/column under OpenCV's centre mapping.
+    let axis_taps = |dst: usize, ssize: usize, dsize: usize| -> (usize, usize, f32) {
+        let f = (dst as f32 + 0.5) * (ssize as f32 / dsize as f32) - 0.5;
+        let f0 = f.floor();
+        let last = ssize as isize - 1;
+        let t0 = (f0 as isize).clamp(0, last) as usize;
+        let t1 = (f0 as isize + 1).clamp(0, last) as usize;
+        (t0, t1, f - f0)
+    };
+    let cols: Vec<(usize, usize, f32)> = (0..dw).map(|x| axis_taps(x, sw, dw)).collect();
+    let rows: Vec<(usize, usize, f32)> = (0..dh).map(|y| axis_taps(y, sh, dh)).collect();
+
+    for (y, &(y0, y1, wy)) in rows.iter().enumerate() {
+        for (x, &(x0, x1, wx)) in cols.iter().enumerate() {
+            let i00 = (y0 * sw + x0) * 3;
+            let i01 = (y0 * sw + x1) * 3;
+            let i10 = (y1 * sw + x0) * 3;
+            let i11 = (y1 * sw + x1) * 3;
             let di = y * input_size + x;
+            let (wx0, wy0) = (1.0 - wx, 1.0 - wy);
             // NCHW: channel-major planes, so R/G/B land a full plane apart.
             for c in 0..3 {
-                out[c * plane + di] = (src[si + c] as f32 - INPUT_MEAN) / INPUT_STD;
+                let p = src[i00 + c] as f32 * wx0 * wy0
+                    + src[i01 + c] as f32 * wx * wy0
+                    + src[i10 + c] as f32 * wx0 * wy
+                    + src[i11 + c] as f32 * wx * wy;
+                out[c * plane + di] = (p - INPUT_MEAN) / INPUT_STD;
             }
         }
     }
@@ -406,6 +447,23 @@ mod tests {
         let lb = Letterbox::compute(0, 0, 640);
         assert_eq!(lb.resized_w, 0);
         assert!(lb.scale.is_finite());
+    }
+
+    #[test]
+    fn letterbox_matches_insightface_reference_on_non_divisible_size() {
+        // Reference: landscape 1001x750 -> new_width pinned to 640,
+        // new_height = int(640 * 750 / 1001) = 479 (not 480), and
+        // det_scale = new_height / 750 for BOTH axes — including x.
+        let lb = Letterbox::compute(1001, 750, 640);
+        assert_eq!((lb.resized_w, lb.resized_h), (640, 479));
+        let expected_scale = 479.0_f32 / 750.0;
+        assert!((lb.scale - expected_scale).abs() < 1e-7, "{}", lb.scale);
+
+        // Portrait branch: long height pinned, width truncated.
+        let lb = Letterbox::compute(750, 1001, 640);
+        assert_eq!((lb.resized_w, lb.resized_h), (479, 640));
+        // det_scale is new_height / h = 640/1001 exactly here.
+        assert!((lb.scale - 640.0 / 1001.0).abs() < 1e-7);
     }
 
     // -- Anchor centres -----------------------------------------------------
@@ -647,6 +705,31 @@ mod tests {
         let (t, _) = preprocess(&img, 8);
         let pad = (0.0 - INPUT_MEAN) / INPUT_STD;
         assert!(t.iter().all(|v| (*v - pad).abs() < 1e-6));
+    }
+
+    #[test]
+    fn preprocess_bilinear_resamples_like_cv2_inter_linear() {
+        // 2x1 ramp (R=0, R=100) letterboxed into a 4x4 input -> live 4x2.
+        // cv2 INTER_LINEAR centre mapping yields [0, 25, 75, 100] along x;
+        // nearest-neighbour centre sampling would give [0, 0, 100, 100].
+        let mut img = RgbImage::new(2, 1);
+        img.as_mut_slice()[0] = 0; // pixel 0 R
+        img.as_mut_slice()[3] = 100; // pixel 1 R
+        let (t, lb) = preprocess(&img, 4);
+        assert_eq!((lb.resized_w, lb.resized_h), (4, 2));
+        let expected = [0.0_f32, 25.0, 75.0, 100.0];
+        for (x, &raw) in expected.iter().enumerate() {
+            let want = (raw - INPUT_MEAN) / INPUT_STD;
+            let got = t[x]; // R plane, first live row
+            assert!((got - want).abs() < 1e-4, "x={x} got {got} want {want}");
+            // Second live row resamples the same single source row.
+            assert!((t[4 + x] - want).abs() < 1e-4);
+        }
+        // Everything below the two live rows is normalised-byte-0 padding.
+        let pad = (0.0 - INPUT_MEAN) / INPUT_STD;
+        for x in 0..4 {
+            assert!((t[2 * 4 + x] - pad).abs() < 1e-6);
+        }
     }
 
     // -- Output probing -----------------------------------------------------

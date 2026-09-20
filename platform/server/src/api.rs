@@ -139,7 +139,7 @@ async fn prometheus_metrics(
 /// 报告当前检测器模式 + 权重/级联文件状态 + 可用算法列表。
 ///
 /// 模式选择规则(在 `jobs::build_detector` 中):
-/// - `RSFACE_ALGO` 环境变量显式选择(`haar` / `cnn` / `yunet` / `mtcnn` / `hog`)
+/// - `RSFACE_ALGO` 环境变量显式选择(`haar` / `cnn` / `luminance`)
 /// - 否则:`use_cnn=true` 或 `cnn_weights` 路径已设置 → `"cnn"`
 /// - 否则 → `"haar"`
 ///
@@ -273,8 +273,9 @@ async fn list_jobs(
     }))
 }
 
-/// `GET /api/jobs/stats`:按算法(haar/cnn/yunet/mtcnn/hog)聚合
-/// 成功/失败/取消/平均耗时/检出数。queued 未定算法的归入 `pending`。
+/// `GET /api/jobs/stats`:按算法(haar/cnn/luminance)聚合
+/// 成功/失败/取消/平均耗时/检出数。queued 未定算法的归入 `pending`;
+/// 历史数据中的已下线算法名(yunet/mtcnn/hog)按原始字符串原样分桶展示。
 async fn job_stats(State(state): State<Arc<JobRegistry>>) -> Json<serde_json::Value> {
     let samples = state.collect_agg_samples();
     let agg = crate::jobs::aggregate_algo_stats(&samples);
@@ -481,8 +482,8 @@ async fn retry_job(State(state): State<Arc<JobRegistry>>, Path(id): Path<String>
 
 #[derive(serde::Deserialize, Default)]
 struct CompareQuery {
-    /// Comma-separated algo list, e.g. `haar,cnn,yunet`. Optional —
-    /// if missing, runs all 5 available algos.
+    /// Comma-separated algo list, e.g. `haar,cnn,luminance`. Optional —
+    /// if missing, runs all 3 available algos.
     #[serde(default)]
     algos: Option<String>,
     /// Frame index for video/stream jobs (defaults to first frame with faces, or 0).
@@ -492,10 +493,10 @@ struct CompareQuery {
     frame: Option<u64>,
 }
 
-/// `POST /api/jobs/{id}/compare?algos=haar,cnn,yunet`
+/// `POST /api/jobs/{id}/compare?algos=haar,cnn,luminance`
 /// 对任务的第一张图(或指定 frame)同时跑多个算法,返回每个算法的
-/// detection 数、耗时、bounding boxes。前端用它来渲染 5 张并排小图
-/// 的"算法对比"视图。
+/// detection 数、耗时、bounding boxes。前端用它来渲染 3 张并排小图
+/// 的"算法对比"视图。未知 / 已下线算法名会被过滤,不参与构造。
 async fn compare_algos(
     State(state): State<Arc<JobRegistry>>,
     Path(id): Path<String>,
@@ -570,7 +571,7 @@ async fn compare_algos(
     };
 
     // 4) 对每个 algo 跑 detect(同步,因为 DetectorKind 不是 Send)。
-    //    因为 CnnDetector/Yunet 持有 !Sync scratch,不能在多线程间共享,
+    //    因为 CnnDetector 持有 !Sync scratch,不能在多线程间共享,
     //    所以串行跑,而不是 spawn_blocking.parallel。
     let mut results: Vec<serde_json::Value> = Vec::new();
     for algo in &valid {

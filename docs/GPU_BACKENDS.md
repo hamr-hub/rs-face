@@ -48,16 +48,27 @@ CPU vs GPU back to back.
 | backend id | vendor                          | status     | how to enable |
 |-------------|---------------------------------|------------|---------------|
 | `cpu`       | host CPU                        | ✅ works   | default       |
-| `opencl`    | OpenCL ICD (Metal-OpenCL on Mac) | ⚠️ broken on this Mac (`/System/Library/Frameworks/OpenCL.framework/OpenCL` is a dangling symlink; Apple stripped the dylib). Works on Linux/Windows hosts with the Khronos ICD loader. | `cargo build` (default) |
-| `metal`     | Apple Metal (native)             | 🚧 skeleton; MSL kernels drafted, dispatch blocked on `metal` crate API drift. | `cargo build --features metal-backend` |
-| `cuda`      | NVIDIA CUDA                      | stub       | see "Adding a vendor" below |
-| `rocm`      | AMD ROCm (HIP)                   | stub       | see below      |
-| `ascend`    | Huawei Ascend (CANN)             | stub       | see below      |
-| `mlu`       | Cambricon MLU (BANG C)           | stub       | see below      |
+| `metal`     | Apple Metal (native)             | ✅ real implementation; builds and tests clean on Apple Silicon. MSL kernels JIT-compiled at startup; cascade acceptance runs on the host cascade so GPU/CPU boxes are bit-identical. | `cargo build --features metal-backend` |
+| `cuda`      | NVIDIA CUDA (cudarc driver API + NVRTC JIT) | ✅ implemented behind a feature; kernels are a line-for-line port of the OpenCL ones, but it has **not yet been run on real NVIDIA silicon**. | `cargo build --features cuda-backend` (Linux/Windows + CUDA toolkit 12.x) |
+| `opencl`    | OpenCL ICD (Metal-OpenCL on Mac) | ✅ zero-dependency default via runtime `dlopen`; ⚠️ unavailable on this Mac (`/System/Library/Frameworks/OpenCL.framework/OpenCL` is a dangling symlink; Apple stripped the dylib). Works on Linux/BSD/Windows hosts with the Khronos ICD loader. | `cargo build` (default) |
 
-`auto()` (used by default in `rs-face-detect`) walks the list in the
-order above and returns the first backend whose `probe()` succeeds. On
-this Mac, the only one that returns `Some(_)` today is `cpu`.
+`auto()` (used by default in `rs-face-detect`) walks the registry in
+priority order — Metal, CUDA, then OpenCL — and returns the first
+backend whose `probe()` succeeds. With a default feature-less build on
+this Mac the only one that returns `Some(_)` is `cpu` (OpenCL has no
+loadable dylib and the vendor backends compile to `probe() == None`
+fallback descriptors); build with `--features metal-backend` and `metal`
+probes successfully.
+
+### Not shipped: ROCm / Ascend / MLU
+
+Earlier revisions shipped `rocm`, `ascend` and `mlu` registry entries that
+were `probe() -> None` placeholders with no SDK bindings. They were
+deleted: an unselectable option is worse than a documented extension
+point. To add any of these vendors (or SYCL / Vulkan / WebGPU), follow
+"Adding a new vendor" below. Note `tools/gpu_backends.py` is a different
+story — it drives ONNX Runtime execution providers and legitimately keeps
+ROCm / CANN (Ascend) / Cambricon entries.
 
 ---
 
@@ -76,9 +87,6 @@ pub trait BackendDescriptor: Sync {
 pub const BACKENDS: &[&dyn BackendDescriptor] = &[
     &metal::METAL,
     &cuda::CUDA,
-    &rocm::ROCM,
-    &ascend::ASCEND,
-    &mlu::MLU,
     &super::OPENCL_DESCRIPTOR, // cross-platform fallback
 ];
 ```
@@ -123,10 +131,18 @@ To add a new vendor (e.g. `sycl`, `webgpu`, `vulkan-native`):
    }
    ```
 
-2. Add `pub mod my_vendor;` to `src/gpu/mod.rs` and append
-   `&my_vendor::MY_VENDOR,` to `BACKENDS`.
+2. Gate any third-party SDK binding behind a cargo feature (see
+   `metal-backend` / `cuda-backend` in `Cargo.toml`): the feature-gated
+   `imp` module holds the real implementation, and a non-feature fallback
+   compiles a descriptor whose `probe()` returns `None`, exactly like
+   `src/gpu/cuda.rs` is structured.
+3. Add `pub mod my_vendor;` to `src/gpu/mod.rs` and append
+   `&my_vendor::MY_VENDOR,` to `BACKENDS` in your chosen `auto()` probe
+   order. **A descriptor that can never probe successfully does not get a
+   registry slot** — do not reintroduce placeholder vendors; ship the
+   binding behind a feature or keep the vendor as a fork/branch.
 
-3. (Optional) Add a CLI alias in `src/bin/rs_face_detect.rs`.
+4. (Optional) Add a CLI alias in `src/bin/rs_face_detect.rs`.
 
 The kernel source for the cascade lives as a multi-line string in
 `src/gpu/mod.rs` (search for `CL_KERNEL_SRC`). Translating to MSL /
@@ -158,12 +174,15 @@ kernels, not a loadable dylib.
 
 For Mac users who need GPU acceleration today, the path is:
 
-1. Land the Metal backend (the MSL kernels are already drafted in
-   `src/gpu/metal.rs`; only the dispatch wrappers need pinning).
+1. Build with `--features metal-backend` and select `--backend metal` on
+   `rs_face_detect` — the native Metal backend in `src/gpu/metal.rs`
+   JIT-compiles the MSL port of the cascade kernels and runs the final
+   cascade acceptance on the host, so GPU/CPU boxes stay bit-identical.
 2. Optionally expose MPS (`MPSImageIntegral`, `MPSImageThreshold`) for
-   faster prefiltering on devices with the Neural Engine.
-3. Apple Silicon users without Metal will see graceful CPU-only
-   fallback; this is what currently happens.
+   faster prefiltering on devices with the Neural Engine (see the
+   `FIXME` in `src/gpu/metal.rs`).
+3. Default (feature-less) builds keep the graceful CPU-only fallback —
+   with OpenCL gone and the vendor features off, `auto()` selects CPU.
 
 ---
 
@@ -191,13 +210,15 @@ frame) and reports per-video parity in a table.
 
 ```
 src/gpu/
-├── mod.rs         # original OpenCL driver (zero-dep FFI) — preserved as-is
-├── backend.rs     # GpuBackend trait + dispatcher + OpenCL passthrough wrapper
-├── metal.rs       # Apple Metal (skeleton + MSL kernel source)
-├── cuda.rs        # NVIDIA CUDA stub
-├── rocm.rs        # AMD ROCm / HIP stub
-├── ascend.rs      # Huawei Ascend (CANN) stub
-└── mlu.rs         # Cambricon MLU (BANG C) stub
+├── mod.rs         # original OpenCL driver (zero-dep dlopen FFI; macOS stub)
+├── backend.rs     # GpuBackend trait + BACKENDS registry/dispatcher + OpenCL wrapper
+├── metal.rs       # Apple Metal — real impl behind `metal-backend`, None-probe fallback
+└── cuda.rs        # NVIDIA CUDA — real impl behind `cuda-backend` (unrun on silicon),
+                   #   None-probe fallback compiled in default builds
+#
+# ROCm / Ascend(CANN) / MLU(BANG C) are deliberately NOT in the tree: the old
+# probe()->None stubs were deleted. Add any of them via the "Adding a new
+# vendor" recipe (new file + cargo feature + BACKENDS slot).
 
 src/bin/
 └── rs_face_detect.rs   # video → JSONL (runs CPU + GPU backends, emits both box sets)

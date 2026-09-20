@@ -1,7 +1,7 @@
 //! Luminance-pattern + symmetry face detector.
 //!
 //! A genuinely different algorithm family from the rest of the crate (which is
-//! edge-AdaBoost / CNN / HoG-SVM / anchor-CNN / cascade-CNN). This one is
+//! edge-AdaBoost / small CNN / anchor-based ONNX detectors). This one is
 //! **classical pattern matching with no weights**: it exploits the intensity
 //! signature of upright frontal faces — forehead (bright) > eye-band (dark)
 //! > cheek (mid) > chin (mid) — plus mirror symmetry across the face
@@ -11,9 +11,10 @@
 //!
 //! ## Why this is useful
 //!
-//! 1. **No training / no downloaded weights.** The other families all need either
-//!    OpenCV's Haar XML (works), or trained CNN/HOG weights (currently placeholders
-//!    in this crate). This detector works out of the box on any grayscale image.
+//! 1. **No training / no downloaded weights.** Haar needs a cascade (the crate
+//!    bundles a demo one, or convert OpenCV XML), the CNN needs trained weights,
+//!    and the ONNX detectors need downloaded models. This one works out of the
+//!    box on any grayscale image.
 //! 2. **CPU-only, allocation-light, deterministic.** The pipeline is a
 //!    single pass over the integral image; no per-window scratch.
 //! 3. **Orthogonal to Haar.** Haar fires on edges and on contrasts between

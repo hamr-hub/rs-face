@@ -8,24 +8,24 @@ LBPH descriptors are gallery-independent, so every crop is described once and ev
 
 | variant | margin | best-threshold pair acc | EER threshold | LOO rank-1 |
 |---|--:|--:|--:|--:|
-| **raw LBP (6×6, 120 px)** | **10.392** | **96.5%** | 22.470 | **62/68 = 91.2%** |
-| equalised LBP (6×6, 120 px) | 10.297 | 96.5% | 22.242 | 62/68 = 91.2% |
+| raw LBP (6×6, 120 px) | 10.489 | 96.8% | 23.208 | 60/68 = 88.2% |
+| equalised LBP (6×6, 120 px) | 9.328 | 96.5% | 23.038 | 56/68 = 82.4% |
 
 ## Hyperparameter sweep (raw LBP)
 
 | variant | margin | best-threshold pair acc | EER threshold | LOO rank-1 |
 |---|--:|--:|--:|--:|
-| raw, 6×6 grid, 90 px | 11.079 | 96.4% | 26.767 | 61/68 = 89.7% |
-| raw, 6×6 grid, 120 px | 10.392 | 96.5% | 22.470 | 62/68 = 91.2% |
-| raw, 6×6 grid, 150 px | 10.782 | 96.5% | 21.743 | 61/68 = 89.7% |
-| raw, 8×8 grid, 90 px | 21.562 | 96.4% | 59.077 | 59/68 = 86.8% |
-| raw, 8×8 grid, 120 px | 20.333 | 96.5% | 49.624 | 59/68 = 86.8% |
-| raw, 8×8 grid, 150 px | 21.259 | 96.5% | 48.262 | 60/68 = 88.2% |
-| raw, 10×10 grid, 90 px | 35.054 | 96.3% | 106.273 | 59/68 = 86.8% |
-| raw, 10×10 grid, 120 px | 33.028 | 96.4% | 90.781 | 60/68 = 88.2% |
-| raw, 10×10 grid, 150 px | 35.007 | 96.4% | 88.543 | 59/68 = 86.8% |
+| raw, 6×6 grid, 90 px | 11.264 | 96.6% | 27.476 | 60/68 = 88.2% |
+| raw, 6×6 grid, 120 px | 10.489 | 96.8% | 23.208 | 60/68 = 88.2% |
+| raw, 6×6 grid, 150 px | 11.073 | 96.7% | 22.741 | 60/68 = 88.2% |
+| raw, 8×8 grid, 90 px | 21.624 | 96.5% | 59.081 | 59/68 = 86.8% |
+| raw, 8×8 grid, 120 px | 19.838 | 96.8% | 51.733 | 60/68 = 88.2% |
+| raw, 8×8 grid, 150 px | 21.272 | 96.7% | 49.982 | 60/68 = 88.2% |
+| raw, 10×10 grid, 90 px | 34.887 | 96.4% | 111.871 | 57/68 = 83.8% |
+| raw, 10×10 grid, 120 px | 32.957 | 96.6% | 94.738 | 59/68 = 86.8% |
+| **raw, 10×10 grid, 150 px** | **35.446** | **96.7%** | 91.758 | **60/68 = 88.2%** |
 
-Rank-1 winner: **raw LBP (6×6, 120 px)** — the shipped default configuration wins outright.
+Rank-1 winner: **raw, 10×10 grid, 150 px** — tied with the shipped **raw LBP (6×6, 120 px)** at 60/68 rank-1; the shipped grid is kept (margin differences of one probe or less are sampling noise on 68 probes).
 
 Shipped configuration detailed below: **raw LBP (6×6, 120 px)**.
 
@@ -33,22 +33,22 @@ Shipped configuration detailed below: **raw LBP (6×6, 120 px)**.
 
 | pair type | n | mean | p5 | p50 | p95 | min/max |
 |---|--:|--:|--:|--:|--:|--:|
-| same identity | 195 | 15.137 | 4.733 | 15.767 | 26.361 | max 37.737 |
-| different identity | 2731 | 25.529 | 20.501 | 25.333 | 31.509 | min 13.182 |
+| same identity | 195 | 15.921 | 4.846 | 17.308 | 29.221 | max 37.922 |
+| different identity | 2731 | 26.410 | 21.081 | 26.026 | 33.100 | min 17.499 |
 
-margin (different mean − same mean): **10.392**
+margin (different mean − same mean): **10.489**
 
 ## Operating points
 
 | point | threshold | pair accuracy | FAR | FRR |
 |---|--:|--:|--:|--:|
-| best pair accuracy | 16.679 | 96.5% | 0.22% | 48.72% |
-| EER | 22.470 | — | 19.99% | 20.00% |
-| crate default `DEFAULT_MAX_DISTANCE` | 16.7 | 96.5% | 0.26% | 48.72% |
+| best pair accuracy | 17.863 | 96.8% | 0.07% | 47.69% |
+| EER | 23.208 | — | 19.74% | 19.49% |
+| crate default `DEFAULT_MAX_DISTANCE` | 16.7 | 96.6% | 0.00% | 50.77% |
 
 ## Identification
 
-Leave-one-out rank-1 over repeated identities (each crop probed against every other crop of the same gallery): **62/68 = 91.2%**.
+Leave-one-out rank-1 over repeated identities (each crop probed against every other crop of the same gallery): **60/68 = 88.2%**.
 
 9 crop(s) belong to singleton identities with no same-identity gallery sample; rank-1 cannot succeed for those and they are reported separately rather than counted as errors.
 

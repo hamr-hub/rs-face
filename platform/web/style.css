@@ -985,10 +985,8 @@ body {
   border-color: var(--accent);
 }
 [data-theme="light"] .sb-algo-chip.active { color: #fff; }
-.sb-algo-chip[data-algo="cnn"].active    { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
-.sb-algo-chip[data-algo="yunet"].active  { background: var(--success); border-color: var(--success); color: #fff; }
-.sb-algo-chip[data-algo="mtcnn"].active  { background: var(--warn); border-color: var(--warn); color: #001520; }
-.sb-algo-chip[data-algo="hog"].active    { background: var(--danger); border-color: var(--danger); color: #fff; }
+.sb-algo-chip[data-algo="cnn"].active       { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
+.sb-algo-chip[data-algo="luminance"].active { background: var(--success); border-color: var(--success); color: #fff; }
 
 /* ============ 预览页 GPU/CPU dispatch 拆分 ============ */
 .pv-dispatch {
@@ -1011,10 +1009,8 @@ body {
   border: 1px solid var(--border);
   text-transform: uppercase;
 }
-.pv-dispatch-algo[data-algo="cnn"]    { color: var(--accent-2); border-color: var(--accent-2); }
-.pv-dispatch-algo[data-algo="yunet"]  { color: var(--success); border-color: var(--success); }
-.pv-dispatch-algo[data-algo="mtcnn"]  { color: var(--warn); border-color: var(--warn); }
-.pv-dispatch-algo[data-algo="hog"]    { color: var(--danger); border-color: var(--danger); }
+.pv-dispatch-algo[data-algo="cnn"]       { color: var(--accent-2); border-color: var(--accent-2); }
+.pv-dispatch-algo[data-algo="luminance"] { color: var(--success); border-color: var(--success); }
 .pv-dispatch-bar {
   display: flex; align: stretch;
   flex: 1; min-width: 160px;

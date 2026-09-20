@@ -486,6 +486,7 @@ mod imp {
                     max_size: 1024,
                     scale_factor: 1.2,
                     window_stride: 4,
+                    min_neighbors: 3,
                     nms_iou_threshold: 0.3,
                     min_score: 0.0,
                     variance_threshold: 200,

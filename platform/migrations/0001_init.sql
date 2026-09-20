@@ -13,8 +13,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     total_detections  BIGINT NOT NULL DEFAULT 0,
     original_key  TEXT,
     error         TEXT,
-    -- v2:检测算法名(haar/cnn/yunet/mtcnn/hog)。前端算法过滤 chip 用。
-    -- 用 IF NOT EXISTS 兼容老库(虽然 PG 9.6+ 才支持,生产库 PG 17 OK)。
+    -- v2:检测算法名。新任务只会写入 haar/cnn/luminance;历史行可能残留
+    -- yunet/mtcnn/hog,读取/聚合时原样保留,因此这里刻意不加 CHECK 约束。
+    -- 前端算法过滤 chip 用。用 IF NOT EXISTS 兼容老库(PG 9.6+ 支持,生产库 PG 17 OK)。
     algo          TEXT
 );
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS algo TEXT;

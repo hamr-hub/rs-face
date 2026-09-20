@@ -11,9 +11,9 @@
  *     The state is persisted to localStorage.
  *  2. When the toggle is on and a job enters preview, the module
  *     automatically calls
- *       POST /api/jobs/{id}/compare?algos=haar,cnn,yunet,mtcnn,hog
+ *       POST /api/jobs/{id}/compare?algos=haar,cnn,luminance
  *  3. The backend returns each algo's detection count + elapsed ms +
- *     boxes. The frontend re-uses the same source image 5 times,
+ *     boxes. The frontend re-uses the same source image 3 times,
  *     each in its own canvas, each algorithm's boxes drawn in its
  *     own colour, side by side.
  *  4. Toggling off removes the panel.
@@ -27,20 +27,16 @@
   'use strict';
 
   const STORAGE_KEY = 'rsface.compare.enabled';
-  const ALGOS = ['haar', 'cnn', 'yunet', 'mtcnn', 'hog'];
+  const ALGOS = ['haar', 'cnn', 'luminance'];
   const ALGO_COLORS = {
-    haar:  [0, 255, 96],
-    cnn:   [255, 170, 0],
-    yunet: [120, 200, 255],
-    mtcnn: [220, 120, 255],
-    hog:   [255, 80, 160],
+    haar:      [0, 255, 96],
+    cnn:       [255, 170, 0],
+    luminance: [80, 220, 220],
   };
   const ALGO_DESC = {
-    haar:  'Viola-Jones Haar cascade (2001)',
-    cnn:   'small CNN, 24x24 Conv+ReLU+FC',
-    yunet: 'YuNet-style anchor-based, 5 scales',
-    mtcnn: 'MTCNN 3-stage cascade (P/R/O-Net)',
-    hog:   'HOG 8x8 + Linear SVM, 64x128',
+    haar:      'Viola-Jones Haar cascade (2001)',
+    cnn:       'small CNN, 24x24 Conv+ReLU+FC',
+    luminance: 'Luminance bands + mirror symmetry + edge density (no weights)',
   };
 
   function isEnabled() {
@@ -67,7 +63,7 @@
       .rsfc-row .rsfc-hint { color: rgba(255,255,255,0.55); font-size: 12px; }
       .rsfc-info { flex-direction: column; align-items: flex-start; gap: 4px; }
       .rsfc-grid {
-        display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+        display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 8px; padding: 8px 0; width: 100%;
       }
       @media (max-width: 900px) { .rsfc-grid { grid-template-columns: repeat(2, 1fr); } }
@@ -117,10 +113,10 @@
       <label class="rsfc-row">
         <input type="checkbox" id="rsfc-cmp-toggle" ${isEnabled() ? 'checked' : ''}>
         <span class="rsfc-label">Algorithm compare mode</span>
-        <span class="rsfc-hint">5 algos in parallel (haar/cnn/yunet/mtcnn/hog)</span>
+        <span class="rsfc-hint">3 algos in parallel (haar/cnn/luminance)</span>
       </label>
       <div class="rsfc-row rsfc-info">
-        <span class="rsfc-hint">When on, image jobs render 5 mini canvases side by side; each canvas is a separate server-side detection run.</span>
+        <span class="rsfc-hint">When on, image jobs render 3 mini canvases side by side; each canvas is a separate server-side detection run.</span>
       </div>
     `;
     document.body.appendChild(menu);
@@ -173,7 +169,7 @@
     const panel = document.createElement('div');
     panel.id = 'rsfc-compare-panel';
     panel.className = 'rsfc-loading';
-    panel.textContent = 'Running 5 algos in parallel (haar/cnn/yunet/mtcnn/hog)...';
+    panel.textContent = 'Running 3 algos in parallel (haar/cnn/luminance)...';
     host.appendChild(panel);
     try {
       const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/compare?algos=${ALGOS.join(',')}`, {

@@ -1,15 +1,36 @@
 [package]
 name = "rs-face"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Zero-dep Viola-Jones face detector in pure Rust, multi-threaded pipeline."
+description = "Zero-dependency face detection & recognition in pure Rust: Viola-Jones Haar, LBPH/PCA/LDA recognisers, luminance/CNN detectors, optional ONNX (SCRFD/ArcFace) and GPU backends"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/hamr-hub/rs-face"
+homepage = "https://github.com/hamr-hub/rs-face"
+documentation = "https://docs.rs/rs-face/latest/rsface/"
+keywords = ["face-detection", "face-recognition", "haar-cascade", "lbph", "computer-vision"]
+categories = ["computer-vision", "multimedia::images"]
+# Keep the published crate small: the 458 MB models/ tree, the separate
+# platform/ cargo project and local run outputs never ship. (cargo already
+# honours .gitignore, but the package must stay small even if one of these
+# is ever tracked.)
+exclude = [
+    "models/",
+    "platform/",
+    "data",
+    "out/",
+    "rsface-demo/",
+    "assets/",
+    "target/",
+]
 # benches/accuracy.rs is registered explicitly as a [[bin]] below; auto-discovery would
 # also pick it up as a bench and emit a "multiple build targets" warning.
 autobenches = false
 # src/bin/prep_lbph_crops.rs needs ort-backend, so bins are listed explicitly below
 # with required-features instead of relying on auto-discovery.
 autobins = false
+# Plain `cargo run` launches the CLI, not a "which binary?" error.
+default-run = "rs-face"
 
 [lib]
 name = "rsface"
@@ -70,10 +91,10 @@ required-features = ["ort-backend"]
 # Video decoding falls back to a std-only path (HTTP image stream or
 # frame sequence) when no native decoder is compiled in.
 
-# GPU backends. Each is gated so the library still builds with zero deps
-# on hosts that only use the CPU cascade. The ``metal`` crate is enabled
-# on macOS / Apple Silicon by default because OpenCL.framework is being
-# phased out — Metal is the supported GPU path on current macOS.
+# GPU backends. Each is gated behind its own cargo feature so the default
+# build keeps zero deps on hosts that only use the CPU detectors. The
+# OpenCL driver is hand-rolled dlopen FFI in src/gpu/mod.rs and needs no
+# crate dependency; Metal/CUDA pull in the crates below.
 metal = { version = "0.33", optional = true }
 
 # Native CUDA backend (NVIDIA GPUs on Linux/Windows). Requires the CUDA
@@ -109,7 +130,6 @@ tract-onnx = { version = "0.23", optional = true }
 default = []
 metal-backend = ["dep:metal"]
 cuda-backend  = ["dep:cudarc"]
-opencv-backend = []  # placeholder for future opencv-rust binding
 
 # ONNX Runtime backend: fastest, GPU-capable, pulls in a C++ runtime.
 ort-backend = ["dep:ort"]

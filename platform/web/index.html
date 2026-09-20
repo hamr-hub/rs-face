@@ -67,9 +67,7 @@
     <button class="sb-algo-chip active" data-algo="" aria-pressed="true" title="全部算法">ALL</button>
     <button class="sb-algo-chip" data-algo="haar" aria-pressed="false" title="Viola-Jones Haar">HAAR</button>
     <button class="sb-algo-chip" data-algo="cnn" aria-pressed="false" title="24x24 CNN">CNN</button>
-    <button class="sb-algo-chip" data-algo="yunet" aria-pressed="false" title="YuNet 2023">YUNET</button>
-    <button class="sb-algo-chip" data-algo="mtcnn" aria-pressed="false" title="MTCNN 三段">MTCNN</button>
-    <button class="sb-algo-chip" data-algo="hog" aria-pressed="false" title="HOG+SVM">HOG</button>
+    <button class="sb-algo-chip" data-algo="luminance" aria-pressed="false" title="亮度 + 镜像对称启发式">LUMINANCE</button>
   </div>
   <div class="sb-scroll" id="sb-scroll" tabindex="0" role="listbox" aria-label="任务列表(可键盘导航)">
     <div class="sb-spacer" id="sb-spacer"></div>
@@ -276,7 +274,7 @@
         <option value="" selected>默认 (env / 配置)</option>
         <!-- options 由 app.js 根据 /api/config.available_algos 动态填充 -->
       </select>
-      <span class="hint">空=走默认;可选:haar / cnn / yunet / mtcnn / hog / luminance</span>
+      <span class="hint">空=走默认;可选:haar / cnn / luminance</span>
     </div>
   </div>
 </div>

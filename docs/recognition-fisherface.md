@@ -25,7 +25,8 @@ The hypothesis under test here was specific: eigenfaces hit a sweep-proven **58/
 rank-1 ceiling** on the hard gallery (see
 [`recognition-eigenface.md` §4.2](recognition-eigenface.md)). Can a class-aware linear
 projection break it? Measured answer: by one probe — 59/68. It does not catch LBPH
-(62/68), but it gives the **best pair-distance EER of the three** zero-dep
+(60/68 under its OpenCV-`elbp_`-exact sampler), but it gives the **best pair-distance
+EER of the three** zero-dep
 recognisers (§4.1), which makes it the strongest classical *verification* option.
 
 ## 2. Pipeline and math
@@ -134,7 +135,7 @@ probes rejected. For the close-set question use the threshold-free
 headline at **86.8 %**.
 
 Where Fisherfaces genuinely wins is the **equal-error trade-off**: EER ≈ 12.8 %
-against 14.0 % for eigenfaces and 22.5 % for LBPH on the same pairs. For a
+against 14.0 % for eigenfaces and 23.2 % for LBPH on the same pairs. For a
 verification deployment willing to retrain on its own gallery and re-calibrate near
 the EER, it is the best of the three zero-dep options.
 
@@ -177,7 +178,7 @@ Strict LOO with the shipped variant:
 
 | recogniser | descriptor | hard LOO rank-1 | hard pair EER | easy LOO rank-1 | enrolment |
 |---|--:|--:|--:|--:|---|
-| **LBPH** (6×6, 120 px) | 2 124 f32 | **62/68 = 91.2 %** | 22.5 % | 33/33 | incremental |
+| **LBPH** (6×6, 120 px) | 2 124 f32 | **60/68 = 88.2 %** | 23.2 % | 32/33 | incremental |
 | **Fisherfaces** (64 px) | ≤ 20 f32 | 59/68 = 86.8 % | **12.8 %** | 33/33 | retrain |
 | **Eigenfaces** (64 px, 98 %) | ≤ 255 f32 | 58/68 = 85.3 % | 14.0 % | 33/33 | retrain |
 

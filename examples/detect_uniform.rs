@@ -11,9 +11,9 @@
 //!   cargo run --release --example detect_uniform
 
 use rsface::face_detector::{FaceDetector, HaarDetector};
-use rsface::hog_face::{HogConfig, HogFaceDetector};
 use rsface::image::GrayImage;
 use rsface::lbph::{LbphConfig, LbphRecognizer};
+use rsface::luminance_face::{LuminanceConfig, LuminanceFaceDetector};
 
 fn make_synthetic_face() -> GrayImage {
     let mut img = GrayImage::new(120, 120);
@@ -39,25 +39,28 @@ fn main() {
 
     // Each detector implements FaceDetector; `name()` is the algorithm tag.
     // Haar needs a Cascade — we use the bundled demo.
-    let haar = HaarDetector::new(rsface::haar::params::demo_face_cascade(), Default::default());
-    // HOG ships its own scaffold config; the bundled weights are placeholder,
-    // so this one will report zero detections on any input — that is *expected*
-    // and is exactly what the Maturity::Scaffold label exists to communicate.
-    let hog = HogFaceDetector::new(HogConfig::default());
+    let haar = HaarDetector::new(
+        rsface::haar::params::demo_face_cascade(),
+        Default::default(),
+    );
+    // The weight-free classical heuristic (band pattern + mirror symmetry).
+    let luminance = LuminanceFaceDetector::new(LuminanceConfig::default());
 
     // To prove the trait dispatch really is uniform, store them in a heterogeneous
     // Vec<dyn FaceDetector>. In production code this is what the platform
     // layer does for "compare all algorithms on this frame".
     let detectors: Vec<(&'static str, Box<dyn FaceDetector>)> = vec![
         (haar.name(), Box::new(haar)),
-        (hog.name(), Box::new(hog)),
+        (luminance.name(), Box::new(luminance)),
     ];
 
     for (registered_name, det) in &detectors {
         let hits = det.detect(&img);
         println!(
             "[{:>6}]  detections={:>3}  description=\"{}\"",
-            registered_name, hits.len(), registered_name
+            registered_name,
+            hits.len(),
+            registered_name
         );
     }
 

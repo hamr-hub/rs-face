@@ -3,22 +3,23 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use rsface::detector::{Detector, DetectorConfig};
 use rsface::face_detector::FaceDetector;
+use rsface::haar::bundled::bundled_frontalface_cascade;
 use rsface::haar::Cascade;
-use rsface::hog_face::{HogConfig, HogFaceDetector};
 use rsface::image::GrayImage;
 use rsface::luminance_face::{LuminanceConfig, LuminanceFaceDetector};
-use rsface::mtcnn::{MtcnnConfig, MtcnnDetector};
 use rsface::pipeline::{Pipeline, PipelineConfig};
 use rsface::source;
-use rsface::yunet::{YunetConfig, YunetDetector};
 
 fn print_help() {
     println!(
         "rs-face — zero-dep multi-algorithm face detector\n\n\
          USAGE:\n  \
-         rs-face <INPUT> --out <DIR> --algo <haar|cnn|yunet|mtcnn|hog|luminance> [options]\n\n\
+         rs-face demo                         zero-arg install check on a built-in portrait\n  \
+         rs-face <INPUT> --out <DIR> --algo <haar|cnn|luminance> [options]\n\n\
          INPUT forms:\n  \
+           demo                built-in 256x256 portrait, no external files (default --out ./rsface-demo)\n  \
            test://N            synthetic test pattern (N frames)\n  \
            /path/to/dir        image sequence (PNG/PPM/JPG files)\n  \
            /path/file.png|jpg  single image\n  \
@@ -26,15 +27,15 @@ fn print_help() {
            *.mp4|*.mov|*.avi|*.mkv|*.webm | rtsp://...\n                           (requires `ffmpeg` on PATH)\n\n\
          ALGORITHMS:\n  \
            haar       Viola-Jones Haar cascade (default; core::Detector)\n  \
-           cnn        small CNN (24x24, Conv+ReLU+Pool+FC, core::CnnDetector)\n  \
-           yunet      YuNet-style anchor-based, 5 scales (core::YunetDetector)\n  \
-           mtcnn      MTCNN 3-stage cascade (P-Net -> R-Net -> O-Net)\n  \
-           hog        HOG + Linear SVM, 64x128 window, dense multi-scale\n  \
+           cnn        tiny 24x24 Conv+ReLU+Pool+FC net, trainable with cnn_train\n  \
            luminance  band-pattern + mirror symmetry (no weights, classical CV)\n\n\
          OPTIONS:\n  \
            --out <DIR>           output directory (required)\n  \
            --algo <NAME>         detection algorithm (default: haar)\n  \
-           --cascade <PATH>      load cascade from .rfcf file (haar only, default: built-in demo)\n  \
+           --cascade <PATH>      load cascade from .rfcf file (haar only,\n  \
+                                           default: bundled OpenCV frontalface cascade)\n  \
+           --min-neighbors N     OpenCV minNeighbors: merge threshold for raw hits (default: 3;\n  \
+                                           0 shows every raw window, matching cv::CascadeClassifier)\n  \
            --threads N           worker thread count (default: # CPUs)\n  \
            --min-size PX         minimum detection size in pixels (default: 24)\n  \
            --max-size PX         maximum detection size in pixels (default: 1024)\n  \
@@ -53,18 +54,20 @@ fn print_help() {
            --version             print the crate version and exit\n  \
            --help                print this help\n\n\
          RECIPES:\n  \
-           # Smoke test (no external input):\n  \
+           # Zero-arg install check — real cascade on a built-in portrait:\n  \
+           rs-face demo\n\n  \
+           # Smoke test on a synthetic pattern:\n  \
            rs-face test://60 --out ./out\n\n  \
-           # Real footage with the demo cascade:\n  \
+           # Real footage with the bundled cascade:\n  \
            rs-face video.mp4 --out ./out --threads 4\n\n  \
            # Real footage with a converted OpenCV Haar cascade:\n  \
            rs-face video.mp4 --out ./out --cascade haarcascade.rfcf\n\n  \
            # Heavy drama footage (variable face sizes):\n  \
            rs-face clip.mp4 --out ./out --scale 1.4 --stride 3 --only-with-face\n\n  \
-           # Try the zero-weight detector (band + symmetry):\n  \
+           # Try the weight-free classical heuristic (band + symmetry):\n  \
            rs-face video.mp4 --out ./out --algo luminance\n\n  \
-           # Industrial accuracy (requires `cargo build --features ort-backend`):\n  \
-           rs-face video.mp4 --out ./out --algo scrfd\n\n  \
+           # Industrial accuracy: SCRFD + ArcFace behind an ONNX feature —\n  \
+           # see the detect_scrfd_arcface example and `--list-features`.\n\n  \
            # See also: `cargo run --example` for SDK recipes; docs/INDEX.md for the full doc map.\n"
     );
 }
@@ -72,11 +75,11 @@ fn print_help() {
 fn print_algos() {
     println!(
         "rs-face algorithms (compiled-in):\n\n  \
-           name       maturity    description\n  \
-           ---------  ----------  ----------------------------------------"
+           name       maturity      description\n  \
+           ---------  ------------  ----------------------------------------"
     );
     // The list is the source of truth. Adding a new detector means adding a row here.
-    let rows: [(&str, &str, &str); 6] = [
+    let rows: [(&str, &str, &str); 3] = [
         (
             "haar",
             "Production",
@@ -84,47 +87,34 @@ fn print_algos() {
         ),
         (
             "cnn",
-            "Scaffold",
-            "24x24 Conv+ReLU+Pool+FC+Sigmoid CNN. Weights are a placeholder for smoke-testing; load real weights via --cnn-weights to get a real detector.",
-        ),
-        (
-            "yunet",
-            "Scaffold",
-            "YuNet-style anchor-based detector (5 scales, 15-d outputs). Correct shapes + NMS, placeholder weights — drop in real weights to enable.",
-        ),
-        (
-            "mtcnn",
-            "Scaffold",
-            "MTCNN 3-stage P-Net -> R-Net -> O-Net cascade. Correct shapes + NMS, placeholder weights.",
-        ),
-        (
-            "hog",
-            "Scaffold",
-            "HOG + linear SVM, 64x128 window, dense multi-scale. Correct shapes + NMS, placeholder weights.",
+            "Experimental",
+            "Tiny 24x24 Conv+ReLU+Pool+FC net with a zero-dep trainer (cnn_train). Starter weights for smoke-testing; train your own and load them via --cnn-weights.",
         ),
         (
             "luminance",
-            "Production",
+            "Experimental",
             "Band-pattern + mirror-symmetry detector. No weights at all, fully classical CV; strongest on frontal portraits.",
         ),
     ];
     for (name, mat, desc) in rows {
-        println!("  {:<9}  {:<10}  {}", name, mat, desc);
+        println!("  {:<9}  {:<12}  {}", name, mat, desc);
     }
     println!(
         "\nAlgorithm tags consumed by --algo and the RSFACE_ALGO env var.\n\
-         Production: measured accuracy in this crate (see docs/algorithms.md).\n\
-         Scaffold:   correct architecture, placeholder weights; will detect nothing.\n\
-         Compile-time gate: the ort-backend / tract-backend features add an\n\
-         additional scrfd + arcface path for industrial accuracy (see --list-features)."
+         Production:   measured accuracy in this crate (see docs/algorithms.md).\n\
+         Experimental: runs end-to-end; accuracy not independently measured here.\n\
+         Compile-time gate: the ort-backend / tract-backend features add a\n\
+         SCRFD detector + ArcFace recogniser used through the library API and\n\
+         examples (see --list-features)."
     );
 }
 
 fn print_features() {
     println!(
         "rs-face Cargo features compiled into this binary:\n\n  \
-           (default)      Zero runtime deps. Pure-Rust CPU classical CV — haar, cnn,\n  \
-                          yunet/mtcnn/hog scaffolds, lbph/eigenface recognition.\n\n  \
+           (default)      Zero runtime deps. Pure-Rust CPU classical CV — Haar cascade,\n  \
+                          luminance heuristic, tiny trainable CNN, and all three\n  \
+                          zero-dep recognisers (LBPH, eigenfaces, Fisherfaces).\n\n  \
            metal-backend  Metal GPU on macOS / Apple Silicon (OpenCL path is deprecated on\n  \
                           current macOS). Off by default.\n\n  \
            cuda-backend   CUDA on Linux / Windows via cudarc 0.12. Needs CUDA toolkit +\n  \
@@ -169,12 +159,18 @@ fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let (n, m) = (a.len(), b.len());
-    if n == 0 { return m; }
-    if m == 0 { return n; }
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
     let mut prev2 = vec![0usize; m + 1];
     let mut prev1 = vec![0usize; m + 1];
-    let mut curr  = vec![0usize; m + 1];
-    for j in 0..=m { prev1[j] = j; }
+    let mut curr = vec![0usize; m + 1];
+    for j in 0..=m {
+        prev1[j] = j;
+    }
     for i in 1..=n {
         curr[0] = i;
         for j in 1..=m {
@@ -205,6 +201,7 @@ fn main() {
     let mut scale: Option<f32> = None;
     let mut stride: Option<usize> = None;
     let mut nms: Option<f32> = None;
+    let mut min_neighbors: Option<i32> = None;
     let mut min_score: Option<f32> = None;
     let mut only_with_face = false;
     let mut no_gpu = false;
@@ -258,6 +255,9 @@ fn main() {
             "--nms" => {
                 nms = args.next().and_then(|s| s.parse().ok());
             }
+            "--min-neighbors" => {
+                min_neighbors = args.next().and_then(|s| s.parse().ok());
+            }
             "--min-score" => {
                 min_score = args.next().and_then(|s| s.parse().ok());
             }
@@ -297,10 +297,14 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if input == "demo" {
+        run_demo(out.as_deref());
+        return;
+    }
     let out = match out {
         Some(p) => p,
         None => {
-            eprintln!("--out <DIR> is required");
+            eprintln!("--out <DIR> is required (or run `rs-face demo`)");
             std::process::exit(2);
         }
     };
@@ -316,9 +320,7 @@ fn main() {
             }
         }
     };
-    let known: &[&str] = &[
-        "haar", "cnn", "yunet", "mtcnn", "hog", "luminance", "scrfd", "arcface",
-    ];
+    let known: &[&str] = &["haar", "cnn", "luminance"];
     if !known.contains(&algo_name.as_str()) {
         let suggestion = did_you_mean(&algo_name, known);
         match suggestion {
@@ -349,7 +351,7 @@ fn main() {
             }
         }
     } else {
-        rsface::haar::params::demo_face_cascade()
+        bundled_frontalface_cascade()
     };
     if let Some(b) = std::env::var("RS_FACE_CASCADE_BIAS")
         .ok()
@@ -434,6 +436,9 @@ fn main() {
     if let Some(v) = nms {
         cfg.detector.nms_iou_threshold = v;
     }
+    if let Some(v) = min_neighbors {
+        cfg.detector.min_neighbors = v;
+    }
     if let Some(v) = min_score {
         cfg.min_score = v;
     }
@@ -462,39 +467,6 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        "yunet" => {
-            match run_algo_pipeline(&mut *src, &out, &cfg, |img: &GrayImage| {
-                YunetDetector::new(YunetConfig::default()).detect(img)
-            }) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("yunet pipeline error: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-        "mtcnn" => {
-            match run_algo_pipeline(&mut *src, &out, &cfg, |img: &GrayImage| {
-                MtcnnDetector::new(MtcnnConfig::default()).detect(img)
-            }) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("mtcnn pipeline error: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-        "hog" => {
-            match run_algo_pipeline(&mut *src, &out, &cfg, |img: &GrayImage| {
-                HogFaceDetector::new(HogConfig::default()).detect(img)
-            }) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("hog pipeline error: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
         "luminance" => {
             match run_algo_pipeline(&mut *src, &out, &cfg, |img: &GrayImage| {
                 LuminanceFaceDetector::new(LuminanceConfig::default()).detect(img)
@@ -507,10 +479,7 @@ fn main() {
             }
         }
         other => {
-            eprintln!(
-                "unknown --algo: {} (use haar|cnn|yunet|mtcnn|hog|luminance)",
-                other
-            );
+            eprintln!("unknown --algo: {} (use haar|cnn|luminance)", other);
             std::process::exit(2);
         }
     };
@@ -526,6 +495,98 @@ fn main() {
         wall_ms as f32 / 1000.0, fps, stats.detect_ms_avg
     );
     println!("[rs-face] output: {}/", out.display());
+}
+
+/// Zero-argument install check: run the bundled OpenCV frontal-face cascade
+/// against a 256×256 grayscale portrait embedded in the binary. Prints the
+/// detections, writes an annotated PNG, and exits non-zero if no face was
+/// found so `rs-face demo` doubles as a post-install smoke test — no model
+/// download, no sample files, zero third-party runtime.
+fn run_demo(out_dir: Option<&std::path::Path>) {
+    let out_dir = out_dir.unwrap_or_else(|| std::path::Path::new("rsface-demo"));
+    let mut pgm: &[u8] = include_bytes!("../assets/demo_face_256.pgm");
+    let gray = match rsface::image::codec::read_pgm(&mut pgm) {
+        Ok(img) => img,
+        Err(e) => {
+            eprintln!("[demo] embedded portrait decode failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    let cascade = bundled_frontalface_cascade();
+    println!(
+        "[demo] bundled 256x256 portrait + bundled OpenCV frontalface cascade ({} stages, {} features)",
+        cascade.num_stages(),
+        cascade.num_features(),
+    );
+    // CPU deliberately: a smoke test must not dlopen/JIT a GPU stack.
+    let det = Detector::new(
+        cascade,
+        DetectorConfig {
+            use_gpu: false,
+            ..DetectorConfig::default()
+        },
+    );
+    let t0 = Instant::now();
+    let hits = det.detect(&gray);
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    println!("[demo] {} face(s) in {:.1} ms:", hits.len(), ms);
+    for h in &hits {
+        println!(
+            "       x={} y={} w={} h={} score={:.3}",
+            h.x, h.y, h.w, h.h, h.score
+        );
+    }
+    if hits.is_empty() {
+        eprintln!("[demo] FAIL: the bundled cascade found no face in the bundled portrait");
+        std::process::exit(1);
+    }
+
+    // Gray → RGB replication for the annotated writer.
+    let (w, h) = (gray.width(), gray.height());
+    let mut rgb = rsface::image::RgbImage::new(w, h);
+    for y in 0..h {
+        let row = rgb.row_mut(y);
+        for (x, &v) in gray.row(y).iter().enumerate() {
+            row[x * 3] = v;
+            row[x * 3 + 1] = v;
+            row[x * 3 + 2] = v;
+        }
+    }
+    let rec = rsface::output::DetectionRecord {
+        frame_index: 0,
+        timestamp_ms: 0,
+        image_file: String::new(),
+        width: w,
+        height: h,
+        detections: hits
+            .iter()
+            .map(|d| rsface::Detection {
+                x: d.x,
+                y: d.y,
+                w: d.w,
+                h: d.h,
+                score: d.score,
+            })
+            .collect(),
+        detect_ms: ms,
+    };
+    let fname = match std::fs::create_dir_all(out_dir)
+        .and_then(|_| rsface::output::write_annotated_png(out_dir, &rec, &rgb))
+    {
+        Ok(fname) => fname,
+        Err(e) => {
+            eprintln!(
+                "[demo] failed to write annotated PNG under {}: {e}",
+                out_dir.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "[demo] OK — annotated image written to {}/{}",
+        out_dir.display(),
+        fname
+    );
 }
 
 /// CNN-only pipeline: runs the modern CNN detector on each frame, bypassing
@@ -652,10 +713,9 @@ fn run_cnn_pipeline(
     })
 }
 
-/// Generic pipeline for the new algorithms (yunet, mtcnn, hog). The detector
-/// callable is supplied as a closure; the pipeline handles frame I/O, RGB
-/// fallback, annotated PNG write, and manifest generation. Output matches
-/// the haar/cnn paths (uses `rsface::Detection`).
+/// Generic pipeline for closure-supplied detectors (currently the
+/// luminance heuristic). Handles frame I/O, RGB fallback, annotated PNG
+/// write, and manifest generation; output matches the haar/cnn paths.
 fn run_algo_pipeline<F>(
     src: &mut dyn rsface::source::FrameSource,
     out_dir: &std::path::Path,
