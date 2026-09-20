@@ -283,16 +283,11 @@ impl IntegralImage {
         }
     }
 
-    /// Sum of pixels in a *tilted* (45°) rectangle used by Tilted Haar features.
-    /// The tilted rectangle covers the diamond between four corners:
-    ///   top    = (xmid, y1)
-    ///   left   = (x1, ymid)
-    ///   right  = (x2, ymid)
-    ///   bottom = (xmid, y2)
-    /// where `xmid = (x1 + x2) / 2`, `ymid = (y1 + y2) / 2`.
+    /// Sum of pixels in a *tilted* (45 degree rotated) rectangle used
+    /// by tilted Haar features, matching OpenCV's `CV_TILTED_OFS` lookup.
     ///
-    /// Delegates to [`RotatedIntegralImage::tilted_rect_sum`], which uses
-    /// Lienhart's closed-form formula on the rotated integral image.
+    /// Delegates to [`RotatedIntegralImage::tilted_rect_sum`]; see that
+    /// method for the cone semantics and the four corner points.
     #[inline]
     pub fn tilted_rect_sum(
         &self,
@@ -510,29 +505,29 @@ impl Drop for SquaredIntegralImage {
     }
 }
 
-/// Rotated (45°) integral image: stores the cumulative sum over a 45° wedge.
+/// Rotated (45°) integral image: the `rt0` table behind OpenCV's tilted
+/// Haar features.
 ///
-/// Definition (Lienhart & Maydt, 2002): for a grayscale image `I`,
-/// `R[x, y] = Σ I(i, j)` over all `(i, j)` with `i ≤ x`, `j ≤ y`, and
-/// `i - j ≤ x - y`. Equivalently, `R` is the regular summed-area table
-/// restricted to a 45° upper-half-plane anchored at the origin.
+/// Definition (Lienhart & Maydt, 2002; the `tilted` output of OpenCV's
+/// `integral()`): with 0-based pixel coordinates `(px, py)`, table cell
+/// `(X, Y)` (1-based) holds the sum over the downward-opening lattice cone
 ///
-/// # Closed-form single-pass construction
+///   `R(X, Y) = Σ I(px, py)`  where `(Y − 1 − py) ≥ |X − 1 − px|`.
 ///
-/// The historic implementation used two buffers (regular integral `S` plus
-/// the rotated `R`) and the recurrence
-///   `R(x,y) = R(x-1,y-1) + S(x,y) - S(x-1,y) - S(x,y-1) + S(x-1,y-1)`.
-/// The `S`-quadruple in that expression is the 2-D inclusion-exclusion of a
-/// single source pixel: `S(x,y) - S(x-1,y) - S(x,y-1) + S(x-1,y-1)`
-/// `= I(x-1, y-1)`. Substituting gives the diagonal recurrence
-///   `R(x,y) = R(x-1,y-1) + I(x-1, y-1)`  for x, y ≥ 1,
-/// i.e. each cell is the sum of the source pixels along its up-left
-/// diagonal. That is one add per cell and needs no second buffer.
+/// Column 0 and row 0 are zero padding (never counted).
 ///
-/// Bit-identity: the historic expression and the diagonal recurrence are the
-/// same multiset of additions/subtractions; `i64` arithmetic is modulo 2^64,
-/// under which both evaluate to identical bit patterns (independent of
-/// evaluation order), so the produced table is bit-identical.
+/// # Construction
+///
+/// OpenCV builds the table with a per-row scalar recurrence plus a
+/// one-row rolling buffer of column sums. That exact recurrence is used
+/// here (`from_gray`) and verified two ways in the tests: against the
+/// cone definition enumerated pixel-by-pixel, and against a transcription
+/// of OpenCV's `integral_` tilted branch on random images. An earlier
+/// revision "simplified" the table into a plain diagonal line sum — the
+/// algebra looked equivalent but was not; the cone has an extra parent
+/// per row. That made tilted features count arbitrary (even negative)
+/// sums; it is the reason this code carries the brute-force reference
+/// rather than a "derived" one.
 #[derive(Clone)]
 pub struct RotatedIntegralImage {
     data: Vec<i64>,
@@ -543,19 +538,43 @@ pub struct RotatedIntegralImage {
 
 impl RotatedIntegralImage {
     /// Build the rotated (45°) integral image from a grayscale input using
-    /// the single-pass diagonal recurrence documented above.
+    /// the rolling-buffer recurrence from OpenCV's `integral_` tilted
+    /// branch (cn=1), documented on the struct above.
     pub fn from_gray(img: &GrayImage) -> Self {
         let w = img.width();
         let h = img.height();
         let stride = w + 1;
         let mut data = vec![0i64; stride * (h + 1)];
-        for y in 1..=h {
-            let (head, tail) = data.split_at_mut(y * stride);
-            let prev = &head[(y - 1) * stride..];
-            let cur = &mut tail[..stride];
-            // cur[0] stays 0 (padding column, zero-initialised).
-            for x in 1..=w {
-                cur[x] = prev[x - 1] + img[(x - 1, y - 1)] as i64;
+        if w == 0 || h == 0 {
+            return Self {
+                data,
+                width: w,
+                height: h,
+                stride,
+            };
+        }
+        // One rolling row of column sums, initialised from image row 0.
+        let mut col = vec![0i64; w + 1];
+        for x in 0..w {
+            col[x] = img[(x, 0)] as i64;
+            data[stride + x + 1] = col[x]; // table row 1
+        }
+        for i in 1..h {
+            let r = i + 1; // table row
+            data[r * stride] = data[(r - 1) * stride]; // padding col stays 0
+                                                       // First pixel of the row.
+            data[r * stride + 1] = data[(r - 1) * stride + 1] + img[(0, i)] as i64 + col[1];
+            for x in 1..w - 1 {
+                let t1 = col[x];
+                col[x - 1] = t1 + img[(x - 1, i)] as i64;
+                data[r * stride + x + 1] =
+                    t1 + col[x + 1] + img[(x, i)] as i64 + data[(r - 1) * stride + x];
+            }
+            if w > 1 {
+                let t1 = col[w - 1];
+                col[w - 2] = t1 + img[(w - 2, i)] as i64;
+                data[r * stride + w] = img[(w - 1, i)] as i64 + t1 + data[(r - 1) * stride + w - 1];
+                col[w - 1] = img[(w - 1, i)] as i64;
             }
         }
         Self {
@@ -585,40 +604,48 @@ impl RotatedIntegralImage {
         self.data[y * self.stride + x]
     }
 
-    /// Query a tilted (45°) rectangle whose four corners are:
-    /// - top    = (xmid, y1)
-    /// - left   = (x1,  ymid)
-    /// - right  = (x2,  ymid)
-    /// - bottom = (xmid, y2)
+    /// Sum over a tilted (45°) Haar rectangle, matching OpenCV's
+    /// `CV_TILTED_OFS` / `HaarEvaluator::OptFeature` lookup.
     ///
-    /// where `xmid = (x1 + x2) / 2`, `ymid = (y1 + y2) / 2`. This is the
-    /// diamond-sum form used by OpenCV's tilted Haar features.
+    /// Given the sub-rectangle origin `(x1, y1)` and upright box
+    /// `(x2, y2)` with `w = x2 − x1`, `h = y2 − y1`, the counted region is
+    /// the rotated parallelogram with the four lookup corners
     ///
-    /// Implementation uses Lienhart's closed-form expansion of the 45°
-    /// rotated rectangle as a 6-term combination of `R` lookups. We split
-    /// the diamond into an upper and lower triangle; each triangle is the
-    /// `R`-difference between two rectangles plus a single regular integral.
+    /// - `p0 = (x1, y1)`
+    /// - `p1 = (x1 − h, y1 + h)`
+    /// - `p2 = (x1 + w, y1 + w)`
+    /// - `p3 = (x1 + w − h, y1 + w + h)`
+    ///
+    /// and the sum is `R[p0] − R[p1] − R[p2] + R[p3]`. Corners outside
+    /// the table read as zero: the zero row/column borders plus image
+    /// edges, the same convention OpenCV relies on for its padding.
     pub fn tilted_rect_sum(&self, x1: usize, y1: usize, x2: usize, y2: usize) -> i64 {
         if x2 <= x1 || y2 <= y1 {
             return 0;
         }
-        // Clamp to image bounds (the rect_sum-equivalent does this; here we
-        // operate on the R array which is sized to (W+1, H+1)).
-        let x2 = x2.min(self.width);
-        let y2 = y2.min(self.height);
-        if x1 >= x2 || y1 >= y2 {
-            return 0;
-        }
-        self.tilted_rect_sum_unchecked(x1, y1, x2, y2)
+        let (w, h) = (x2 - x1, y2 - y1);
+        let at = |x: isize, y: isize| -> i64 {
+            // Row/col 0 are zero padding even though data has that cell;
+            // negative coordinates and corners past the table read 0 too.
+            if x < 1 || y < 1 || x as usize > self.width || y as usize > self.height {
+                0
+            } else {
+                self.data[(y as usize) * self.stride + x as usize]
+            }
+        };
+        let (x1i, y1i) = (x1 as isize, y1 as isize);
+        let (wi, hi) = (w as isize, h as isize);
+        at(x1i, y1i) - at(x1i - hi, y1i + hi) - at(x1i + wi, y1i + wi)
+            + at(x1i + wi - hi, y1i + wi + hi)
     }
 
     /// Unchecked variant of [`Self::tilted_rect_sum`].
     ///
     /// # Safety contract (caller must uphold)
-    /// `x1 < x2 <= self.width` and `y1 < y2 <= self.height`. Every lookup
-    /// corner is bounded by `(x2, y2)` or below, so all six indices lie in
-    /// `[0, data.len())`. The clamps in the checked variant are identities
-    /// under the contract, so results are bit-identical.
+    /// Every lookup corner must lie inside the table, i.e. `x1 >= h`,
+    /// `x1 + w <= self.width`, and `y1 + w + h <= self.height`. Under
+    /// that contract the zero-border checks are identities and this is
+    /// bit-identical to the checked variant.
     #[inline]
     pub(crate) fn tilted_rect_sum_unchecked(
         &self,
@@ -627,19 +654,16 @@ impl RotatedIntegralImage {
         x2: usize,
         y2: usize,
     ) -> i64 {
-        debug_assert!(x1 < x2 && x2 <= self.width && y1 < y2 && y2 <= self.height);
-        let xmid = (x1 + x2) / 2;
-        let ymid = (y1 + y2) / 2;
-        // Upper triangle: vertices (x1, ymid), (xmid, y1), (xmid, ymid+1).
-        // Sum = R[xmid, y1] - R[x1, y1] - R[xmid, ymid] + R[x1, ymid]
-        // Lower triangle: vertices (xmid, ymid), (x2, ymid), (xmid, y2).
-        // Sum = R[x2, ymid] - R[xmid, ymid] - R[x2, y2] + R[xmid, y2]
-        // SAFETY: documented contract above.
+        debug_assert!(x2 > x1 && y2 > y1);
+        let (w, h) = (x2 - x1, y2 - y1);
+        debug_assert!(
+            x1 >= h && x1 + w <= self.width && y1 + w + h <= self.height,
+            "tilted lookup corners overhang the table; use the checked variant"
+        );
+        // SAFETY: documented contract above; each (x, y) is in bounds.
         unsafe {
             let at = |x: usize, y: usize| *self.data.get_unchecked(y * self.stride + x);
-            let upper = at(xmid, y1) - at(x1, y1) - at(xmid, ymid) + at(x1, ymid);
-            let lower = at(x2, ymid) - at(xmid, ymid) - at(x2, y2) + at(xmid, y2);
-            upper + lower
+            at(x1, y1) - at(x1 - h, y1 + h) - at(x1 + w, y1 + w) + at(x1 + w - h, y1 + w + h)
         }
     }
 }
@@ -1207,41 +1231,32 @@ mod tests {
         }
     }
 
-    /// Reference implementation of the *historic* two-pass rotated integral
-    /// (kept verbatim from the pre-optimisation code) to prove the single-pass
-    /// diagonal recurrence is bit-identical.
-    fn rotated_reference(img: &GrayImage) -> Vec<i64> {
+    /// Brute-force reference: enumerate every pixel of the cone
+    /// `(Y − 1 − py) ≥ |X − 1 − px|`. Returns the full padded table.
+    fn rotated_cone_reference(img: &GrayImage) -> Vec<i64> {
         let w = img.width();
         let h = img.height();
         let stride = w + 1;
-        let mut s = vec![0i64; stride * (h + 1)];
-        for y in 1..=h {
-            let mut row_acc: i64 = 0;
-            for x in 1..=w {
-                row_acc += img[(x - 1, y - 1)] as i64;
-                s[y * stride + x] = row_acc + s[(y - 1) * stride + x];
-            }
-        }
         let mut data = vec![0i64; stride * (h + 1)];
-        for y in 1..=h {
-            for x in 1..=w {
-                let s_xy = s[y * stride + x];
-                let s_x1y = s[y * stride + (x - 1)];
-                let s_xy1 = s[(y - 1) * stride + x];
-                let s_x1y1 = s[(y - 1) * stride + (x - 1)];
-                let r_x1y1 = if x >= 2 && y >= 2 {
-                    data[(y - 1) * stride + (x - 1)]
-                } else {
-                    0
-                };
-                data[y * stride + x] = r_x1y1 + s_xy - s_x1y - s_xy1 + s_x1y1;
+        for py in 0..h {
+            for px in 0..w {
+                let v = img[(px, py)] as i64;
+                // Add this pixel to every cone cell that contains it.
+                for y in (py + 1)..=h {
+                    let d = y - 1 - py;
+                    // Column 0 is padding: cones never write into it.
+                    let xlo = (px + 1).saturating_sub(d).max(1);
+                    for x in xlo..=(px + 1 + d).min(w) {
+                        data[y * stride + x] += v;
+                    }
+                }
             }
         }
         data
     }
 
     #[test]
-    fn rotated_single_pass_matches_two_pass_reference() {
+    fn rotated_table_matches_cone_reference() {
         for (w, h) in [
             (1usize, 1usize),
             (2, 2),
@@ -1254,7 +1269,57 @@ mod tests {
         ] {
             let img = lcg_image(w, h);
             let ri = RotatedIntegralImage::from_gray(&img);
-            assert_eq!(ri.data, rotated_reference(&img), "mismatch at {w}x{h}");
+            assert_eq!(ri.data, rotated_cone_reference(&img), "mismatch at {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn tilted_query_matches_direct_cone_set_arithmetic() {
+        // Independent validation of the CV_TILTED_OFS query formula. For
+        // each corner we directly enumerate the pixels in that corner's
+        // cone and sum them, then combine the four cones with the same
+        // inclusion–exclusion signs. Corners outside the table contribute
+        // nothing (OpenCV reads 0 there rather than a clipped cone).
+        fn cone_sum(img: &GrayImage, cx: isize, cy: isize) -> i64 {
+            let (w, h) = (img.width() as isize, img.height() as isize);
+            if cx < 1 || cy < 1 || cx > w || cy > h {
+                return 0;
+            }
+            let mut sum = 0i64;
+            for py in 0..h {
+                for px in 0..w {
+                    // (cy-1-py) >= |cx-1-px|  ⇔  cy-py > |cx-1-px|
+                    if py < cy && cy - py > (cx - 1 - px).abs() {
+                        sum += img[(px as usize, py as usize)] as i64;
+                    }
+                }
+            }
+            sum
+        }
+
+        for (w, h) in [(1usize, 1usize), (2, 2), (3, 3), (5, 3), (8, 8), (17, 9)] {
+            let img = lcg_image(w, h);
+            let ri = RotatedIntegralImage::from_gray(&img);
+            for x1 in 0..w {
+                for y1 in 0..h {
+                    for tw in 1..=3usize {
+                        for th in 1..=3usize {
+                            let (x1i, y1i) = (x1 as isize, y1 as isize);
+                            let (twi, thi) = (tw as isize, th as isize);
+                            let expected = cone_sum(&img, x1i, y1i)
+                                - cone_sum(&img, x1i - thi, y1i + thi)
+                                - cone_sum(&img, x1i + twi, y1i + twi)
+                                + cone_sum(&img, x1i + twi - thi, y1i + twi + thi);
+                            assert_eq!(
+                                ri.tilted_rect_sum(x1, y1, x1 + tw, y1 + th),
+                                expected,
+                                "query mismatch at ({x1},{y1}) tw={tw} th={th} \
+                                 on {w}x{h}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1278,10 +1343,17 @@ mod tests {
                             sq.rect_sum_sq(x1, y1, x2, y2),
                             sq.rect_sum_sq_unchecked(x1, y1, x2, y2)
                         );
-                        assert_eq!(
-                            ii.tilted_rect_sum(&ri, x1, y1, x2, y2),
-                            ri.tilted_rect_sum_unchecked(x1, y1, x2, y2)
-                        );
+                        // The unchecked tilted lookup has a stricter
+                        // contract: every corner must land inside the table,
+                        // otherwise callers must use the checked variant.
+                        let (tw, th) = (x2 - x1, y2 - y1);
+                        if x1 >= th && x1 + tw <= w && y1 + tw + th <= h {
+                            assert_eq!(
+                                ii.tilted_rect_sum(&ri, x1, y1, x2, y2),
+                                ri.tilted_rect_sum_unchecked(x1, y1, x2, y2),
+                                "tilted mismatch at ({x1},{y1},{x2},{y2})"
+                            );
+                        }
                     }
                 }
             }

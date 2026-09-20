@@ -75,20 +75,43 @@ We use `u32` accumulation (max ~5.3e8 for 1920×1080×255, fits).
 
 ### 1a. Rotated (45°) integral image
 
-For the tilted Haar features used in some OpenCV cascades, we also need a
-"rotated" integral that sums over a 45° half-plane. We use Lienhart &
-Maydt's two-pass construction:
+For tilted Haar features (OpenCV `<tilted>1</tilted>`, plus the built-in
+`DiagonalEdge` kind) we keep OpenCV's `rt0` table: with 1-based table
+indices and 0-based pixel coordinates, cell `R(X, Y)` sums the
+downward-opening lattice cone
 
 ```
-Pass 1: build regular SAT, store in `sat` (a separate buffer)
-Pass 2: R(x, y) = R(x-1, y-1)
-              + SAT(x, y) - SAT(x-1, y)
-              - SAT(x, y-1) + SAT(x-1, y-1)
-        (write R into a separate `data` buffer)
+R(X, Y) = Σ I(px, py)   where   Y − 1 − py ≥ |X − 1 − px|
 ```
 
-The two-buffer split is required because pass 2 reads SAT values that
-would be corrupted by an in-place transformation.
+— pixel `(X−1, Y−1)` itself, one pixel wider on each side per row going
+up. Column 0 and row 0 are zero padding.
+
+The table is built with OpenCV `integral_`'s per-row scalar recurrence
+over a one-row rolling buffer of column sums (`RotatedIntegralImage::
+from_gray` in `src/integral.rs`). A tempting simplification,
+
+```
+R(X, Y) = R(X−1, Y−1) + I(X−1, Y−1)      // WRONG: diagonal line sum
+```
+
+counts only the single diagonal line — each cone row has one *extra
+parent*, so the result under-counts and tilted features score arbitrary
+(even negative) sums. Our recurrence is validated two ways in tests:
+against brute-force cone enumeration and against a direct transcription
+of OpenCV's tilted branch on deterministic random images.
+
+A tilted rectangle with upright box `(x1, y1, w, h)` is summed via the
+`CV_TILTED_OFS` four corners
+
+```
+p0 = (x1,       y1)       p1 = (x1 − h,   y1 + h)
+p2 = (x1 + w,   y1 + w)   p3 = (x1 + w−h, y1 + w + h)
+sum = R[p0] − R[p1] − R[p2] + R[p3]
+```
+
+with corners outside the table reading as zero (image rims / zero
+borders), matching OpenCV's padding convention.
 
 ## 2. Variance pre-filter
 

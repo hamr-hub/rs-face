@@ -204,6 +204,16 @@ The Python `tools/compare_cpu_gpu.py` auxiliary walks a JSONL produced
 by `rs-face-detect` (which emits both `boxes_cpu` and `boxes_gpu` per
 frame) and reports per-video parity in a table.
 
+### Tilted cascades stay on CPU
+
+The GPU kernels score features against the upright integral tables
+only — there is no rotated-integral (`rt0`) code path. When a loaded
+cascade contains any tilted feature (`<tilted>1</tilted>` in OpenCV
+XML, flags bit 0 in rfcf v3, or the built-in `DiagonalEdge` kind),
+`Detector::needs_tilted()` is true and the scan runs on CPU regardless
+of the selected backend, so tilted rectangles are never silently
+scored as upright sums.
+
 ---
 
 ## File map
