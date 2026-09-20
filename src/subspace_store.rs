@@ -23,10 +23,12 @@ use std::io;
 use std::path::Path;
 
 use crate::binio::{push_f32, push_u16, push_u32, BinError, Reader};
+#[cfg(feature = "recognizer-eigenface")]
 use crate::eigenface::{
     Component as EigenComponent, EigenMetric, EigenfaceConfig, EigenfaceRecognizer,
     Member as EigenMember,
 };
+#[cfg(feature = "recognizer-fisherface")]
 use crate::fisherface::{FisherfaceConfig, FisherfaceRecognizer, Member as FisherMember};
 
 const EIGEN_MAGIC: &[u8; 4] = b"RSEF";
@@ -97,6 +99,7 @@ impl std::error::Error for SubspaceStoreError {
 
 /// Serialize a trained eigenfaces recogniser to the `RSEF` v1 format.
 #[must_use]
+#[cfg(feature = "recognizer-eigenface")]
 pub fn encode_eigen(rec: &EigenfaceRecognizer) -> Vec<u8> {
     let cfg = rec.config();
     let mut out = Vec::new();
@@ -140,6 +143,7 @@ pub fn encode_eigen(rec: &EigenfaceRecognizer) -> Vec<u8> {
 
 /// Serialize a trained Fisherfaces recogniser to the `RSLD` v1 format.
 #[must_use]
+#[cfg(feature = "recognizer-fisherface")]
 pub fn encode_fisher(rec: &FisherfaceRecognizer) -> Vec<u8> {
     let cfg = rec.config();
     let mut out = Vec::new();
@@ -236,6 +240,7 @@ fn write_members<'a>(out: &mut Vec<u8>, members: impl Iterator<Item = (&'a str, 
 /// # Errors
 ///
 /// Any [`SubspaceStoreError`] variant describing a malformed blob.
+#[cfg(feature = "recognizer-eigenface")]
 pub fn decode_eigen(bytes: &[u8]) -> Result<EigenfaceRecognizer, SubspaceStoreError> {
     let mut r = Reader::new(bytes);
     expect_magic(&mut r, EIGEN_MAGIC)?;
@@ -327,6 +332,7 @@ pub fn decode_eigen(bytes: &[u8]) -> Result<EigenfaceRecognizer, SubspaceStoreEr
 /// # Errors
 ///
 /// Any [`SubspaceStoreError`] variant describing a malformed blob.
+#[cfg(feature = "recognizer-fisherface")]
 pub fn decode_fisher(bytes: &[u8]) -> Result<FisherfaceRecognizer, SubspaceStoreError> {
     let mut r = Reader::new(bytes);
     expect_magic(&mut r, FISHER_MAGIC)?;
@@ -589,7 +595,11 @@ pub fn load<T>(
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "recognizer-eigenface",
+    feature = "recognizer-fisherface"
+))]
 mod tests {
     use super::*;
     use crate::image::GrayImage;

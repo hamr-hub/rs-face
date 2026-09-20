@@ -1,6 +1,6 @@
 //! Output writers — annotated PNG frames + JSON manifest.
 
-use crate::detector::Detection;
+use crate::face::Detection;
 use crate::image::{png, RgbImage};
 use std::fs::{self, File};
 use std::io::Write;

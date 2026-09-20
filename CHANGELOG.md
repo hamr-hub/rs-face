@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — every algorithm is now a cargo trimmable
+- **Per-algorithm feature flags** turn the monolithic build into a pick-and-mix
+  crate while `default` keeps the exact 0.2.x surface:
+  - detectors: `detector-haar`, `detector-luminance`, `detector-cnn`
+  - recognisers: `recognizer-lbph`, `recognizer-eigenface`, `recognizer-fisherface`
+  - sources: `source` (trait + image sequence + synthetic), `source-http`, `source-ffmpeg`
+  - orchestration: `output`, `pipeline`, `video-id`
+
+  Example: `--no-default-features --features recognizer-lbph,source` builds a
+  tiny LBPH-only library. Every bin / example / integration test declares
+  `required-features`, so trimmed builds skip targets they cannot compile;
+  CI gains a 13-combination feature matrix that runs each module's own tests
+  on top of the minimal core (now ~45 tests for core-only; 297 with
+  `tract-backend`). The unused detection-vector cache was removed from
+  `pool`.
+
 ### Changed — module groundwork for per-algorithm features
 - `Detection` / `non_max_suppression` / `iou` now live in the detector-agnostic
   `rsface::face` module; `rsface::detector` re-exports them, so existing
