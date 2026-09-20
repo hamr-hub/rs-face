@@ -216,26 +216,30 @@ impl HaarFeature {
             // `IntegralTable` enum match that the generic variant emits,
             // and every realistic face-window input (640×480 up to 4K) is
             // narrow. The branch is one per `eval_inbounds` call, not per
-            // rect. For tilted features, keep the HEAD inbounds gate
-            // (tilted corners need rh + rw + rh extra rows below).
-            let sum: i64 = if is_tilted {
+            // rect. For tilted features, keep the inbounds gate (tilted
+            // corners need `rh + rw + rh` extra rows below). For
+            // non-tilted, keep the u64 → f64 cast (the rect-sum
+            // inclusion-exclusion is always non-negative so we can skip
+            // the `u64 → i64 → f64` chain the historical path paid).
+            let sum_f64: f64 = if is_tilted {
                 let tilted_inbounds = rx >= rh && rx + rw <= ii_w && ry + rw + rh <= ii_h;
-                if tilted_inbounds {
+                let s: i64 = if tilted_inbounds {
                     ri.tilted_rect_sum_unchecked(rx, ry, rx + rw, ry + rh)
                 } else {
                     ii.tilted_rect_sum(ri, rx, ry, rx + rw, ry + rh)
-                }
+                };
+                s as f64
             } else if ii.is_wide() {
-                ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as i64
+                ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as f64
             } else {
                 // SAFETY: caller guarantees the rect fits the window,
                 // which fits the image; narrow contract follows from
                 // `!is_wide()`.
                 unsafe {
-                    ii.rect_sum_unchecked_narrow(rx, ry, rx + rw, ry + rh) as i64
+                    ii.rect_sum_unchecked_narrow(rx, ry, rx + rw, ry + rh) as f64
                 }
             };
-            let contribution = (sum as f64) * (r.weight as f64);
+            let contribution = sum_f64 * (r.weight as f64);
             total += contribution;
         }
         total as f32
