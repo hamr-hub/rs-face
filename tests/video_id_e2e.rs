@@ -118,8 +118,8 @@ fn two_actors_alternating_cluster_into_two_identities() {
         min_embeddings_per_track: 2,
         ..VideoIdConfig::default()
     };
-    let result = identify_video(&mut src, PathBuf::from("test.mp4"), cfg, &mut id)
-        .expect("identify_video");
+    let result =
+        identify_video(&mut src, PathBuf::from("test.mp4"), cfg, &mut id).expect("identify_video");
 
     // Two identities, with Alice's appearances split across two tracks that
     // got merged into one cluster, Bob into a separate cluster.
@@ -178,8 +178,8 @@ fn below_threshold_singleton_lands_in_cluster_zero() {
         cluster_threshold: 0.5,
         ..VideoIdConfig::default()
     };
-    let result = identify_video(&mut src, PathBuf::from("test.mp4"), cfg, &mut id)
-        .expect("identify_video");
+    let result =
+        identify_video(&mut src, PathBuf::from("test.mp4"), cfg, &mut id).expect("identify_video");
 
     assert_eq!(
         result.identities.len(),

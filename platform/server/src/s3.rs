@@ -351,9 +351,11 @@ mod tests {
     fn host_of_keeps_port_and_strips_path() {
         // SigV4 canonical `host` must equal the authority actually sent,
         // non-default port included — this is what the Host-header fix signs.
-        assert_eq!(host_of("http://127.0.0.1:9000/bucket/key"), "127.0.0.1:9000");
-        assert_eq!(host_of("https://s3.example.com/b/k?x=1"),
-                   "s3.example.com");
+        assert_eq!(
+            host_of("http://127.0.0.1:9000/bucket/key"),
+            "127.0.0.1:9000"
+        );
+        assert_eq!(host_of("https://s3.example.com/b/k?x=1"), "s3.example.com");
         assert_eq!(host_of("http://rustfs:9000/"), "rustfs:9000");
         // no scheme fallback: whole string up to the first '/'
         assert_eq!(host_of("localhost:9000/x"), "localhost:9000");

@@ -30,14 +30,21 @@ fn main() {
         "  {:<26}  {:<10}  {:<8}  commercial-use  sha256-prefix",
         "id", "kind", "licence"
     );
-    println!("  {:<26}  {:<10}  {:<8}  --------------  --------------", "", "", "");
+    println!(
+        "  {:<26}  {:<10}  {:<8}  --------------  --------------",
+        "", "", ""
+    );
     for spec in models::REGISTRY {
         println!(
             "  {:<26}  {:<10}  {:<8}  {:<14}  {}",
             spec.id,
             kind_label(&spec.kind),
             spec.license,
-            if spec.is_commercial_use_allowed() { "yes" } else { "no (research only)" },
+            if spec.is_commercial_use_allowed() {
+                "yes"
+            } else {
+                "no (research only)"
+            },
             short_sha(spec.sha256.unwrap_or("<unpinned>")),
         );
     }
@@ -56,5 +63,9 @@ fn kind_label(k: &ModelKind) -> &'static str {
 }
 
 fn short_sha(sha: &str) -> &str {
-    if sha.len() > 12 { &sha[..12] } else { sha }
+    if sha.len() > 12 {
+        &sha[..12]
+    } else {
+        sha
+    }
 }

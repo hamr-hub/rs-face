@@ -11,7 +11,7 @@
 //! Run with:
 //!   cargo run --release --example recognise_eigenface
 
-use rsface::eigenface::{EigenfaceConfig, EigenfaceRecognizer, EigenMatch};
+use rsface::eigenface::{EigenMatch, EigenfaceConfig, EigenfaceRecognizer};
 use rsface::image::GrayImage;
 
 fn synthetic_crop(seed: u32) -> GrayImage {
@@ -42,12 +42,8 @@ fn main() {
     let a2 = synthetic_crop(2);
     let b1 = synthetic_crop(9);
     let b2 = synthetic_crop(10);
-    let samples: Vec<(&str, &GrayImage)> = vec![
-        ("alice", &a1),
-        ("alice", &a2),
-        ("bob",   &b1),
-        ("bob",   &b2),
-    ];
+    let samples: Vec<(&str, &GrayImage)> =
+        vec![("alice", &a1), ("alice", &a2), ("bob", &b1), ("bob", &b2)];
 
     // 2. Train. Eigenfaces needs at least 2 samples and at least 2 distinct
     //    labels — EigenfaceError surfaces the failure modes so we can map
@@ -63,13 +59,21 @@ fn main() {
     // 3. Identify a probe.
     let probe = synthetic_crop(1);
     match rec.identify_crop(&probe) {
-        EigenMatch::Match { label, distance, margin } => {
+        EigenMatch::Match {
+            label,
+            distance,
+            margin,
+        } => {
             println!("eigenfaces  ->  match={label}  distance={distance:.3}  margin={margin:.3}");
         }
         EigenMatch::BelowThreshold { best } => {
             println!("eigenfaces  ->  no match within threshold (best={best:?})");
         }
-        EigenMatch::Ambiguous { first, second, margin } => {
+        EigenMatch::Ambiguous {
+            first,
+            second,
+            margin,
+        } => {
             println!("eigenfaces  ->  ambiguous between {first} and {second} (margin={margin:.3})");
         }
         EigenMatch::NoCandidates => {

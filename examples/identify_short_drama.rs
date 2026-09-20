@@ -38,7 +38,6 @@ use std::path::{Path, PathBuf};
 use rsface::detector::{Detection, Detector, DetectorConfig};
 use rsface::embedding::Embedding;
 use rsface::face_detector::{FaceDetector, HaarDetector};
-use rsface::LuminanceFaceDetector;
 use rsface::haar::params::demo_face_cascade;
 use rsface::image::{GrayImage, RgbImage};
 use rsface::lbph::{extract as lbph_extract, LbphConfig};
@@ -47,6 +46,7 @@ use rsface::video_id::{
     identify_video, merge_across_videos, render_video_manifest_json, Identify, Track,
     VideoIdConfig, VideoIdentification,
 };
+use rsface::LuminanceFaceDetector;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -245,7 +245,9 @@ async fn index(
     serve_static_with_304(
         &state.cfg.web_dir,
         "index.html",
-        headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()),
+        headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok()),
     )
     .await
 }
@@ -258,7 +260,9 @@ async fn static_file(
     serve_static_with_304(
         &state.cfg.web_dir,
         &file,
-        headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()),
+        headers
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok()),
     )
     .await
 }
@@ -389,7 +393,12 @@ async fn list_jobs(
         if let Some(bytes) = caches.jobs_list_json.get_fresh() {
             // ETag 304 路径:客户端发 If-None-Match 且 hash 命中时,直接 304。
             let etag = format!("W/\"jobs-list-{:x}\"", fxhash_short(&bytes));
-            if if_none_match_matches(headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()), &etag) {
+            if if_none_match_matches(
+                headers
+                    .get(header::IF_NONE_MATCH)
+                    .and_then(|v| v.to_str().ok()),
+                &etag,
+            ) {
                 return StatusCode::NOT_MODIFIED.into_response();
             }
             return cached_json_response_with_etag(bytes, &etag);
@@ -429,9 +438,7 @@ async fn list_jobs(
 
 /// `GET /api/jobs/stats`:按算法(haar/cnn/yunet/mtcnn/hog)聚合
 /// 成功/失败/取消/平均耗时/检出数。queued 未定算法的归入 `pending`。
-async fn job_stats(
-    State((state, caches)): State<(Arc<JobRegistry>, ResponseCaches)>,
-) -> Response {
+async fn job_stats(State((state, caches)): State<(Arc<JobRegistry>, ResponseCaches)>) -> Response {
     if let Some(bytes) = caches.jobs_stats_json.get_fresh() {
         return cached_json_response(bytes);
     }
@@ -469,9 +476,7 @@ async fn job_stats(
 /// total_detections / errored / cancelled / mode。
 /// live_fps_max / gpu_pct / cascade_pass_rate 平台侧暂无数据源,返回 0
 /// (前端对 0 有降级显示,不会报错)。
-async fn metrics(
-    State((state, caches)): State<(Arc<JobRegistry>, ResponseCaches)>,
-) -> Response {
+async fn metrics(State((state, caches)): State<(Arc<JobRegistry>, ResponseCaches)>) -> Response {
     // 1s TTL dedup 缓存:命中路径 0 次 registry 扫描 + 0 次 mutex 获取。
     if let Some(bytes) = caches.metrics_json.get_fresh() {
         return cached_json_response(bytes);
@@ -1079,10 +1084,7 @@ async fn telemetry_ingest(
     }
     if n > 500 {
         // 单批 500 上限,防恶意/异常写入压垮写入路径。
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "batch too large (max 500 events)",
-        );
+        return error_response(StatusCode::BAD_REQUEST, "batch too large (max 500 events)");
     }
     let accepted = body.events.iter().filter(|e| is_safe_event(e)).count();
     // 永远 stdout 一份,方便开发模式无 DB 也能看埋点。
@@ -1111,9 +1113,12 @@ fn is_safe_event(e: &crate::persist::TelemetryEvent) -> bool {
     // 服务端永远不信客户端的"已脱敏"声明;再扫一次敏感字段。
     let blob = format!("{:?}{:?}", e.name, e.props);
     const FORBIDDEN: &[&str] = &[
-        "s3://", "local://", "inline://", // 存储 key 前缀
-        "/media/",                          // 媒体代理路径
-        "Authorization", "Bearer ",        // 鉴权相关
+        "s3://",
+        "local://",
+        "inline://", // 存储 key 前缀
+        "/media/",   // 媒体代理路径
+        "Authorization",
+        "Bearer ", // 鉴权相关
     ];
     !FORBIDDEN.iter().any(|s| blob.contains(s))
 }
@@ -1525,7 +1530,13 @@ fn error_response(code: StatusCode, msg: &str) -> Response {
 // ============================================================================
 
 /// 包装一份"导入完成"响应:job_id + 一组 LAN URL + 当前状态。
-fn import_response(id: &str, kind: JobKind, original_key: Option<&str>, cover_key: Option<&str>, status: JobStatus) -> Response {
+fn import_response(
+    id: &str,
+    kind: JobKind,
+    original_key: Option<&str>,
+    cover_key: Option<&str>,
+    status: JobStatus,
+) -> Response {
     Json(serde_json::json!({
         "ok": true,
         "job_id": id,
@@ -1588,13 +1599,26 @@ fn fetch_remote_video_to_local(
     let out_path = work_dir.join("input.mp4");
     let status = Command::new("ffmpeg")
         .args([
-            "-y", "-hide_banner", "-loglevel", "error",
-            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-            "-timeout", "30000000", // 30s 单连接超时(微秒)
-            "-i", url,
-            "-c", "copy", // 优先 copy(快),失败时 ffmpeg 自动回退转码
-            "-f", "mp4",
-            "-movflags", "+faststart",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-reconnect",
+            "1",
+            "-reconnect_streamed",
+            "1",
+            "-reconnect_delay_max",
+            "5",
+            "-timeout",
+            "30000000", // 30s 单连接超时(微秒)
+            "-i",
+            url,
+            "-c",
+            "copy", // 优先 copy(快),失败时 ffmpeg 自动回退转码
+            "-f",
+            "mp4",
+            "-movflags",
+            "+faststart",
         ])
         .arg(&out_path)
         .stdout(Stdio::null())
@@ -1633,7 +1657,10 @@ async fn import_video(
         .await
         .unwrap_or_default();
     let parsed: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
-    let id = parsed.get("job_id").and_then(|v| v.as_str()).map(String::from);
+    let id = parsed
+        .get("job_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let Some(id) = id else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "missing job_id").into_response();
     };
@@ -1668,10 +1695,7 @@ async fn import_video_url(
     // 平台本身是 LAN 部署,所以这个限制相对宽松 — 仍挡掉 169.254 / IPv6 link-local / 0.0.0.0。
     if let Some(host) = url.split("://").nth(1).and_then(|s| s.split('/').next()) {
         if is_blocked_host(host) {
-            return error_response(
-                StatusCode::FORBIDDEN,
-                "url host is in a blocked range",
-            );
+            return error_response(StatusCode::FORBIDDEN, "url host is in a blocked range");
         }
     }
 
@@ -1689,10 +1713,7 @@ async fn import_video_url(
     // 工作目录会被 finalize 清理)。这一步同步等,失败立即回 400,避免建空 job。
     let work_dir = state.cfg.tmp_dir.join(&id);
     if let Err(e) = std::fs::create_dir_all(&work_dir) {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("tmp dir: {e}"),
-        );
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("tmp dir: {e}"));
     }
     let (path, size) = match tokio::task::spawn_blocking({
         let url = url.clone();
@@ -1705,10 +1726,7 @@ async fn import_video_url(
         Ok(Err(e)) => {
             // 创建了 job 但拉取失败 — 标记为 error,不进入 run_job。
             let _ = state.remove(&id);
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("fetch remote video: {e}"),
-            );
+            return error_response(StatusCode::BAD_GATEWAY, &format!("fetch remote video: {e}"));
         }
         Err(e) => {
             let _ = state.remove(&id);
@@ -1855,7 +1873,9 @@ fn fxhash_short(bytes: &[u8]) -> u64 {
 
 /// 比较客户端 If-None-Match 头(逗号分隔多值,strip W/)和服务端 ETag。
 fn if_none_match_matches(client_hdr: Option<&str>, server_etag: &str) -> bool {
-    let Some(hdr) = client_hdr else { return false; };
+    let Some(hdr) = client_hdr else {
+        return false;
+    };
     fn strip(s: &str) -> &str {
         s.strip_prefix("W/").unwrap_or(s).trim()
     }
@@ -1912,10 +1932,7 @@ async fn telemetry_summary(
                     })
                 })
                 .collect();
-            let total: i64 = rows
-                .iter()
-                .map(|r| r.get::<i64, _>("n"))
-                .sum();
+            let total: i64 = rows.iter().map(|r| r.get::<i64, _>("n")).sum();
             Json(serde_json::json!({
                 "ok": true,
                 "enabled": true,
@@ -2051,10 +2068,7 @@ mod import_tests {
         let s = "W/\"abc-123\"";
         assert!(if_none_match_matches(Some("W/\"abc-123\""), s));
         assert!(if_none_match_matches(Some("\"abc-123\""), s));
-        assert!(if_none_match_matches(
-            Some("W/\"other\", W/\"abc-123\""),
-            s
-        ));
+        assert!(if_none_match_matches(Some("W/\"other\", W/\"abc-123\""), s));
         assert!(!if_none_match_matches(Some("W/\"different\""), s));
         assert!(!if_none_match_matches(None, s));
     }

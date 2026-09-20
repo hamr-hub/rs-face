@@ -131,7 +131,7 @@ impl Db {
         }
     }
 
-pub async fn insert_job(
+    pub async fn insert_job(
         &self,
         id: &str,
         kind: JobKind,

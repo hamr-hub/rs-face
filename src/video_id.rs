@@ -586,7 +586,9 @@ where
         frames += 1;
         let (dets, embs) = identify
             .detect_and_embed(&frame.gray, frame.rgb.as_deref())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("identify: {e}")))?;
+            .map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("identify: {e}"))
+            })?;
         faces += embs.len() as u64;
 
         let obs = FrameObservation {
@@ -625,10 +627,7 @@ where
 /// are re-clustered with the same single-linkage rule. The per-video
 /// `cluster_id` values are rewritten in place to the global ones so the
 /// output reads as one merged identity space.
-pub fn merge_across_videos(
-    runs: Vec<VideoIdentification>,
-    cfg: VideoIdConfig,
-) -> Vec<Identity> {
+pub fn merge_across_videos(runs: Vec<VideoIdentification>, cfg: VideoIdConfig) -> Vec<Identity> {
     // Flatten every track from every video into a single assignment stream.
     let mut clusterer = IdentityCluster::new(cfg);
     let mut all_tracks: Vec<Track> = Vec::new();
@@ -663,10 +662,7 @@ fn gray_to_rgb(gray: &GrayImage) -> RgbImage {
 /// Convenience: write a JSON manifest of one [`VideoIdentification`] run to
 /// `out_dir/manifest.json`. Pure std (no `serde`), hand-rolled the same way
 /// the rest of the crate does it (see [`crate::output`]).
-pub fn write_video_manifest(
-    out_dir: &Path,
-    ident: &VideoIdentification,
-) -> std::io::Result<()> {
+pub fn write_video_manifest(out_dir: &Path, ident: &VideoIdentification) -> std::io::Result<()> {
     std::fs::create_dir_all(out_dir)?;
     let path = out_dir.join("video_manifest.json");
     let json = render_video_manifest_json(ident);
@@ -684,7 +680,11 @@ pub fn render_video_manifest_json(ident: &VideoIdentification) -> String {
     let _ = writeln!(s, "  \"faces_embedded\": {},", ident.faces_embedded);
     let _ = writeln!(s, "  \"identities\": [");
     for (i, id) in ident.identities.iter().enumerate() {
-        let comma = if i + 1 == ident.identities.len() { "" } else { "," };
+        let comma = if i + 1 == ident.identities.len() {
+            ""
+        } else {
+            ","
+        };
         let _ = writeln!(s, "    {{");
         let _ = writeln!(s, "      \"cluster_id\": {},", id.cluster_id);
         let _ = writeln!(s, "      \"tracks\": [");
@@ -694,8 +694,13 @@ pub fn render_video_manifest_json(ident: &VideoIdentification) -> String {
                 s,
                 "        {{ \"track_id\": {}, \"first_frame\": {}, \"last_frame\": {}, \
                  \"first_ts_ms\": {}, \"last_ts_ms\": {}, \"best_score\": {:.4} }}{}",
-                t.track_id, t.first_frame, t.last_frame, t.first_ts_ms, t.last_ts_ms,
-                t.best_score, tcomma
+                t.track_id,
+                t.first_frame,
+                t.last_frame,
+                t.first_ts_ms,
+                t.last_ts_ms,
+                t.best_score,
+                tcomma
             );
         }
         let _ = writeln!(s, "      ]");
@@ -847,7 +852,10 @@ mod tests {
             best_score: 0.9,
         };
         let id = c.assign(single);
-        assert_eq!(id, 0, "singleton below min_embeddings_per_track must stay unassigned");
+        assert_eq!(
+            id, 0,
+            "singleton below min_embeddings_per_track must stay unassigned"
+        );
         assert!(c.is_empty());
     }
 

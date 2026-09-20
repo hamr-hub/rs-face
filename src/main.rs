@@ -169,12 +169,18 @@ fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let (n, m) = (a.len(), b.len());
-    if n == 0 { return m; }
-    if m == 0 { return n; }
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
     let mut prev2 = vec![0usize; m + 1];
     let mut prev1 = vec![0usize; m + 1];
-    let mut curr  = vec![0usize; m + 1];
-    for j in 0..=m { prev1[j] = j; }
+    let mut curr = vec![0usize; m + 1];
+    for j in 0..=m {
+        prev1[j] = j;
+    }
     for i in 1..=n {
         curr[0] = i;
         for j in 1..=m {
@@ -317,7 +323,14 @@ fn main() {
         }
     };
     let known: &[&str] = &[
-        "haar", "cnn", "yunet", "mtcnn", "hog", "luminance", "scrfd", "arcface",
+        "haar",
+        "cnn",
+        "yunet",
+        "mtcnn",
+        "hog",
+        "luminance",
+        "scrfd",
+        "arcface",
     ];
     if !known.contains(&algo_name.as_str()) {
         let suggestion = did_you_mean(&algo_name, known);

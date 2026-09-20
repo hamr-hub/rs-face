@@ -39,7 +39,10 @@ fn main() {
 
     // Each detector implements FaceDetector; `name()` is the algorithm tag.
     // Haar needs a Cascade — we use the bundled demo.
-    let haar = HaarDetector::new(rsface::haar::params::demo_face_cascade(), Default::default());
+    let haar = HaarDetector::new(
+        rsface::haar::params::demo_face_cascade(),
+        Default::default(),
+    );
     // HOG ships its own scaffold config; the bundled weights are placeholder,
     // so this one will report zero detections on any input — that is *expected*
     // and is exactly what the Maturity::Scaffold label exists to communicate.
@@ -48,16 +51,16 @@ fn main() {
     // To prove the trait dispatch really is uniform, store them in a heterogeneous
     // Vec<dyn FaceDetector>. In production code this is what the platform
     // layer does for "compare all algorithms on this frame".
-    let detectors: Vec<(&'static str, Box<dyn FaceDetector>)> = vec![
-        (haar.name(), Box::new(haar)),
-        (hog.name(), Box::new(hog)),
-    ];
+    let detectors: Vec<(&'static str, Box<dyn FaceDetector>)> =
+        vec![(haar.name(), Box::new(haar)), (hog.name(), Box::new(hog))];
 
     for (registered_name, det) in &detectors {
         let hits = det.detect(&img);
         println!(
             "[{:>6}]  detections={:>3}  description=\"{}\"",
-            registered_name, hits.len(), registered_name
+            registered_name,
+            hits.len(),
+            registered_name
         );
     }
 
