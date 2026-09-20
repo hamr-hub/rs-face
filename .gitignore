@@ -44,6 +44,12 @@ rsface-demo/
 /fixtures/generated/
 data
 __pycache__/
+# Per-algorithm accuracy subagent's working ground-truth labels: pixel-space
+# bounding boxes (one per line) for the canonical test images, used by
+# tests/golden_eval.rs. The subagent is explicitly told not to commit these
+# (see task instructions); committed by accident they would re-shape the
+# evaluation each time someone tweaks a Haar threshold.
+/tests/fixtures/golden/labels/
 
 # ---- External skills (unrelated to rs-face) ----
 # Skills installed via skillhub live under .claude/skills/ (e.g.
