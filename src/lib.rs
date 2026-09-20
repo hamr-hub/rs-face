@@ -238,6 +238,13 @@ pub mod cnn;
 #[cfg(feature = "detector-luminance")]
 pub mod luminance_face;
 
+// Multi-algorithm ensemble fuser. No external deps and no detector
+// gate — `Detection` and `iou` are core types available in every
+// build, so the fuser itself can be too. The gating below was wrong:
+// removing it lets `cargo build --no-default-features --lib` (which
+// has no detector feature on) still see the module.
+pub mod ensemble;
+
 // ---------------------------------------------------------------------------
 // Recognisers and their persistence formats. The subspace linear algebra is
 // shared by eigenfaces/Fisherfaces.
