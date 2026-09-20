@@ -110,6 +110,15 @@ async fn main() {
             tracing::error!("[rsface-platform] refusing to start against an unmigrated schema; fix the database and restart");
             std::process::exit(1);
         }
+        // 孤儿任务回收:上次进程崩溃 / OOM / SIGKILL 时,可能留下
+        // `status IN ('queued','running')` 的"僵尸行"。在 listen bind
+        // 之前把它们标 error,避免前端永远看到"卡在 running"。
+        // 阈值 5 分钟(>heartbeat 30s 间隔 × 10,确保正常 job 不会被误伤)。
+        match db.reap_orphans(300).await {
+            Some(n) if n > 0 => println!("[rsface-platform] reaped {n} orphaned job(s) from previous run"),
+            Some(_) => {} // 0 跳过日志
+            None => eprintln!("[rsface-platform] WARN: orphan reap skipped (DB pool unavailable)"),
+        }
         Arc::new(db)
     } else {
         tracing::warn!("[rsface-platform] no DATABASE_URL — running in memory-only mode");
