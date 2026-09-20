@@ -52,13 +52,15 @@ impl Db {
             return;
         };
         // 多迁移文件,按文件名升序逐个 apply。sqlx::query 不支持多语句,
-        // 每个文件内按 `;` 切分逐条执行。
+        // 每个文件内按 `;` 切分逐条执行。注意:split 之前必须先剥掉
+        // `-- ...` 行注释,否则注释里的 `;`(中文分号也常见)会被误切,
+        // 切出来的半截语句会让 PG 报 `syntax error at or near "<CJK>"`。
         let files: [&str; 2] = [
             include_str!("../../migrations/0001_init.sql"),
             include_str!("../../migrations/0002_telemetry.sql"),
         ];
         for sql in files {
-            for stmt in sql.split(';') {
+            for stmt in strip_sql_line_comments(sql).split(';') {
                 let s = stmt.trim();
                 if s.is_empty() {
                     continue;
@@ -457,6 +459,30 @@ fn status_to_str(s: JobStatus) -> &'static str {
         JobStatus::Cancelled => "cancelled",
         JobStatus::Error => "error",
     }
+}
+
+/// 去掉 SQL 文本里的 `--` 行注释(从 `--` 到该行末尾)。这是 `migrate()`
+/// 的 split-by-`;` 之前的预处理:迁移文件里写中文注释很常见,而中文标点里
+/// 偶尔会出现 `;`(或英文 `;` 出现在描述里),如果先 split 后过滤,会把
+/// 一段注释切成两个 SQL 片段送进 PG,后者没有 `CREATE` 开头就会被报
+/// `syntax error at or near "<CJK>"`。正确做法是先剥注释再 split。
+///
+/// 仅处理 `--` 行注释;`/* ... */` 块注释和字符串字面量里的 `;` / `--`
+/// 不是我们的迁移文件关心的(都是纯 DDL),留给将来需要时再扩展。
+fn strip_sql_line_comments(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    for line in sql.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("--") {
+            // 整行都是注释,丢掉
+            continue;
+        }
+        // 行内注释:从 `--` 开始截断(不在字符串内时)。简化:我们的迁移
+        // 不会在 DDL 行末加 `-- 备注`,所以这里不处理。
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 pub fn now_ms_u64() -> u64 {

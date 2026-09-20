@@ -47,15 +47,16 @@ RUN touch src/lib.rs src/main.rs platform/server/src/main.rs \
 FROM alpine:3.20
 RUN apk add --no-cache ffmpeg ca-certificates tini curl \
     && mkdir -p /var/rsface-media /tmp/rsface-jobs /app \
-    # 非 root 运行:rsface 用户(UID 10001),媒体/临时目录授权
-    && addgroup -S -g 10001 rsface \
-    && adduser -S -D -u 10001 -G rsface rsface \
-    && chown -R rsface:rsface /var/rsface-media /tmp/rsface-jobs /app
+    # 所有运行时目录 + 资产用数字 UID:GID 1000:1000(hyx)持有,
+    # 与 host data/* bind mount 对齐 —— docker-compose.yml 的
+    # `user: "1000:1000"` 直接生效,无需镜像内 user 名匹配。
+    && chown -R 1000:1000 /var/rsface-media /tmp/rsface-jobs /app
 
 # 复制静态二进制与资产
-COPY --from=build /build/platform/target/aarch64-unknown-linux-musl/release/rsface-server /usr/local/bin/rsface-server
-COPY --chown=rsface:rsface platform/web /app/web
-COPY cascade.rfcf /app/cascade.rfcf
+# 二进制 group=1000:root 让 UID 1000 进程可执行(root-owned 不可写,只可执行/读)
+COPY --chown=0:1000 --from=build /build/platform/target/aarch64-unknown-linux-musl/release/rsface-server /usr/local/bin/rsface-server
+COPY --chown=1000:1000 platform/web /app/web
+COPY --chown=1000:1000 cascade.rfcf /app/cascade.rfcf
 
 ENV BIND_ADDR=0.0.0.0:8080 \
     S3_ENDPOINT=http://rustfs:9000 \
@@ -67,7 +68,8 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     TMP_DIR=/tmp/rsface-jobs \
     LOCAL_MEDIA_DIR=/var/rsface-media
 
-USER rsface
+# 默认以 hyx (1000:1000) 跑;compose 可覆盖但没必要。
+USER 1000:1000
 WORKDIR /app
 EXPOSE 8080
 
