@@ -217,22 +217,31 @@ impl HaarFeature {
             // and every realistic face-window input (640×480 up to 4K) is
             // narrow. The branch is one per `eval_inbounds` call, not per
             // rect.
-            let sum: i64 = match self.kind {
-                FeatureKind::DiagonalEdge => ri.tilted_rect_sum_unchecked(rx, ry, rx + rw, ry + rh),
+            //
+            // The result stays in u64 when possible (the rect-sum
+            // inclusion-exclusion is always non-negative) so we save the
+            // `u64 → i64 → f64` cast chain that the historical
+            // implementation paid per rect.
+            let sum_f64: f64 = match self.kind {
+                FeatureKind::DiagonalEdge => {
+                    // Tilted rectangles are signed (45° diamond; the result
+                    // can be negative), so keep this in i64.
+                    let s = ri.tilted_rect_sum_unchecked(rx, ry, rx + rw, ry + rh);
+                    s as f64
+                }
                 _ => {
-                    if ii.is_wide() {
-                        ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as i64
+                    let s: u64 = if ii.is_wide() {
+                        ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh)
                     } else {
                         // SAFETY: caller guarantees the rect fits the
                         // window, which fits the image; narrow contract
                         // follows from `!is_wide()`.
-                        unsafe {
-                            ii.rect_sum_unchecked_narrow(rx, ry, rx + rw, ry + rh) as i64
-                        }
-                    }
+                        unsafe { ii.rect_sum_unchecked_narrow(rx, ry, rx + rw, ry + rh) }
+                    };
+                    s as f64
                 }
             };
-            let contribution = (sum as f64) * (r.weight as f64);
+            let contribution = sum_f64 * (r.weight as f64);
             total += contribution;
         }
         total as f32
