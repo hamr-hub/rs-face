@@ -70,17 +70,21 @@ docker exec -it rsface-postgres psql -U rsface -d rsface -c \
   "SELECT id, kind, status, frames_processed, total_detections FROM jobs;"
 ```
 
-## 6. 数据持久化(容器卷)
+## 6. 数据持久化(bind mount)
 
-| 卷名 | 内容 | 是否可删 |
+数据全部 bind mount 到仓库根 `data/` 目录(2026-09-18 起退役 docker
+named volume),跟随代码可见、可直接备份:
+
+| 目录 | 内容 | 是否可删 |
 |------|------|----------|
-| `platform_rustfs-data` | S3 桶数据(原始视频/标注/人脸裁剪) | ⚠ 删了任务就看不到图了 |
-| `platform_pg-data` | PostgreSQL job/frame/face 表 | ⚠ 删了任务历史就丢了 |
-| `platform_rsface-media` | 本地媒体降级缓存(S3 失败时用) | ✅ 可随时清 |
+| `data/rustfs/` | S3 桶数据(原始视频/标注/人脸裁剪) | ⚠ 删了任务就看不到图了 |
+| `data/pg/pgdata/` | PostgreSQL job/frame/face 表 | ⚠ 删了任务历史就丢了 |
+| `data/media/` | 上传媒体 + 本地媒体降级缓存(S3 失败时用) | ⚠ 含上传原件,清理前确认 |
 
 ```bash
-# 想完全清空重来
-docker compose -f platform/docker-compose.yml down -v
+# 想完全清空重来:先 down,再删 data/ 子目录(没有 named volume,-v 无效)
+docker compose -f platform/docker-compose.yml down
+rm -rf data/rustfs/* data/pg/pgdata/* data/media/*
 ```
 
 ## 7. 仅核心(不部署)的最小配置
@@ -88,7 +92,6 @@ docker compose -f platform/docker-compose.yml down -v
 > 如果只想跑 `rs-face` core SDK,不需要 web/PG,直接:
 
 ```bash
-cd /mnt/ssd/codespace/work/rs-face
 cargo build --release
 ./target/release/rsface-cli --help
 ```

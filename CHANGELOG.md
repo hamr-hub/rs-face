@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — platform server hardening
+- **Uploads now stream to a staging file instead of buffering in memory**
+  (`platform/server/src/api.rs`, `stream_field_to_staging`): the multipart
+  handler read the whole body via `field.bytes()` and then cloned it into a
+  `spawn_blocking`, so a few concurrent multi-GB uploads OOM-killed the
+  server. The field is now chunk-streamed to `tmp/staging/` with a running
+  size counter that rejects past the configured limit, the job is created
+  (queue slot counted) only after the full file lands, every prep-failure
+  path rolls index/DB/workdir/staging back, and startup sweeps the staging
+  directory of leftovers from crashed clients.
+- **`file://` removed from the accepted stream URL schemes**: an
+  unauthenticated client could point the ffmpeg-backed stream job at any
+  local file and watch it through SSE. RTSP/HTTP(S) LAN-camera use cases
+  stay; non-`test://` URLs must now parse to a non-empty host
+  (`url_authority_host`, userinfo/IPv6/port-aware) and are length-capped.
+- **Media endpoint path traversal closed**: `local://` keys are rejected
+  when absolute or when the canonicalised path escapes the media root, so
+  `local:///etc/passwd` and `local://../` style keys no longer read
+  arbitrary files.
+- **Telemetry is PII-filtered server-side** (`is_safe_event`): event names
+  and props are whitelisted/sanitised before they reach the JSONB column, so
+  tokens, email-like values and free-form input cannot be exfiltrated
+  through the analytics endpoint.
+- **SSE connection cap**: `/api/jobs/{id}/events` had no bound on concurrent
+  connections — each one spawned a task, opened a broadcast subscription
+  and could pin memory. A process-global counter now limits connections to
+  128 with HTTP 429 past the cap; terminal-event detection is typed
+  (`type` ∈ done/error/cancelled) instead of substring matching, and the
+  duplicate axum/SSE-layer keepalives are reduced to one.
+- **All error responses use one JSON envelope** (`{"error": ...}`) via
+  `error_response`, replacing the mix of plain-text bodies across job
+  detail/cancel/media/import.
+
+### Added — platform
+- **`download.zip` export**: a dependency-free STORE-method ZIP writer
+  (`platform/server/src/zip.rs`, local headers + central directory + EOCD,
+  const-built CRC-32 table) streams a job's face crops as one archive; unit
+  tests pin the record layout and known CRC vectors.
+- **"Compare (TB)" trigger on the job page** (`platform/web/`): a dedicated
+  button fires `tb-compare` into the existing compare pipeline, with
+  governed polling (tab-visibility aware) instead of an unconditional timer.
+
+### Fixed — platform runtime
+- **Job deletion now reclaims media**: deleting a job (single or batch)
+  fire-and-forget lists the `jobs/{id}/` S3 prefix and deletes every object,
+  then removes the local media and tmp work directories. The new
+  `list_objects` (continuation-token aware) / `delete_object` methods also
+  fixed a second SigV4 defect — canonical query parameters were sorted and
+  percent-encoded for signing but sent raw, which produced
+  `SignatureDoesNotMatch` whenever a key (e.g. continuation token) needed
+  encoding.
+- **O(n²) frame scan removed from the video loop**: per stored crop the job
+  summed face counts across all frames under a lock; replaced with a single
+  running counter.
+- **Migration runner hardened** (`platform/server/src/persist.rs`): a new
+  `schema_migrations` table records each applied file, files run inside one
+  transaction (a failing statement rolls the whole file back instead of
+  leaving a half schema plus only a log line), and statement splitting is
+  lexer-aware — nested block comments, line comments, quoted strings and
+  `$tag$` dollar-quoted bodies no longer split on inner semicolons.
+  Migration failure is now fatal at startup rather than a swallowed warning.
+- **Poison tolerance across aggregate reads**: if a worker panics while
+  holding a per-job lock, the job list, metrics and aggregate-sample paths
+  recover the last-known value instead of panicking and wedging the endpoint
+  for every subsequent request.
+
+### Changed — platform deployment
+- **Multi-arch image builds fixed** (`platform/Dockerfile`): the build target
+  was hardcoded to the arm64 musl triple; `TARGETARCH` now maps to
+  `aarch64`/`x86_64-unknown-linux-musl` (unknown arches fail explicitly).
+- **`docker-compose.yml`**: rustfs/postgres are pinned to
+  `rustfs/rustfs:1.0.0` and `postgres:16.15-alpine`, their ports bind on
+  `127.0.0.1` only (consoles no longer exposed to the LAN), the Postgres
+  password is parameterised via `.env` (`POSTGRES_PASSWORD`,
+  alphanumeric-only) with `DATABASE_URL` referencing the same value, and
+  `.env.example` documents every knob including timeouts and memory limits.
+- `.dockerignore` rewritten to keep the build context small (target/data/
+  models/web-dist excluded).
+
 ### Added — every algorithm is now a cargo trimmable
 - **Per-algorithm feature flags** turn the monolithic build into a pick-and-mix
   crate while `default` keeps the exact 0.2.x surface:

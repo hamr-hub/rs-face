@@ -5,9 +5,10 @@
  * augments exist by the time it runs.
  *
  * What it does:
- *  1. Clicking the topbar gear button (id=`tb-settings`) opens a small
+ *  1. Clicking the dedicated topbar button (id=`tb-compare`) opens a small
  *     dropdown menu containing an "algorithm compare mode" checkbox.
- *     The state is persisted to localStorage.
+ *     The state is persisted to localStorage. (The gear `tb-settings` is left
+ *     to app.js's settings modal — binding both to the gear double-fires.)
  *  2. When the toggle is on and a job enters preview, the module
  *     automatically calls
  *       POST /api/jobs/{id}/compare?algos=haar,cnn,luminance
@@ -91,6 +92,10 @@
         padding: 24px; text-align: center; color: rgba(255,255,255,0.6);
         font-size: 13px;
       }
+      #tb-compare[aria-pressed="true"] {
+        color: #33d17a;
+        border-color: rgba(51,209,122,0.55);
+      }
     `;
     const tag = document.createElement('style');
     tag.id = 'rsfc-styles';
@@ -101,7 +106,9 @@
   function ensureSettingsMenu() {
     let menu = document.getElementById('rsfc-settings-menu');
     if (menu) return menu;
-    const btn = document.getElementById('tb-settings');
+    // 用专用的 #tb-compare 按钮触发,避免和 app.js 绑定在 #tb-settings 上的
+    // openSettings 重复绑定(同一元素两个 click 监听会同时弹出设置与对比菜单)。
+    const btn = document.getElementById('tb-compare');
     if (!btn) return null;
     injectStyles();
     menu = document.createElement('div');
@@ -118,6 +125,7 @@
       </div>
     `;
     document.body.appendChild(menu);
+    btn.setAttribute('aria-pressed', isEnabled() ? 'true' : 'false');
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const r = btn.getBoundingClientRect();
@@ -130,35 +138,54 @@
     const toggle = menu.querySelector('#rsfc-cmp-toggle');
     toggle.addEventListener('change', () => {
       setEnabled(toggle.checked);
+      btn.setAttribute('aria-pressed', toggle.checked ? 'true' : 'false');
+      syncPolling();
       scheduleCompare();
     });
     return menu;
   }
 
   let lastJobId = null;
+  function currentJobId() {
+    // app.js 的 `state` 是经典脚本的全局词法绑定(不是 window 属性),
+    // 用 typeof 守卫跨模块引用;拿不到再退回从 DOM 文本解析。
+    if (typeof state !== 'undefined' && state.currentJobId) return state.currentJobId;
+    if (window.state && window.state.currentJobId) return window.state.currentJobId;
+    const idEl = document.getElementById('pv-id');
+    if (idEl && idEl.textContent) {
+      const m = idEl.textContent.match(/[#]?([0-9a-f-]+)/i);
+      if (m) return m[1];
+    }
+    return null;
+  }
   function scheduleCompare() {
     const enabled = isEnabled();
     const detail = document.getElementById('pv-detail');
     if (!enabled || !detail || detail.classList.contains('hidden')) {
+      lastJobId = null; // 复位:重新开启或再次打开同一任务时需要重新对比
       removeComparePanel();
       return;
     }
-    let jobId = null;
-    if (window.state && window.state.currentJobId) {
-      jobId = window.state.currentJobId;
-    } else {
-      const idEl = document.getElementById('pv-id');
-      if (idEl && idEl.textContent) {
-        const m = idEl.textContent.match(/[#]?([0-9a-f-]+)/i);
-        if (m) jobId = m[1];
-      }
-    }
-    if (!jobId || jobId === lastJobId) return;
+    const jobId = currentJobId();
+    if (!jobId) { lastJobId = null; return; }
+    if (jobId === lastJobId) return;
     lastJobId = jobId;
     fetchAndRenderCompare(jobId);
   }
 
-  setInterval(scheduleCompare, 600);
+  // 轮询治理:只在"功能开启 + 页面可见"时才每 600ms 检查一次预览状态;
+  // 关闭对比或切到后台立即清掉定时器,不再在每个页面常驻空轮询。
+  let pollTimer = null;
+  function syncPolling() {
+    const want = isEnabled() && document.visibilityState !== 'hidden';
+    if (want && pollTimer === null) {
+      pollTimer = setInterval(scheduleCompare, 600);
+    } else if (!want && pollTimer !== null) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+  document.addEventListener('visibilitychange', syncPolling);
 
   async function fetchAndRenderCompare(jobId) {
     const host = document.getElementById('pv-stage') || document.getElementById('pv-detail');
@@ -274,6 +301,7 @@
 
   function init() {
     ensureSettingsMenu();
+    syncPolling();
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

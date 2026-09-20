@@ -29,13 +29,12 @@ use crate::jobs::{JobKind, JobRegistry, JobStatus};
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use std::convert::Infallible;
-use std::io::BufReader;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
@@ -85,6 +84,7 @@ pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
         .route("/api/jobs/{id}/cancel", post(cancel_job))
         .route("/api/jobs/{id}/events", get(job_events))
         .route("/api/jobs/{id}/compare", post(compare_algos))
+        .route("/api/jobs/{id}/download.zip", get(download_zip))
         .route("/api/jobs/{id}/retry", post(retry_job))
         // 导入端点 — 语义上"导入"一次性任务(视频文件 / 视频 URL),
         // 返回 job_id + S3 LAN URL,浏览器可直接播放。
@@ -498,8 +498,9 @@ async fn metrics(State((state, caches)): State<(Arc<JobRegistry>, ResponseCaches
             JobStatus::Cancelled => cancelled += 1,
             JobStatus::Done => {}
         }
-        // 每个 job 只短持一次 stats 锁,不在 await 点持有。
-        let st = j.stats.lock().unwrap().clone();
+        // 每个 job 只短持一次 stats 锁,不在 await 点持有。poison 容忍:
+        // 单个 job 线程 panic 过不应该拖垮聚合接口。
+        let st = j.stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
         frames_processed += st.frames_processed;
         frames_with_face += st.frames_with_face;
         detections += st.total_detections;
@@ -545,7 +546,7 @@ async fn job_detail(
             v["frames"] = serde_json::to_value(&*job.frames.lock().unwrap()).unwrap_or_default();
             Json(v).into_response()
         }
-        None => (StatusCode::NOT_FOUND, "no such job").into_response(),
+        None => error_response(StatusCode::NOT_FOUND, "no such job"),
     }
 }
 
@@ -558,7 +559,7 @@ async fn cancel_job(
             job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             Json(serde_json::json!({"ok": true})).into_response()
         }
-        None => (StatusCode::NOT_FOUND, "no such job").into_response(),
+        None => error_response(StatusCode::NOT_FOUND, "no such job"),
     }
 }
 
@@ -573,6 +574,8 @@ async fn delete_job(
     tokio::spawn(async move {
         db.delete_job(&id_db).await;
     });
+    // 删除孤儿媒体:S3 `jobs/{id}/` 前缀全部对象 + 本地 media/tmp 目录。
+    state.spawn_media_cleanup(&id);
     if existed {
         Json(serde_json::json!({"ok": true, "deleted": id})).into_response()
     } else {
@@ -608,6 +611,10 @@ async fn batch_ops(
             tokio::spawn(async move {
                 db.delete_jobs(&ids).await;
             });
+            // 同单任务删除:逐个清理各自的媒体前缀。
+            for jid in &req.ids {
+                state.spawn_media_cleanup(jid);
+            }
             Json(serde_json::json!({"ok": true, "op": "delete", "requested": req.ids.len(), "removed_in_mem": removed.iter().filter(|x| **x).count()})).into_response()
         }
         "archive" => {
@@ -761,43 +768,60 @@ async fn compare_algos(
         }
     };
 
-    // 4) 对每个 algo 跑 detect(同步,因为 DetectorKind 不是 Send)。
-    //    因为 CnnDetector 持有 !Sync scratch,不能在多线程间共享,
-    //    所以串行跑,而不是 spawn_blocking.parallel。
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    for algo in &valid {
-        let det = match crate::jobs::build_detector_by_name(algo) {
-            Ok(d) => d,
-            Err(e) => {
-                results.push(serde_json::json!({
-                    "algo": algo,
-                    "error": e.to_string(),
-                }));
-                continue;
+    // 4) CPU 检测整段移入 spawn_blocking,避免在 tokio worker 上同步执行检测
+    //    (CnnDetector 持有 !Sync scratch、DetectorKind !Sync,无法跨 async 任务
+    //    共享,故在闭包内构造/串行执行/丢弃,而非并行)。
+    let requested_algos = valid.clone();
+    let detect = tokio::task::spawn_blocking(move || {
+        let width = gray.width();
+        let height = gray.height();
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        for algo in &valid {
+            match crate::jobs::build_detector_by_name(algo) {
+                Ok(det) => {
+                    let t0 = std::time::Instant::now();
+                    let dets = det.detect(&gray);
+                    let elapsed_ms = t0.elapsed().as_millis() as u64;
+                    results.push(serde_json::json!({
+                        "algo": algo,
+                        "detection_count": dets.len(),
+                        "elapsed_ms": elapsed_ms,
+                        "detections": dets.iter().map(|d| serde_json::json!({
+                            "x": d.x, "y": d.y, "w": d.w, "h": d.h, "score": d.score,
+                        })).collect::<Vec<_>>(),
+                    }));
+                }
+                Err(e) => {
+                    results.push(serde_json::json!({"algo": algo, "error": e.to_string()}));
+                }
             }
-        };
-        let t0 = std::time::Instant::now();
-        let dets = det.detect(&gray);
-        let elapsed_ms = t0.elapsed().as_millis() as u64;
-        results.push(serde_json::json!({
-            "algo": algo,
-            "detection_count": dets.len(),
-            "elapsed_ms": elapsed_ms,
-            "detections": dets.iter().map(|d| serde_json::json!({
-                "x": d.x, "y": d.y, "w": d.w, "h": d.h, "score": d.score,
-            })).collect::<Vec<_>>(),
-        }));
-    }
+        }
+        (width, height, results)
+    })
+    .await;
+    let (width, height, results) = match detect {
+        Ok(v) => v,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("detect join: {e}"),
+            )
+        }
+    };
 
     Json(serde_json::json!({
         "job_id": id,
-        "width": gray.width(),
-        "height": gray.height(),
-        "requested_algos": valid,
+        "width": width,
+        "height": height,
+        "requested_algos": requested_algos,
         "results": results,
     }))
     .into_response()
 }
+
+/// ffmpeg 单图转换的硬超时:损坏/截断的输入可能让 ffmpeg 长时间不退出,
+/// 必须有上限,超时即 kill。
+const FFMPEG_IMAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Decode arbitrary image bytes (PNG/PGM/PPM/JPG via ffmpeg) into a GrayImage.
 /// Falls back to ffmpeg-based PGM conversion for JPG/WebP inputs that the
@@ -826,28 +850,62 @@ async fn decode_to_gray(
         let rgb = rsface::image::codec::read_ppm(&mut cur)?;
         return Ok(rgb.to_gray());
     }
-    // JPG / WebP / other: fall back to ffmpeg → PGM.
+    // JPG / WebP / other: fall back to bounded ffmpeg → PGM.
+    // 2026-09-20:旧实现用同步 Command::output()(无超时,损坏输入可让 ffmpeg
+    // 永久挂起)+ std fs(阻塞 async runtime),且 compare 临时目录从不清理。
+    // 改为 tokio::process + 硬超时 + kill,并在结束时删除临时目录。
     let work_dir = tmp_dir.join(format!("compare-{job_id}"));
-    std::fs::create_dir_all(&work_dir)?;
-    let in_path = work_dir.join("input.bin");
-    let out_path = work_dir.join("out.pgm");
-    std::fs::write(&in_path, bytes)?;
-    let status = std::process::Command::new("ffmpeg")
-        .args(["-y", "-i"])
-        .arg(&in_path)
-        .args(["-pix_fmt", "gray", "-f", "image2"])
-        .arg(&out_path)
-        .output()
-        .map_err(|e| std::io::Error::other(format!("ffmpeg spawn: {e}")))?;
-    if !status.status.success() {
-        return Err(std::io::Error::other(format!(
-            "ffmpeg image convert failed: {}",
-            String::from_utf8_lossy(&status.stderr)
-        )));
+    let conv: std::io::Result<rsface::image::GrayImage> = async {
+        tokio::fs::create_dir_all(&work_dir).await?;
+        let in_path = work_dir.join("input.bin");
+        let out_path = work_dir.join("out.pgm");
+        tokio::fs::write(&in_path, bytes).await?;
+        let mut child = tokio::process::Command::new("ffmpeg")
+            .args(["-y", "-i"])
+            .arg(&in_path)
+            .args(["-pix_fmt", "gray", "-f", "image2"])
+            .arg(&out_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| std::io::Error::other(format!("ffmpeg spawn: {e}")))?;
+        // wait() 只借用 child,这样超时分支仍能 start_kill + 回收。
+        let status = match tokio::time::timeout(FFMPEG_IMAGE_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => return Err(std::io::Error::other(format!("ffmpeg wait: {e}"))),
+            Err(_) => {
+                // 超时:终止子进程并回收,避免泄漏。
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(std::io::Error::other(format!(
+                    "ffmpeg image convert timed out after {}s",
+                    FFMPEG_IMAGE_TIMEOUT.as_secs()
+                )));
+            }
+        };
+        if !status.success() {
+            // 单图转换 stderr 量很小,wait 之后再排空不会撑爆管道缓冲。
+            let mut err = String::new();
+            if let Some(mut se) = child.stderr.take() {
+                use tokio::io::AsyncReadExt;
+                let _ = se.read_to_string(&mut err).await;
+            }
+            return Err(std::io::Error::other(format!(
+                "ffmpeg image convert failed: {err}"
+            )));
+        }
+        let pgm = tokio::fs::read(&out_path).await?;
+        tokio::task::spawn_blocking(move || {
+            let mut cur = std::io::Cursor::new(pgm);
+            rsface::image::codec::read_pgm(&mut cur)
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("pgm join: {e}")))?
     }
-    let f = std::fs::File::open(&out_path)?;
-    let mut reader = BufReader::new(f);
-    rsface::image::codec::read_pgm(&mut reader)
+    .await;
+    // 无论成功失败都清理 compare 临时目录。
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    conv
 }
 
 async fn upload_image(
@@ -864,9 +922,62 @@ async fn upload_video(
     handle_upload(state, mp, JobKind::Video).await
 }
 
+/// 上传字段分块落盘失败类型。
+enum StagingError {
+    /// 流式读取过程中累计字节已超过上限。
+    TooLarge { len: u64 },
+    /// 读字段或写暂存文件失败(客户端中断连接、磁盘错误等)。
+    Io(std::io::Error),
+}
+
+/// 把 multipart `file` 字段分块直落到暂存文件,读取同时累加字节数;
+/// 超过 `max_bytes` 立即中断并删掉暂存文件。旧实现 `field.bytes()` 把
+/// GB 级视频整个读进内存(之后 `spawn_blocking` 还 clone 一份),并发
+/// 上传极易 OOM。
+async fn stream_field_to_staging(
+    cfg: &crate::config::Config,
+    mut field: axum::extract::multipart::Field<'_>,
+    max_bytes: usize,
+) -> Result<std::path::PathBuf, StagingError> {
+    use tokio::io::AsyncWriteExt;
+
+    let path = crate::jobs::staging_upload_path(cfg);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(StagingError::Io)?;
+    }
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .map_err(StagingError::Io)?;
+    let mut total: u64 = 0;
+    let outcome: Result<(), StagingError> = async {
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| StagingError::Io(std::io::Error::other(e.to_string())))?
+        {
+            total = total.saturating_add(chunk.len() as u64);
+            if total > max_bytes as u64 {
+                return Err(StagingError::TooLarge { len: total });
+            }
+            file.write_all(&chunk).await.map_err(StagingError::Io)?;
+        }
+        file.flush().await.map_err(StagingError::Io)?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = outcome {
+        drop(file);
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(e);
+    }
+    Ok(path)
+}
+
 async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind) -> Response {
     // 分层大小上限(路由层 DefaultBodyLimit 已按 kind 限制,这里再在
-    // field 读取时做内存保护:超过即中断,避免把整个 body 缓进内存)。
+    // field 分块读取时做流式计数保护:超过即中断,不再把整个 body 缓进内存)。
     let max_bytes = match kind {
         JobKind::Image => state.cfg.upload_limit_image,
         _ => state.cfg.upload_limit_video,
@@ -874,27 +985,25 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
     // 取第一个 file 字段。
     // 同时提取 `algo` 字段(可选)作为本 job 的算法覆盖。
     let mut filename = None;
-    let mut bytes: Vec<u8> = Vec::new();
+    let mut staged_path: Option<std::path::PathBuf> = None;
     let mut algo_override: Option<String> = None;
     while let Ok(Some(field)) = mp.next_field().await {
         match field.name() {
             Some("file") => {
+                if staged_path.is_some() {
+                    // 多个 file 字段:只接受第一个,后续直接忽略。
+                    continue;
+                }
                 filename = field.file_name().map(|s| s.to_string());
-                match field.bytes().await {
-                    Ok(b) => {
-                        if b.len() > max_bytes {
-                            return error_response(
-                                StatusCode::PAYLOAD_TOO_LARGE,
-                                &format!(
-                                    "upload too large: {} bytes (max {} bytes)",
-                                    b.len(),
-                                    max_bytes
-                                ),
-                            );
-                        }
-                        bytes = b.to_vec();
+                match stream_field_to_staging(&state.cfg, field, max_bytes).await {
+                    Ok(p) => staged_path = Some(p),
+                    Err(StagingError::TooLarge { len }) => {
+                        return error_response(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            &format!("upload too large: {} bytes (max {} bytes)", len, max_bytes),
+                        );
                     }
-                    Err(e) => {
+                    Err(StagingError::Io(e)) => {
                         return error_response(
                             StatusCode::BAD_REQUEST,
                             &format!("read upload: {e}"),
@@ -916,16 +1025,31 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         }
     }
     let Some(name) = filename else {
+        if let Some(p) = staged_path {
+            let _ = tokio::fs::remove_file(p).await;
+        }
         return error_response(StatusCode::BAD_REQUEST, "missing 'file' field");
     };
-    if bytes.is_empty() {
+    let Some(staged) = staged_path else {
+        return error_response(StatusCode::BAD_REQUEST, "empty upload");
+    };
+    // 空文件(0 字节)直接拒绝并清理暂存。
+    let is_empty = tokio::fs::metadata(&staged)
+        .await
+        .map(|m| m.len() == 0)
+        .unwrap_or(true);
+    if is_empty {
+        let _ = tokio::fs::remove_file(&staged).await;
         return error_response(StatusCode::BAD_REQUEST, "empty upload");
     }
 
     let ext = sanitized_ext(&name, kind);
     let job = match state.create(kind, name.clone()) {
         Ok(j) => j,
-        Err(e) => return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string()),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&staged).await;
+            return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string());
+        }
     };
     let id = job.id.clone();
     state.set_original_input(&id, name.clone());
@@ -933,8 +1057,8 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         state.set_algo_override(&id, a);
     }
 
-    // 落盘(阻塞 IO 放到 blocking 线程)。
-    // Image kind:对 PNG / JPG 先 ffmpeg 转 PGM,平台层兜底,core 的 PNG
+    // 暂存文件移入 job 工作目录(阻塞 IO 放 blocking 线程)。
+    // Image kind:再对 PNG / JPG 用 ffmpeg 转 PPM,平台层兜底,core 的 PNG
     // 解码只支持 stored 块不再成为瓶颈;同时把用户的原始字节另行落到
     // local_media_dir/original.{ext},供 web 端的 preview 展示。
     let (path, pre_stored_original) = {
@@ -942,10 +1066,10 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         let idc = id.clone();
         let kind_l = kind;
         let ext_l = ext.clone();
-        let bytes_l = bytes.clone();
+        let staged_l = staged.clone();
         match tokio::task::spawn_blocking(move || -> std::io::Result<(String, Option<String>)> {
-            // 1) 用户的原始文件写到 tmp_dir(给 ffmpeg / core 读)
-            let raw_path = crate::jobs::save_upload(&cfg, &idc, &ext_l, &bytes_l)?;
+            // 1) 暂存文件 rename 到 job 目录(给 ffmpeg / core 读)
+            let raw_path = crate::jobs::move_staged_into_job(&cfg, &staged_l, &idc, &ext_l)?;
             // 2) Image:把 PNG/JPG 转成 PPM(RGB 三通道),core 直接吃
             //    旧实现是 PGM(灰度),导致标注/裁剪全是灰色。
             //    注意:这里用 ppm 还是走 core 的 read_ppm 路径,会同时拿到 gray + rgb。
@@ -967,7 +1091,10 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
                         String::from_utf8_lossy(&status.stderr)
                     )));
                 }
-                // 3) 用户的原始字节落到 local_media_dir,作 preview 用
+                // 3) 用户的原始字节落到 local_media_dir,作 preview 用。
+                //    图片上限小(MB 级),blocking 里读回内存可接受;视频路径
+                //    全程不落内存,见 stream_field_to_staging。
+                let bytes = std::fs::read(&raw_path)?;
                 let display_key = format!("jobs/{idc}/original.{ext_l}");
                 let ct = match ext_l.as_str() {
                     "png" => "image/png",
@@ -977,7 +1104,7 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
                     _ => "application/octet-stream",
                 };
                 let stored =
-                    crate::jobs::put_bytes_with_fallback_blocking(&cfg, &display_key, ct, &bytes_l);
+                    crate::jobs::put_bytes_with_fallback_blocking(&cfg, &display_key, ct, &bytes);
                 Ok((ppm.to_string_lossy().to_string(), Some(stored)))
             } else {
                 Ok((raw_path.to_string_lossy().to_string(), None))
@@ -987,16 +1114,25 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
+                // 任务已 create() 占用了一个 queued 名额,但 prep 失败不会进入
+                // run_job,必须回退计数并移除索引,否则累积到 max_queue_depth 后
+                // 服务器会永久返回 429。同时清掉刚建的 job 工作目录/暂存残留。
+                discard_created_job(&state, &id);
+                remove_job_workdir(&state, &id);
+                let _ = std::fs::remove_file(&staged);
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("upload prep: {e}"),
-                )
+                );
             }
             Err(e) => {
+                discard_created_job(&state, &id);
+                remove_job_workdir(&state, &id);
+                let _ = std::fs::remove_file(&staged);
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("upload join: {e}"),
-                )
+                );
             }
         }
     };
@@ -1031,16 +1167,23 @@ async fn start_stream(
     Json(req): Json<StreamReq>,
 ) -> Response {
     let url = req.url.trim().to_string();
-    if !(url.starts_with("rtsp://")
-        || url.starts_with("http://")
-        || url.starts_with("https://")
-        || url.starts_with("file://")
-        || url.starts_with("test://"))
+    // 2026-09-20 security:允许 rtsp/http(s) 摄像头与 test:// 合成源,
+    // 但拒绝 file:// —— 未认证调用方可借它让 ffmpeg 读容器内任意文件,
+    // 再通过本 job 的 SSE 帧把内容取回(本地文件读取原语)。
+    if url.len() > 2048
+        || !(url.starts_with("rtsp://")
+            || url.starts_with("http://")
+            || url.starts_with("https://")
+            || url.starts_with("test://"))
     {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "url must be rtsp:// http(s):// file:// or test://",
+            "url must be rtsp:// http(s):// or test://",
         );
+    }
+    // 解析一遍确认 host 非空(挡掉 `rtsp:///garbage` 这类畸形输入)。
+    if !url.starts_with("test://") && url_authority_host(&url).is_none() {
+        return error_response(StatusCode::BAD_REQUEST, "url has no host");
     }
     let display = url.clone();
     let job = match state.create(JobKind::Stream, display) {
@@ -1054,6 +1197,28 @@ async fn start_stream(
     }
     state.spawn_run(job, url);
     Json(serde_json::json!({"job_id": id})).into_response()
+}
+
+/// 从 `scheme://[userinfo@]host[:port][/...]` 中取出 host(不含 userinfo/port)。
+/// 不引入 url crate:这里只需确认 authority 的 host 部分非空。
+/// IPv6 字面量必须按 URL 规范带方括号。
+fn url_authority_host(url: &str) -> Option<&str> {
+    let rest = url.split("://").nth(1)?;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    // 去掉 userinfo(最后一个 @ 之后才是 host[:port])。
+    let host_port = authority.rsplit('@').next()?;
+    let host = if let Some(inside) = host_port.strip_prefix('[') {
+        inside.split(']').next()?
+    } else {
+        // 去掉可选 :port;split 取第一个 ':' 之前;无 ':' 时返回整个串。
+        host_port.split(':').next()?
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
 }
 
 /// 用户行为埋点接收端点。
@@ -1087,20 +1252,24 @@ async fn telemetry_ingest(
         // 单批 500 上限,防恶意/异常写入压垮写入路径。
         return error_response(StatusCode::BAD_REQUEST, "batch too large (max 500 events)");
     }
-    let accepted = body.events.iter().filter(|e| is_safe_event(e)).count();
+    // 2026-09-20 security:只把通过服务端脱敏过滤的事件落库/计数。旧代码虽然
+    // 计算了 accepted,却把未过滤的 `body.events.clone()` 写进 DB,使接口承诺
+    // 的 PII 脱敏失效。这里过滤一次,落库与计数共用同一份。
+    let safe: Vec<crate::persist::TelemetryEvent> =
+        body.events.into_iter().filter(is_safe_event).collect();
+    let accepted = safe.len();
     // 永远 stdout 一份,方便开发模式无 DB 也能看埋点。
-    if let Some(first) = body.events.first() {
+    if let Some(first) = safe.first() {
         eprintln!(
             "[telemetry] batch {} events, accepted={} first.name={}",
             n, accepted, first.name
         );
     }
     // 有 DB → 异步批量落库
-    if state.db.pool.is_some() {
+    if state.db.pool.is_some() && !safe.is_empty() {
         let db = state.db.clone();
-        let events = body.events.clone();
         tokio::spawn(async move {
-            db.insert_telemetry_batch(&events).await;
+            db.insert_telemetry_batch(&safe).await;
         });
     }
     Json(serde_json::json!({"ok": true, "accepted": accepted})).into_response()
@@ -1131,14 +1300,37 @@ struct EventsQuery {
     last_event_id: Option<u64>,
 }
 
+/// 并发 SSE 连接计数。每个连接 = 1 个 task + 256 深度 mpsc + 一个
+/// broadcast 订阅,不加限制可被无限开连接耗尽内存。
+static SSE_CONNECTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// SSE 连接硬上限。LAN 单机产品,128 已远超合理的浏览器标签页数量。
+const MAX_SSE_CONNECTIONS: u64 = 128;
+
+/// 连接计数守卫:task 任何路径退出都会减计数(Drop 兜底)。
+struct SseConnectionGuard;
+impl Drop for SseConnectionGuard {
+    fn drop(&mut self) {
+        SSE_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 async fn job_events(
     State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
     Path(id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return (StatusCode::NOT_FOUND, "no such job").into_response();
+        return error_response(StatusCode::NOT_FOUND, "no such job");
     };
+    // 连接数限制:超限直接拒绝,不再 subscribe/spawn。
+    let active = SSE_CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    if active > MAX_SSE_CONNECTIONS {
+        SSE_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many SSE connections, retry later",
+        );
+    }
     let rx = job.event_tx.subscribe();
 
     // 起始 event id = 客户端上次收到的;没传则从 0 开始。
@@ -1171,6 +1363,8 @@ async fn job_events(
     // 整个逻辑都在一个 task 里,handler 几乎瞬时返回 → 不占用 axum 工作线程。
     let (tx, rx_async) = tokio::sync::mpsc::channel::<Event>(256);
     tokio::spawn(async move {
+        // 连接计数随 task 生命周期释放(任何退出/提前 return 都走 Drop)。
+        let _connection_guard = SseConnectionGuard;
         // 1) 回放历史
         for (id, payload) in replay {
             if id <= start_after {
@@ -1217,9 +1411,9 @@ async fn job_events(
             };
             match item {
                 Some(Ok(payload)) => {
-                    let done = payload.contains("\"type\":\"done\"")
-                        || payload.contains("\"type\":\"error\"")
-                        || payload.contains("\"type\":\"cancelled\"");
+                    // 类型化判断终态:旧实现用字符串子串匹配 JSON,字段顺序
+                    // 或空格变化都会漏判;解析后取 type 字段与终态集合比较。
+                    let done = sse_payload_is_terminal(&payload);
                     seq_counter += 1;
                     let evt = Event::default().id(seq_counter.to_string()).data(payload);
                     if tx.send(evt).await.is_err() {
@@ -1235,10 +1429,20 @@ async fn job_events(
         }
     });
     // ReceiverStream 已经是 Stream<Item=Event>;wrap 成 Result<Event, Infallible>。
+    // 不再叠加 axum KeepAlive:task 内部已按 sse_keepalive_secs 显式发
+    // keepalive 注释帧(并顺带做停机检测),两层 keepalive 会重复发帧。
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_async).map(Ok::<Event, Infallible>);
-    Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-        .into_response()
+    Sse::new(stream).into_response()
+}
+
+/// 解析事件 JSON,type ∈ done/error/cancelled 时为终态(发送端任务
+/// 随即关闭 SSE 连接,前端 EventSource 触发结束/错误回调)。
+fn sse_payload_is_terminal(payload: &str) -> bool {
+    const TERMINAL: &[&str] = &["done", "error", "cancelled"];
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+        .is_some_and(|t| TERMINAL.contains(&t.as_str()))
 }
 
 /// 构造 206 Partial Content 响应(动态 Content-Range/Content-Length 需要运行期
@@ -1352,7 +1556,13 @@ async fn media(
         .or_else(|| key.strip_prefix("s3://").map(|s| s.to_string()))
         .unwrap_or_else(|| key.clone());
     if cleaned.contains("..") || cleaned.contains('\\') {
-        return (StatusCode::BAD_REQUEST, "bad key").into_response();
+        return error_response(StatusCode::BAD_REQUEST, "bad key");
+    }
+    // 2026-09-20 security:拒绝绝对路径。`Path::join` 遇到绝对路径的右值会
+    // 直接丢弃 base,否则 `/media//etc/passwd`(或 URL 编码的 %2F)会解析到
+    // media 根之外,造成未授权任意文件读取。
+    if cleaned.starts_with('/') {
+        return error_response(StatusCode::BAD_REQUEST, "bad key");
     }
 
     // `inline://` 兜底:这种 key 表示数据 base64 嵌在 SSE 事件的 `inline`
@@ -1361,11 +1571,10 @@ async fn media(
     // 提示,避免前端误用 `/media/inline%3A%2F%2F...` 拿到空 404 后不知道
     // 是配置问题还是数据问题。
     if cleaned.starts_with("inline://") || key.starts_with("inline://") {
-        return (
+        return error_response(
             StatusCode::GONE,
             "inline:// keys must be fetched via SSE replay (look for `inline` field in frame events)",
-        )
-            .into_response();
+        );
     }
 
     // Range 支持(视频拖动进度条):浏览器 / <video> 控件会发
@@ -1382,6 +1591,19 @@ async fn media(
 
     // ---- local 命中 ----
     if local_path.is_file() {
+        // 2026-09-20 security:canonicalize 解析符号链接后,确认最终路径仍落在
+        // media 根内,堵住"media 根内的 symlink 指向外部文件"这类逃逸。
+        // is_file() 为真意味着根目录必然存在,两个 canonicalize 都应成功。
+        let inside = match (
+            tokio::fs::canonicalize(&state.cfg.local_media_dir).await,
+            tokio::fs::canonicalize(&local_path).await,
+        ) {
+            (Ok(root), Ok(c)) => c.starts_with(root),
+            _ => false,
+        };
+        if !inside {
+            return error_response(StatusCode::BAD_REQUEST, "bad key");
+        }
         // 先拿文件长度(无 Range 时也直接读,旧路径)。
         let total = match tokio::fs::metadata(&local_path).await {
             Ok(m) => m.len(),
@@ -1428,7 +1650,7 @@ async fn media(
                 bytes,
             )
                 .into_response(),
-            Err(_) => (StatusCode::NOT_FOUND, "local object not found").into_response(),
+            Err(_) => error_response(StatusCode::NOT_FOUND, "local object not found"),
         };
     }
 
@@ -1493,7 +1715,7 @@ async fn media(
                 "[media] not found local='{}' and S3 lookup failed",
                 local_path.display()
             );
-            (StatusCode::NOT_FOUND, "object not found").into_response()
+            error_response(StatusCode::NOT_FOUND, "object not found")
         }
     }
 }
@@ -1518,8 +1740,165 @@ fn sanitized_ext(name: &str, kind: JobKind) -> String {
     }
 }
 
+/// 按 media key(`local://` / `s3://`,或无 scheme 的 local 相对路径)读取整个
+/// 对象。供 zip 导出收集各部分。
+async fn read_media_object(state: &JobRegistry, key: &str) -> std::io::Result<Vec<u8>> {
+    if let Some(rest) = key.strip_prefix("local://") {
+        return tokio::fs::read(state.cfg.local_media_dir.join(rest)).await;
+    }
+    if let Some(rest) = key.strip_prefix("s3://") {
+        let s3 = state.s3.clone();
+        let k = rest.to_string();
+        return match tokio::task::spawn_blocking(move || s3.get_object(&k)).await {
+            Ok(Ok((b, _ct))) => Ok(b),
+            Ok(Err(e)) => Err(std::io::Error::other(format!("s3 get: {e}"))),
+            Err(e) => Err(std::io::Error::other(format!("s3 join: {e}"))),
+        };
+    }
+    tokio::fs::read(state.cfg.local_media_dir.join(key)).await
+}
+
+/// 取 media key 末段的扩展名(最后一个点之后),校验为短的字母数字,异常时退回 bin。
+fn key_extension(key: &str) -> String {
+    let base = key.rsplit('/').next().unwrap_or(key);
+    match base.rsplit('.').next() {
+        Some(ext)
+            if !ext.is_empty()
+                && ext.len() <= 5
+                && ext.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            ext.to_ascii_lowercase()
+        }
+        _ => "bin".to_string(),
+    }
+}
+
+/// `GET /api/jobs/{id}/download.zip` — 打包导出原始媒体 + 标注帧 + 人脸裁剪
+/// + `manifest.json`。STORE 零压缩、零新增依赖(见 `zip.rs`)。
+async fn download_zip(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(job) = state.get(&id) else {
+        return error_response(StatusCode::NOT_FOUND, "no such job");
+    };
+    // Mutex 中毒也不 panic:取内部值继续,避免单个任务毒锁把请求线程带挂。
+    let frames = job.frames.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let original_media = job
+        .original_media_key
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let algo = job.algo.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let stats = job.stats.lock().unwrap_or_else(|p| p.into_inner()).clone();
+
+    let mut zip = crate::zip::ZipWriter::new();
+    let mut manifest_frames: Vec<serde_json::Value> = Vec::new();
+
+    // 原始媒体。
+    if let Some(key) = &original_media {
+        if let Ok(bytes) = read_media_object(&state, key).await {
+            let ext = key_extension(key);
+            let _ = zip.add_file(&format!("original/original.{ext}"), &bytes);
+        }
+    }
+
+    // 标注帧 + 人脸裁剪。
+    for fr in &frames {
+        let Some(ann_key) = &fr.annotated_key else {
+            continue;
+        };
+        let Ok(ann_bytes) = read_media_object(&state, ann_key).await else {
+            continue;
+        };
+        let frame_name = format!("annotated/frame_{:06}.png", fr.index);
+        if zip.add_file(&frame_name, &ann_bytes).is_err() {
+            continue;
+        }
+        let mut face_files: Vec<serde_json::Value> = Vec::new();
+        for (i, f) in fr.faces.iter().enumerate() {
+            let Ok(crop) = read_media_object(&state, &f.key).await else {
+                continue;
+            };
+            let face_name = format!("faces/frame_{:06}_face_{:02}.png", fr.index, i);
+            if zip.add_file(&face_name, &crop).is_ok() {
+                face_files.push(serde_json::json!({
+                    "file": face_name,
+                    "x": f.x, "y": f.y, "w": f.w, "h": f.h, "score": f.score,
+                }));
+            }
+        }
+        manifest_frames.push(serde_json::json!({
+            "index": fr.index,
+            "timestamp_ms": fr.timestamp_ms,
+            "file": frame_name,
+            "faces": face_files,
+        }));
+    }
+
+    let exported_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let manifest = serde_json::json!({
+        "job_id": job.id,
+        "display_name": job.display_name,
+        "kind": match job.kind {
+            JobKind::Image => "image", JobKind::Video => "video", JobKind::Stream => "stream",
+        },
+        "algo": algo,
+        "stats": stats,
+        "frames": manifest_frames,
+        "exported_ms": exported_ms,
+    });
+    let _ = zip.add_file("manifest.json", manifest.to_string().as_bytes());
+
+    let bytes = zip.finish();
+    // 文件名只用 id(hex-dash 安全字符),不嵌入可能含引号的 display_name。
+    let id_head: String = id.chars().take(8).collect();
+    let disposition = format!("attachment; filename=\"rsface-{id_head}.zip\"");
+    (
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 fn error_response(code: StatusCode, msg: &str) -> Response {
     (code, Json(serde_json::json!({"error": msg}))).into_response()
+}
+
+/// `JobRegistry::create()` 已成功、但任务在进入 `run_job` 之前就失败时的统一
+/// 回滚:释放占用的 queued 计数 + 从内存索引移除 + 尽力删除 DB 里的 Queued 行,
+/// 避免僵尸任务把队列计数顶到上限导致永久 429,以及 PG 里残留 Queued 行。
+///
+/// 注意:`create()` 内部以 fire-and-forget 方式异步 insert_job,与此处的 delete
+/// 存在极小的竞态窗口(delete 先于 insert 提交则行会留下)。当前重启不做
+/// hydration,残留 Queued 行无运行时影响;未来接入 hydration 时应让 insert
+/// 以登记时的真实状态为准,届时彻底消除该竞态。
+fn discard_created_job(state: &JobRegistry, id: &str) {
+    state.abandon_job(id);
+    let db = state.db.clone();
+    let jid = id.to_string();
+    tokio::spawn(async move {
+        db.delete_job(&jid).await;
+    });
+}
+
+/// 尽力删除 job 在 tmp_dir 下的工作目录(prep 阶段失败时的残留)。
+/// 阻塞 remove_dir_all 放到 blocking 线程,失败只告警不阻断响应。
+fn remove_job_workdir(state: &JobRegistry, id: &str) {
+    let dir = state.cfg.tmp_dir.join(id);
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("[jobs] cleanup workdir {dir:?} failed: {e}");
+            }
+        }
+    });
 }
 
 // ============================================================================
@@ -1676,11 +2055,11 @@ async fn import_video(
         .and_then(|v| v.as_str())
         .map(String::from);
     let Some(id) = id else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "missing job_id").into_response();
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "missing job_id");
     };
     let job = match state.get(&id) {
         Some(j) => j,
-        None => return (StatusCode::INTERNAL_SERVER_ERROR, "job vanished").into_response(),
+        None => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "job vanished"),
     };
     // 原始文件还没落 S3 时(run_job 还没跑到那一步),URL 为 null;
     // 前端可在轮询 `/api/import/{id}/urls` 拿最新值。
@@ -1738,12 +2117,15 @@ async fn import_video_url(
     {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            // 创建了 job 但拉取失败 — 标记为 error,不进入 run_job。
-            let _ = state.remove(&id);
+            // 创建了 job 但拉取失败,不进入 run_job:回退 queued 计数,并清理
+            // 可能残留了部分 input.mp4 的工作目录(此路径 run_job/finalize 不会执行)。
+            discard_created_job(&state, &id);
+            let _ = std::fs::remove_dir_all(&work_dir);
             return error_response(StatusCode::BAD_GATEWAY, &format!("fetch remote video: {e}"));
         }
         Err(e) => {
-            let _ = state.remove(&id);
+            discard_created_job(&state, &id);
+            let _ = std::fs::remove_dir_all(&work_dir);
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("fetch join: {e}"),
@@ -1785,7 +2167,7 @@ async fn import_urls(
     Path(id): Path<String>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return (StatusCode::NOT_FOUND, "no such job").into_response();
+        return error_response(StatusCode::NOT_FOUND, "no such job");
     };
     let original = job.original_media_key.lock().unwrap().clone();
     // 找第一张标注帧作 cover_key(供 /api/jobs 已有的 SSE 流复用)。
@@ -2033,6 +2415,44 @@ mod import_tests {
         assert_eq!(url_encode_path("a b?c"), "a%20b%3Fc");
         // 已经编码的百分号要二次 encode(避免把 %3F 拆开)
         assert_eq!(url_encode_path("a%20b"), "a%2520b");
+    }
+
+    #[test]
+    fn sse_terminal_detection_is_typed() {
+        assert!(sse_payload_is_terminal(r#"{"type":"done"}"#));
+        assert!(sse_payload_is_terminal(r#"{"type":"error","message":"x"}"#));
+        assert!(sse_payload_is_terminal(
+            r#"{"status":"x","type":"cancelled"}"#
+        ));
+        // 非终态 / 非 JSON / 缺字段 → false
+        assert!(!sse_payload_is_terminal(r#"{"type":"frame"}"#));
+        assert!(!sse_payload_is_terminal("not json"));
+        assert!(!sse_payload_is_terminal(r#"{"no":"type"}"#));
+        // 带空格的 JSON 也能识别(旧子串匹配会漏)
+        assert!(sse_payload_is_terminal(r#"{ "type": "done" }"#));
+    }
+
+    #[test]
+    fn url_authority_host_parses_schemes() {
+        assert_eq!(
+            url_authority_host("rtsp://192.168.1.10:554/cam"),
+            Some("192.168.1.10")
+        );
+        // userinfo 必须剥掉
+        assert_eq!(
+            url_authority_host("https://user:pass@example.com/path"),
+            Some("example.com")
+        );
+        // 无 port 的 plain host
+        assert_eq!(
+            url_authority_host("http://localhost:8080"),
+            Some("localhost")
+        );
+        // bracketed IPv6
+        assert_eq!(url_authority_host("rtsp://[fe80::1]:554/"), Some("fe80::1"));
+        // 畸形:空 host / 无 scheme
+        assert!(url_authority_host("rtsp:///garbage").is_none());
+        assert!(url_authority_host("not-a-url").is_none());
     }
 
     #[test]
