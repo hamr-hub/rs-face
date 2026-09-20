@@ -831,6 +831,112 @@ body {
 .toast-pill .pill-msg { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
 .toast-pill:hover { background: var(--bg-4); }
 
+/* ============ 上传队列面板(浮动右下) ============ */
+#upload-queue-panel {
+  position: fixed; right: 18px; bottom: 18px;
+  width: 320px; max-width: calc(100vw - 36px);
+  background: var(--bg-2); color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  z-index: 240; /* 比 toast-host(250)低,toast 仍能盖住 */
+  font-size: 12px;
+  display: flex; flex-direction: column;
+  max-height: 60vh;
+}
+#upload-queue-panel.seq-hidden { display: none; }
+#upload-queue-panel.seq-minimized .seq-summary,
+#upload-queue-panel.seq-minimized .seq-list { display: none; }
+#upload-queue-panel.seq-minimized { max-height: none; }
+
+.seq-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer; user-select: none;
+}
+.seq-title { flex: 1; font-weight: 600; font-size: 12px; color: var(--fg); }
+.seq-btn {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--fg-dim); border-radius: 4px;
+  padding: 2px 8px; font-size: 11px; cursor: pointer;
+  font-family: inherit;
+}
+.seq-btn:hover { color: var(--fg); border-color: var(--accent); background: var(--bg-3); }
+.seq-btn.seq-x { padding: 0 6px; }
+.seq-btn.seq-retry { color: var(--accent); border-color: var(--accent); }
+.seq-btn.seq-toggle { padding: 0 8px; font-size: 12px; }
+.seq-btn.seq-conc { font-variant-numeric: tabular-nums; }
+
+.seq-summary {
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 5px;
+  color: var(--fg-dim); font-variant-numeric: tabular-nums;
+}
+.seq-bar {
+  height: 4px; background: var(--bg-4); border-radius: 2px;
+  overflow: hidden;
+}
+.seq-bar-fill {
+  height: 100%; background: var(--accent);
+  transition: width .25s ease;
+}
+.seq-bar-fill[data-state="error"] { background: var(--danger); }
+.seq-bar-fill[data-state="done"] { background: var(--success); }
+
+.seq-list {
+  list-style: none; margin: 0; padding: 4px 0;
+  overflow-y: auto;
+  flex: 1; min-height: 0;
+}
+.seq-item {
+  padding: 6px 10px; border-bottom: 1px solid var(--bg-3);
+  cursor: default;
+  transition: background .12s;
+}
+.seq-item:last-child { border-bottom: 0; }
+.seq-item:hover { background: var(--bg-3); }
+.seq-item[data-status="error"] { background: rgba(244, 67, 54, 0.06); }
+.seq-item[data-status="done"] .seq-name { color: var(--fg-dim); }
+
+.seq-row1 {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px;
+}
+.seq-kind {
+  display: inline-block;
+  background: var(--bg-4); color: var(--fg-dim);
+  padding: 1px 6px; border-radius: 3px;
+  font-size: 10px; text-transform: uppercase;
+}
+.seq-item[data-status="done"] .seq-kind { background: rgba(76, 175, 80, 0.12); color: var(--success); }
+.seq-item[data-status="error"] .seq-kind { background: rgba(244, 67, 54, 0.12); color: var(--danger); }
+.seq-item[data-status="uploading"] .seq-kind { background: rgba(79, 195, 247, 0.16); color: var(--accent); }
+.seq-name {
+  flex: 1; min-width: 0; max-width: 140px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--fg);
+}
+.seq-size { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+.seq-status {
+  min-width: 38px; text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-dim);
+}
+.seq-item[data-status="uploading"] .seq-status { color: var(--accent); }
+.seq-item[data-status="error"] .seq-status { color: var(--danger); }
+.seq-item[data-status="done"] .seq-status { color: var(--success); }
+.seq-act { display: flex; gap: 4px; }
+
+.seq-row2 { margin-top: 4px; }
+.seq-row2 .seq-bar { height: 3px; }
+.seq-row2 .seq-bar-fill { transition: width .15s ease; }
+
+/* 移动端:面板更窄,贴底 */
+@media (max-width: 600px) {
+  #upload-queue-panel { right: 8px; left: 8px; width: auto; bottom: 8px; }
+}
+
 /* ============ 仪表板 ============ */
 .dash-grid {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
