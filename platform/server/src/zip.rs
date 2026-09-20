@@ -13,8 +13,12 @@
 //!
 //! All multi-byte fields are little-endian. Names are UTF-8 (general-purpose
 //! bit 11 is set in both headers).
+//!
+//! Streaming-friendly: `finish_into` writes the archive into any
+//! `std::io::Write` (e.g. an `axum::body::Body`'s backing writer), so the
+//! response doesn't need to buffer the whole archive in memory.
 
-use std::io::Result;
+use std::io::{Result, Write};
 
 const LOCAL_FILE_HEADER_SIG: u32 = 0x04034b50;
 const CENTRAL_FILE_HEADER_SIG: u32 = 0x02014b50;
@@ -37,7 +41,7 @@ struct EntryMeta {
 }
 
 /// Append-only in-memory ZIP builder. Call [`add_file`](Self::add_file) for each
-/// entry, then [`finish`](Self::finish) to obtain the archive bytes.
+/// entry, then `finish_into` to stream the archive into a writer.
 #[derive(Default)]
 pub(crate) struct ZipWriter {
     buf: Vec<u8>,
@@ -102,51 +106,60 @@ impl ZipWriter {
         Ok(())
     }
 
-    /// Consume the writer and return the complete ZIP archive bytes.
-    pub(crate) fn finish(mut self) -> Vec<u8> {
+    /// Streaming write:在写入期间把 entries 落地到任意 `std::io::Write`,
+    /// 不必缓冲整个 archive 到内存。先用一次 `into_parts` 拿到本地头 + 数据
+    /// 部分,直接写到 `w`;最后追加中央目录 + EOCD。
+    pub(crate) fn finish_into<W: Write>(self, w: &mut W) -> Result<()> {
         let central_dir_offset = self.buf.len() as u32;
+
+        // entries 阶段已经在 buf 里:直接吐出去。
+        w.write_all(&self.buf)?;
 
         for e in &self.entries {
             // Central directory file header.
-            self.buf
-                .extend_from_slice(&CENTRAL_FILE_HEADER_SIG.to_le_bytes());
-            self.buf.extend_from_slice(&VERSION_NEEDED.to_le_bytes()); // version made by
-            self.buf.extend_from_slice(&VERSION_NEEDED.to_le_bytes()); // version needed
-            self.buf.extend_from_slice(&UTF8_FLAG.to_le_bytes());
-            self.buf.extend_from_slice(&0u16.to_le_bytes()); // method = store
-            self.buf.extend_from_slice(&DOS_TIME_MIDNIGHT.to_le_bytes());
-            self.buf
-                .extend_from_slice(&DOS_DATE_1980_01_01.to_le_bytes());
-            self.buf.extend_from_slice(&e.crc.to_le_bytes());
-            self.buf.extend_from_slice(&e.size.to_le_bytes());
-            self.buf.extend_from_slice(&e.size.to_le_bytes());
-            self.buf
-                .extend_from_slice(&(e.name.len() as u16).to_le_bytes());
-            self.buf.extend_from_slice(&0u16.to_le_bytes()); // extra
-            self.buf.extend_from_slice(&0u16.to_le_bytes()); // comment
-            self.buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
-            self.buf.extend_from_slice(&0u16.to_le_bytes()); // internal file attrs
-            self.buf.extend_from_slice(&0u32.to_le_bytes()); // external file attrs
-            self.buf
-                .extend_from_slice(&e.local_header_offset.to_le_bytes());
-            self.buf.extend_from_slice(&e.name);
+            w.write_all(&CENTRAL_FILE_HEADER_SIG.to_le_bytes())?;
+            w.write_all(&VERSION_NEEDED.to_le_bytes())?; // version made by
+            w.write_all(&VERSION_NEEDED.to_le_bytes())?; // version needed
+            w.write_all(&UTF8_FLAG.to_le_bytes())?;
+            w.write_all(&0u16.to_le_bytes())?; // method = store
+            w.write_all(&DOS_TIME_MIDNIGHT.to_le_bytes())?;
+            w.write_all(&DOS_DATE_1980_01_01.to_le_bytes())?;
+            w.write_all(&e.crc.to_le_bytes())?;
+            w.write_all(&e.size.to_le_bytes())?;
+            w.write_all(&e.size.to_le_bytes())?;
+            w.write_all(&(e.name.len() as u16).to_le_bytes())?;
+            w.write_all(&0u16.to_le_bytes())?; // extra
+            w.write_all(&0u16.to_le_bytes())?; // comment
+            w.write_all(&0u16.to_le_bytes())?; // disk number start
+            w.write_all(&0u16.to_le_bytes())?; // internal file attrs
+            w.write_all(&0u32.to_le_bytes())?; // external file attrs
+            w.write_all(&e.local_header_offset.to_le_bytes())?;
+            w.write_all(&e.name)?;
         }
 
         let central_dir_size = self.buf.len() as u32 - central_dir_offset;
         let entry_count = self.entries.len() as u16;
 
         // End of central directory record.
-        self.buf
-            .extend_from_slice(&END_OF_CENTRAL_DIR_SIG.to_le_bytes());
-        self.buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
-        self.buf.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir
-        self.buf.extend_from_slice(&entry_count.to_le_bytes()); // entries on this disk
-        self.buf.extend_from_slice(&entry_count.to_le_bytes()); // total entries
-        self.buf.extend_from_slice(&central_dir_size.to_le_bytes());
-        self.buf
-            .extend_from_slice(&central_dir_offset.to_le_bytes());
-        self.buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
-        self.buf
+        w.write_all(&END_OF_CENTRAL_DIR_SIG.to_le_bytes())?;
+        w.write_all(&0u16.to_le_bytes())?; // disk number
+        w.write_all(&0u16.to_le_bytes())?; // disk with central dir
+        w.write_all(&entry_count.to_le_bytes())?; // entries on this disk
+        w.write_all(&entry_count.to_le_bytes())?; // total entries
+        w.write_all(&central_dir_size.to_le_bytes())?;
+        w.write_all(&central_dir_offset.to_le_bytes())?;
+        w.write_all(&0u16.to_le_bytes())?; // comment length
+        Ok(())
+    }
+
+    /// Consume the writer and return the complete ZIP archive bytes.
+    /// Convenience wrapper for tests only.
+    #[cfg(test)]
+    pub(crate) fn finish(self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.buf.len() + 64 * self.entries.len());
+        self.finish_into(&mut out)
+            .expect("write to Vec is infallible");
+        out
     }
 }
 

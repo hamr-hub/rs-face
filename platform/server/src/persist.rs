@@ -37,11 +37,11 @@ impl Db {
             .await
         {
             Ok(pool) => {
-                eprintln!("[persist] connected to PostgreSQL");
+                tracing::warn!("[persist] connected to PostgreSQL");
                 Self { pool: Some(pool) }
             }
             Err(e) => {
-                eprintln!("[persist] PG connect failed: {e} — running in memory-only mode");
+                tracing::warn!("[persist] PG connect failed: {e} — running in memory-only mode");
                 Self { pool: None }
             }
         }
@@ -114,7 +114,7 @@ impl Db {
                 .await
                 .map_err(|e| format!("commit migration {name}: {e}"))?;
             applied += 1;
-            eprintln!("[persist] applied migration {name}");
+            tracing::warn!("[persist] applied migration {name}");
         }
         Ok(applied)
     }
@@ -176,7 +176,7 @@ impl Db {
         .execute(pool)
         .await;
         if let Err(e) = res {
-            eprintln!("[persist] insert_telemetry_batch failed: {e}");
+            tracing::warn!("[persist] insert_telemetry_batch failed: {e}");
         }
     }
 
@@ -322,7 +322,7 @@ impl Db {
         .execute(pool)
         .await
         {
-            eprintln!("[persist] add_frames_batch frames failed: {e}");
+            tracing::warn!("[persist] add_frames_batch frames failed: {e}");
             return;
         }
         // 2) faces 表(展平全部帧的 face)
@@ -359,7 +359,7 @@ impl Db {
         .bind(&x).bind(&y).bind(&w).bind(&h).bind(&score)
         .execute(pool).await
         {
-            eprintln!("[persist] add_frames_batch faces failed: {e}");
+            tracing::warn!("[persist] add_frames_batch faces failed: {e}");
         }
     }
 
@@ -390,7 +390,7 @@ impl Db {
         {
             Ok(r) => r.rows_affected() > 0,
             Err(e) => {
-                eprintln!("[persist] delete_job({id}) failed: {e}");
+                tracing::warn!("[persist] delete_job({id}) failed: {e}");
                 false
             }
         }
@@ -411,7 +411,7 @@ impl Db {
         {
             Ok(r) => r.rows_affected(),
             Err(e) => {
-                eprintln!("[persist] delete_jobs({ids:?}) failed: {e}");
+                tracing::warn!("[persist] delete_jobs({ids:?}) failed: {e}");
                 0
             }
         }
