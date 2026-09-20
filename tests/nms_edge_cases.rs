@@ -16,7 +16,7 @@
 //! These cases live in an integration test so a refactor of either NMS
 //! cannot silently lose its way on the boundary.
 
-use rsface::face::{Detection, FaceDetection, non_max_suppression, nms};
+use rsface::face::{nms, non_max_suppression, Detection, FaceDetection};
 
 fn int_box(x: usize, y: usize, w: usize, h: usize, score: f32) -> Detection {
     Detection { x, y, w, h, score }
@@ -68,10 +68,7 @@ fn classical_nms_threshold_zero_keeps_disjoint_only() {
 fn classical_nms_threshold_one_keeps_identical() {
     // threshold == 1.0: even fully-overlapping boxes survive because the
     // comparison is strict `>`. Locks in the "strictly greater" semantics.
-    let dets = vec![
-        int_box(0, 0, 10, 10, 0.9),
-        int_box(0, 0, 10, 10, 0.5),
-    ];
+    let dets = vec![int_box(0, 0, 10, 10, 0.9), int_box(0, 0, 10, 10, 0.5)];
     let kept = non_max_suppression(dets, 1.0);
     assert_eq!(kept.len(), 2);
 }
@@ -118,7 +115,11 @@ fn modern_nms_threshold_zero_collapses_overlap() {
         f32_box(50.0, 50.0, 60.0, 60.0, 0.7),
     ];
     let kept = nms(dets, 0.0);
-    assert_eq!(kept.len(), 2, "two survivors: highest in cluster, the disjoint box");
+    assert_eq!(
+        kept.len(),
+        2,
+        "two survivors: highest in cluster, the disjoint box"
+    );
     assert!((kept[0].score - 0.9).abs() < 1e-6);
     assert!((kept[1].score - 0.7).abs() < 1e-6);
 }

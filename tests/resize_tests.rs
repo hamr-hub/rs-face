@@ -111,7 +111,10 @@ fn resize_bilinear_upsample_smoothness_neighbours_close() {
     for x in 1..out.width() {
         let a = out[(x - 1, 0)] as i32;
         let b = out[(x, 0)] as i32;
-        assert!((a - b).abs() <= 16, "bilinear neighbours too far apart at x={x}: {a} {b}");
+        assert!(
+            (a - b).abs() <= 16,
+            "bilinear neighbours too far apart at x={x}: {a} {b}"
+        );
     }
 }
 
@@ -138,7 +141,10 @@ fn resize_area_downscale_factor_4_matches_box_average() {
     for i in 0..via_area.as_slice().len() {
         let a = via_area.as_slice()[i] as i32;
         let b = via_box.as_slice()[i] as i32;
-        assert!((a - b).abs() <= 1, "area vs box mismatch at i={i}: {a} vs {b}");
+        assert!(
+            (a - b).abs() <= 1,
+            "area vs box mismatch at i={i}: {a} vs {b}"
+        );
     }
 }
 
@@ -146,11 +152,7 @@ fn resize_area_downscale_factor_4_matches_box_average() {
 fn resize_area_2x_downscale_ramp_average_in_window() {
     // 4x4 image with values 0..16 downscale to 2x2: each output pixel is
     // the average of a 2x2 block (0+1+4+5)/4=2.5 -> rounded to 3 etc.
-    let img = GrayImage::from_vec(
-        (0u8..16).collect::<Vec<u8>>(),
-        4,
-        4,
-    );
+    let img = GrayImage::from_vec((0u8..16).collect::<Vec<u8>>(), 4, 4);
     let out = img.resize_area(2, 2);
     assert_eq!((out.width(), out.height()), (2, 2));
     // Expected: block (0,0)=2.5, (2,0)=4.5, (0,2)=10.5, (2,2)=12.5
@@ -159,7 +161,10 @@ fn resize_area_2x_downscale_ramp_average_in_window() {
         let x = i % 2;
         let y = i / 2;
         let v = out[(x, y)];
-        assert!((v as i32 - e as i32).abs() <= 1, "({x},{y}) got {v} expected {e} +/-1");
+        assert!(
+            (v as i32 - e as i32).abs() <= 1,
+            "({x},{y}) got {v} expected {e} +/-1"
+        );
     }
 }
 

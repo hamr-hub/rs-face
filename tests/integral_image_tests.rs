@@ -74,7 +74,10 @@ fn all_max_integral_matches_reference_on_random_rects() {
         (1, 1, 2, 2),
         (63, 47, 64, 48), // 1-pixel corner
     ] {
-        assert_eq!(ii.rect_sum(x1, y1, x2, y2), ref_rect_sum(&img, x1, y1, x2, y2));
+        assert_eq!(
+            ii.rect_sum(x1, y1, x2, y2),
+            ref_rect_sum(&img, x1, y1, x2, y2)
+        );
     }
 }
 
@@ -160,7 +163,10 @@ fn wide_path_taken_for_very_large_image_dimensions() {
     let (w, h) = (4500, 4500);
     let img = constant(w, h, 1);
     let ii = IntegralImage::from_gray(&img);
-    assert!(ii.is_wide(), "4500*4500*255 must overflow u32 and trigger Wide path");
+    assert!(
+        ii.is_wide(),
+        "4500*4500*255 must overflow u32 and trigger Wide path"
+    );
     // full image sum = w*h*1
     assert_eq!(ii.rect_sum(0, 0, w, h), (w as u64) * (h as u64));
 }
@@ -186,12 +192,7 @@ fn squared_integral_matches_reference_for_max_image() {
     let (w, h) = (16, 12);
     let img = constant(w, h, 200);
     let sq = SquaredIntegralImage::from_gray(&img);
-    let rects = [
-        (0, 0, w, h),
-        (0, 0, 1, 1),
-        (3, 5, 10, 9),
-        (15, 11, 16, 12),
-    ];
+    let rects = [(0, 0, w, h), (0, 0, 1, 1), (3, 5, 10, 9), (15, 11, 16, 12)];
     for &(x1, y1, x2, y2) in &rects {
         assert_eq!(
             sq.rect_sum_sq(x1, y1, x2, y2),

@@ -10,7 +10,7 @@
 //! sizes and shape contracts.
 
 use rsface::cnn::{
-    CnnScratch, conv2d_into, fc_into, maxpool2_into, relu, sigmoid, template_face_weights,
+    conv2d_into, fc_into, maxpool2_into, relu, sigmoid, template_face_weights, CnnScratch,
 };
 
 #[test]
@@ -46,7 +46,10 @@ fn scratch_buffer_is_reusable_across_multiple_forward_passes() {
     let window: Vec<f32> = (0..24 * 24).map(|i| (i as f32) / (24.0 * 24.0)).collect();
     let s1 = forward(&weights, &window, &scratch);
     let s2 = forward(&weights, &window, &scratch);
-    assert_eq!(s1, s2, "scratch must be reusable: same input -> same output");
+    assert_eq!(
+        s1, s2,
+        "scratch must be reusable: same input -> same output"
+    );
 }
 
 #[test]
