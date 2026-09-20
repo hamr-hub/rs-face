@@ -1,8 +1,8 @@
 //! # rsface — Zero-dependency face detection & recognition in pure Rust
 //!
 //! `rsface` is a swiss-army-knife face library: it bundles classical CV
-//! (Viola–Jones, integral image, HOG+SVM, LBP, PCA), small CNN scaffolds
-//! (CNN / YuNet / MTCNN / HoG), and an opt-in industrial ONNX path
+//! (Viola–Jones Haar cascades, integral images, LBP/PCA/LDA recognisers),
+//! a small trainable CNN detector, and an opt-in industrial ONNX path
 //! (SCRFD detector + ArcFace recogniser via `ort` or `tract`).
 //!
 //! All default-build algorithms ship with **zero runtime dependencies**.
@@ -10,17 +10,17 @@
 //!
 //! ```toml
 //! # smallest: pure CPU, classical CV, ~handful of KB on disk
-//! rsface = "0.1"
+//! rsface = "0.2"
 //!
 //! # add GPU (Metal on macOS, CUDA on Linux/Windows)
-//! rsface = { version = "0.1", features = ["metal-backend"] }
-//! rsface = { version = "0.1", features = ["cuda-backend"] }
+//! rsface = { version = "0.2", features = ["metal-backend"] }
+//! rsface = { version = "0.2", features = ["cuda-backend"] }
 //!
 //! # add industrial accuracy (ONNX Runtime; needs `libonnxruntime`)
-//! rsface = { version = "0.1", features = ["ort-backend"] }
+//! rsface = { version = "0.2", features = ["ort-backend"] }
 //!
 //! # add industrial accuracy without C++ runtime (pure Rust, CPU only)
-//! rsface = { version = "0.1", features = ["tract-backend"] }
+//! rsface = { version = "0.2", features = ["tract-backend"] }
 //! ```
 //!
 //! ## Module map
@@ -38,10 +38,7 @@
 //!
 //! ### Detection algorithms (zero-dep)
 //! - [`detector`]            : multi-scale sliding window + NMS, pipeline-agnostic.
-//! - [`cnn`]                 : 24×24 Conv→ReLU→Pool→FC→Sigmoid CNN detector (scaffold weights bundled).
-//! - [`hog_face`]            : 64×128 HoG + linear SVM detector (dense multi-scale).
-//! - [`yunet`]               : YuNet-style anchor-based detector (5 scales, 15-d outputs; **scaffold only** — the Apache-2.0 `yunet_2023mar.onnx` is in the model registry but the ONNX-runtime integration is TBD; current `YunetDetector` ships placeholder weights).
-//! - [`mtcnn`]               : 3-stage P-Net → R-Net → O-Net cascade.
+//! - [`cnn`]                 : 24×24 Conv→ReLU→Pool→FC→Sigmoid CNN detector with a zero-dep trainer (starter weights; train your own).
 //! - [`luminance_face`]      : band-pattern + mirror-symmetry detector (no weights, classical CV).
 //!
 //! ### Detection algorithms (ONNX, opt-in via `ort-backend` / `tract-backend`)
@@ -54,6 +51,7 @@
 //! - [`fisherface`]          : Fisherfaces / LDA (Belhumeur–Hespanha–Kriegman): n−C PCA reduction then C−1 class-discriminant axes; best zero-dep pair EER.
 //! - [`lbph`]                : uniform Local Binary Patterns histograms + chi-square distance.
 //! - [`lbph_store`]          : zero-dep binary gallery persistence (save/load across restarts, no crops needed).
+//! - [`subspace_store`]      : trained-model persistence for eigenfaces/fisherfaces (mean, axes, projections).
 //! - [`video_id`]            : video-level identification — IoU tracker + single-linkage clusterer + cross-video re-id. Plugs any (detector, recogniser) pair via the [`video_id::Identify`] trait; example wires the zero-dep haar + LBPH path.
 //!
 //! ### Recognition (ONNX, opt-in)
@@ -62,6 +60,7 @@
 //!
 //! ### Domain types & glue
 //! - [`face_detector`]       : the [`FaceDetector`] trait — every algorithm implements it.
+//! - [`recognizer`]          : the [`FaceRecognizer`] trait — LBPH/eigenfaces/Fisherfaces dispatch uniformly; shared [`Recognition`] outcome.
 //! - [`face`]                : `Detection`, `Face`, landmark-aware types shared by detection + recognition.
 //! - [`models`]              : model registry with pinned SHA-256 digests for downloaded weights.
 //! - [`align`]               : landmark-based face alignment (112×112 canonical) for ArcFace.
@@ -71,7 +70,7 @@
 //! - [`pipeline`]            : source → N detector workers → sink; threading, backpressure, manifest writer.
 //! - [`source`]              : `FrameSource` trait; image sequence, HTTP MJPEG, optional ffmpeg pipe, synthetic test pattern.
 //! - [`output`]              : hand-rolled JSON manifest writer, annotated PNG writer.
-//! - [`gpu`]                 : pluggable GPU backend trait; `cpu` (default), `metal`, `cuda`, `rocm`, `mlu`, `ascend`.
+//! - [`gpu`]                 : GPU acceleration: hand-rolled dlopen OpenCL driver (zero-dep, Linux/BSD) + `GpuBackend` trait; real Metal/CUDA adapters behind the `metal-backend` / `cuda-backend` cargo features; macOS/Windows compile a no-op stub.
 //! - [`pool`]                : small worker-pool helper (used by the pipeline).
 //!
 //! ## Cookbook (5-line recipes)
@@ -92,10 +91,11 @@
 //! Build a uniform detector (any algorithm, same call shape):
 //!
 //! ```
-//! use rsface::face_detector::FaceDetector;
-//! use rsface::hog_face::{HogFaceDetector, HogConfig};
-//! let det = HogFaceDetector::new(HogConfig::default());
-//! assert_eq!(det.name(), "hog");
+//! use rsface::face_detector::{FaceDetector, HaarDetector};
+//! use rsface::haar::params;
+//! use rsface::detector::DetectorConfig;
+//! let det = HaarDetector::new(params::demo_face_cascade(), DetectorConfig::default());
+//! assert_eq!(det.name(), "haar");
 //! ```
 //!
 //! Train a zero-dep recogniser on a small gallery:
@@ -140,7 +140,7 @@
 //! | family            | default build | what extra you must do |
 //! |-------------------|---------------|------------------------|
 //! | `haar`, `luminance`, `lbph`, `eigenface`, `fisherface` | ✅ Production-grade out of the box | nothing |
-//! | `cnn`, `hog`, `yunet`, `mtcnn`          | ⚠️ Scaffold (correct shapes, placeholder weights) | drop in real weights via `*_with_*` constructor or `--cnn-weights` |
+//! | `cnn`                                    | 🟡 Trainable toy net (starter weights only) | train with `cnn_train`, load via `--cnn-weights` |
 //! | `scrfd`, `arcface`                       | ⛔ Opt-in (`ort-backend` / `tract-backend`) | download ONNX models; `tools/fetch_models.sh` does this |
 //!
 //! ## `no_std` & threading
@@ -152,9 +152,13 @@
 //! ## License
 //!
 //! The crate is MIT. The `ort-backend` feature pulls in ONNX Runtime (MIT) and
-//! requires `libonnxruntime` on the host. The bundled CNN/HOG/YuNet/MTCNN
-//! weights are random placeholders for exercising the pipeline — train on real
-//! data before relying on them.
+//! requires `libonnxruntime` on the host. The only embedded weight blob is the
+//! classical OpenCV `haarcascade_frontalface_default` cascade (Apache-2.0,
+//! provenance in `src/weights/NOTICE.md`), shipped as the documented `.rfcf`
+//! format; the CNN starter weights are trainable via the `cnn_train` binary,
+//! and ONNX models are fetched on demand through the SHA-256-pinned registry
+//! in [`models`] (InsightFace weights are non-commercial research-only;
+//! the YuNet model pin is Apache-2.0).
 
 #![allow(clippy::too_many_arguments)] // Pipeline knobs are independently tuned; bundling them hides call sites.
 #![allow(clippy::type_complexity)] // Detector/Cascade generics are spelled out in public APIs; not worth a type alias.
@@ -180,19 +184,20 @@
 #![allow(clippy::collapsible_if)] // Nested `if`s are clearer when each branch has a descriptive comment.
 #![allow(clippy::unnecessary_map_or)] // `map_or(false, |x| ...)` reads more directly than `is_some_and` in variance checks.
 #![allow(clippy::while_let_loop)] // `loop { match it.next() { ... } }` is clearer when the body has multiple branches.
-#![allow(clippy::new_without_default)] // Dummy detector constructors (CNN/HoG/YuNet/MTCNN) don't need Default — `new()` is fine.
+#![allow(clippy::new_without_default)] // Detector constructors take config by value; `new(config)` is the canonical entry point.
 #![allow(clippy::needless_collect)]
 // Intentional Vec build for the next step.
 // OpenCL loader caches dlopen handles in `static mut LIB`/`LIB_HANDLE`; access is gated by unsafe.
 #![allow(static_mut_refs)]
 #![allow(unused_parens)] // `cargo fmt` produces parens around some assignments; harmless.
 #![allow(unused_unsafe)] // The OpenCL wrapper uses `unsafe {}` blocks defensively even where the call is itself unsafe.
-#![allow(dead_code)] // Dummy CNN/HoG/YuNet/MTCNN scaffolds ship with all primitives even if a few are unreferenced.
-#![allow(unused_variables)] // Same reason as dead_code; placeholder code paths.
+#![allow(dead_code)] // Feature-gated GPU/ONNX backends and parity helpers keep primitives some builds don't call.
+#![allow(unused_variables)] // Same reason as dead_code: code paths compiled only behind a feature flag.
 
 pub mod align;
 pub mod arcface;
 pub mod arcface_recognizer;
+pub(crate) mod binio;
 pub mod cnn;
 pub mod detector;
 pub mod eigenface;
@@ -202,7 +207,6 @@ pub mod face_detector;
 pub mod fisherface;
 pub mod gpu;
 pub mod haar;
-pub mod hog_face;
 pub mod image;
 pub mod integral;
 pub mod lbph;
@@ -210,23 +214,21 @@ pub mod lbph_store;
 pub(crate) mod linalg;
 pub mod luminance_face;
 pub mod models;
-pub mod mtcnn;
 pub mod onnx;
 pub mod output;
 pub mod pipeline;
 pub mod pool;
+pub mod recognizer;
 pub mod scrfd;
 pub mod scrfd_detector;
 pub mod source;
+pub mod subspace_store;
 pub mod video_id;
-pub mod yunet;
 
 pub use detector::{Detection, Detector};
 pub use face_detector::{FaceDetector, HaarDetector};
 pub use haar::Cascade;
-pub use hog_face::{HogConfig, HogFaceDetector};
 pub use image::GrayImage;
 pub use luminance_face::{LuminanceConfig, LuminanceFaceDetector};
-pub use mtcnn::{MtcnnConfig, MtcnnDetector};
 pub use pipeline::{Pipeline, PipelineConfig, PipelineStats};
-pub use yunet::{YunetConfig, YunetDetector};
+pub use recognizer::{FaceRecognizer, IncrementalRecognizer, Recognition};

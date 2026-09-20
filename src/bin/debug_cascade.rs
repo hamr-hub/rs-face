@@ -207,13 +207,15 @@ fn main() {
     eprintln!("\n=== detail at best window ({}, {}) ===", best.0, best.1);
     let (x, y) = (best.0, best.1);
     for stage_idx in 0..cascade.num_stages() {
-        if let Some((sum, _details)) = cascade.eval_stage(&ii, &ri, x, y, stage_idx) {
-            let pass = sum >= cascade.stages_debug()[stage_idx].stage_threshold;
+        if let Some((sum, eff_threshold, _details)) =
+            cascade.eval_stage(&ii, &ri, x, y, stage_idx, &mut cache)
+        {
+            let pass = sum >= eff_threshold;
             eprintln!(
                 "  stage {:2} sum={:8.4} threshold={:8.4} → {}",
                 stage_idx,
                 sum,
-                cascade.stages_debug()[stage_idx].stage_threshold,
+                eff_threshold,
                 if pass { "PASS" } else { "REJECT" }
             );
             if !pass {
@@ -252,13 +254,15 @@ fn main() {
         let y = y.saturating_sub(wh / 2);
         eprintln!("\n=== window at ({}, {}) ===", x, y);
         for stage_idx in 0..cascade.num_stages() {
-            if let Some((sum, _details)) = cascade.eval_stage(&ii, &ri, x, y, stage_idx) {
-                let pass = sum >= cascade.stages_debug()[stage_idx].stage_threshold;
+            if let Some((sum, eff_threshold, _details)) =
+                cascade.eval_stage(&ii, &ri, x, y, stage_idx, &mut cache)
+            {
+                let pass = sum >= eff_threshold;
                 eprintln!(
                     "  stage {:2} sum={:8.4} threshold={:8.4} → {}",
                     stage_idx,
                     sum,
-                    cascade.stages_debug()[stage_idx].stage_threshold,
+                    eff_threshold,
                     if pass { "PASS" } else { "REJECT" }
                 );
                 if !pass {

@@ -19,7 +19,7 @@
 //!     # Use the first available GPU backend; also run CPU cascade for parity.
 //!     rs-face-detect <video.mp4> --out <dir>
 //!
-//!     # Force a specific backend (cpu, opencl, metal, cuda, rocm, ascend, mlu).
+//!     # Force a specific backend (cpu, opencl, metal, cuda).
 //!     rs-face-detect <video.mp4> --backend opencl --out <dir>
 //!
 //!     # CPU-only (skip GPU entirely).
@@ -51,7 +51,8 @@ use std::time::Instant;
 
 use rsface::detector::{non_max_suppression, Detection, Detector, DetectorConfig};
 use rsface::gpu::backend::{self as gpu_backend, GpuBackend};
-use rsface::haar::{params::demo_face_cascade, Cascade};
+use rsface::haar::bundled::bundled_frontalface_cascade;
+use rsface::haar::Cascade;
 use rsface::image::GrayImage;
 use rsface::source::{FfmpegPipeSource, FrameSource};
 
@@ -67,6 +68,7 @@ struct ParsedArgs {
     min_size: usize,
     scale_factor: f32,
     stride: usize,
+    min_neighbors: i32,
     skip_baseline: bool,
 }
 
@@ -96,6 +98,7 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, ParseError> {
     let mut min_size: usize = 24;
     let mut scale_factor: f32 = 1.2;
     let mut stride: usize = 4;
+    let mut min_neighbors: i32 = 3;
     let mut skip_baseline = false;
 
     let mut i = 0;
@@ -130,6 +133,11 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, ParseError> {
                 stride = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(4);
                 i += 1;
             }
+            "--min-neighbors" => {
+                // OpenCV detectMultiScale's minNeighbors. 0 keeps every raw hit.
+                min_neighbors = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(3);
+                i += 1;
+            }
             "--cpu-only" => {
                 skip_baseline = false;
                 backend_arg = "cpu".into();
@@ -158,6 +166,7 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, ParseError> {
         min_size,
         scale_factor,
         stride,
+        min_neighbors,
         skip_baseline,
     })
 }
@@ -195,6 +204,7 @@ fn main() {
         min_size,
         scale_factor,
         stride,
+        min_neighbors,
         skip_baseline,
     } = parsed;
     if !input_path.exists() {
@@ -220,11 +230,14 @@ fn main() {
     println!("  out    : {}", out_dir.display());
     println!("  backend: {} ({})", backend_arg, backend_label);
     println!("  fps    : {}", sample_fps);
-    println!("  stride : {}  min_size: {}", stride, min_size);
-
-    let cascade: Cascade = demo_face_cascade();
     println!(
-        "  cascade: built-in demo ({} stages, {} features, {}x{} window)",
+        "  stride : {}  min_size: {}  min_neighbors: {}",
+        stride, min_size, min_neighbors
+    );
+
+    let cascade: Cascade = bundled_frontalface_cascade();
+    println!(
+        "  cascade: bundled OpenCV frontalface ({} stages, {} features, {}x{} window)",
         cascade.num_stages(),
         cascade.num_features(),
         cascade.window_w,
@@ -236,6 +249,7 @@ fn main() {
         max_size: 1024,
         scale_factor,
         window_stride: stride,
+        min_neighbors,
         nms_iou_threshold: 0.3,
         min_score: 0.0,
         variance_threshold: 200,
@@ -384,13 +398,14 @@ fn print_help() {
            /path/to/video.mp4 (decoded via ffmpeg on PATH)\n\n\
          OPTIONS:\n\
            --out <DIR>           output directory (required)\n\
-           --backend <ID>        cpu | opencl | metal | cuda | rocm | ascend | mlu | auto\n\
+           --backend <ID>        cpu | opencl | metal | cuda | auto\n\
                                  (default: auto — picks first available)\n\
            --sample-fps <N>      sample at N fps (default 5)\n\
            --max-frames <N>      stop after N frames\n\
            --min-size <PX>       minimum detection size (default 24)\n\
            --scale <F>           pyramid scale factor (default 1.2)\n\
            --stride <PX>         window stride (default 4)\n\
+           --min-neighbors <N>   OpenCV minNeighbors: minimum raw hits per face (default 3; 0 keeps all)\n\
            --cpu-only            skip the GPU pass\n\
            --gpu-only            skip the CPU pass (verification only)\n\
            --help                print this help\n"

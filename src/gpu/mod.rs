@@ -1,22 +1,20 @@
 //! GPU backends for rs-face.
 //!
 //! This module exposes:
-//!   * The cross-platform OpenCL driver (default; works on Apple Silicon
-//!     via Metal-OpenCL, Intel iGPU, AMD, NVIDIA on Linux/Windows).
-//!     Loaded via FFI at runtime — no Rust deps.
+//!   * The cross-platform OpenCL driver (default; works on Intel iGPU,
+//!     AMD, NVIDIA on Linux/BSD; dlopen'd via hand-rolled FFI at runtime,
+//!     no Rust deps; unavailable/macOS builds compile a safe no-op stub).
 //!   * A backend-trait abstraction (``pub mod backend``) that lets the
-//!     same dispatch surface pick between Metal, CUDA, ROCm, Ascend and
-//!     MLU implementations. Per-vendor stubs live alongside this file
-//!     (see ``metal.rs``, ``cuda.rs``, ``rocm.rs``, ``ascend.rs``,
-//!     ``mlu.rs``); vendors with no SDK on the host probe as
-//!     unavailable and the dispatcher falls back to OpenCL.
+//!     same dispatch surface pick between OpenCL, Metal and CUDA.
+//!     ``metal.rs`` / ``cuda.rs`` contain real implementations behind the
+//!     ``metal-backend`` / ``cuda-backend`` cargo features (their probe
+//!     returns ``None`` when the feature is off). To add another vendor,
+//!     implement ``GpuBackend`` on a new file and append its descriptor to
+//!     ``backend::BACKENDS`` — see ``backend.rs`` for the recipe.
 
-pub mod ascend;
 pub mod backend;
 pub mod cuda;
 pub mod metal;
-pub mod mlu;
-pub mod rocm;
 
 use crate::haar::Cascade;
 use crate::image::GrayImage;
@@ -105,7 +103,11 @@ impl GpuIntegral {
 // `crate::gpu::GpuIntegral` etc. still resolve, but every method is a
 // no-op that always returns `None` / empty. The `use_gpu` flag on
 // `DetectorConfig` then trivially disables GPU for that build.
-#[cfg(not(unix))]
+// OpenCL is dlopen'd only on Linux/BSD: on macOS the framework is
+// deprecated, its offline clang JIT fails on our kernel and (worst case)
+// sprays compiler errors into the host's stderr. Apple GPUs take the Metal
+// path; Windows takes the stub.
+#[cfg(any(not(unix), target_os = "macos"))]
 mod stub {
     use super::{Cascade, GpuDetection, GpuInfo, GrayImage};
 
@@ -114,8 +116,11 @@ mod stub {
     }
 
     impl Context {
-        pub fn new() -> Result<Self, ()> {
-            Err(())
+        /// Returns `Err` with the reason the native acceleration path is
+        /// unavailable (Windows: no dlopen OpenCL stack; macOS: deprecated
+        /// OpenCL is deliberately not loaded — use Metal).
+        pub fn new() -> Result<Self, &'static str> {
+            Err("GPU acceleration unavailable on this platform (use Metal on macOS)")
         }
         pub fn compute_integral(&self, _img: &GrayImage) -> Vec<u32> {
             Vec::new()
@@ -144,15 +149,15 @@ mod stub {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), target_os = "macos"))]
 pub use stub::Context;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub use opencl::Context;
 
 // ===== OpenCL FFI + dynamic loader =====
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 mod opencl {
     use super::GpuInfo;
     use crate::image::GrayImage;
@@ -1584,8 +1589,8 @@ mod stub_safety_tests {
     //! 校验 GPU 栈在「无可用设备」路径上的 production-grade 契约:
     //! 1. `probe()` 不 panic,最多返回 None;
     //! 2. `GpuIntegral::new()` 不 panic,最多返回 None;
-    //! 3. 多 backend 的 descriptor(Metal/CUDA/ROCm/Ascend/MLU)作为
-    //!    静态引用存在于 crate 内,符号正确,id 字符串符合预期。
+    //! 3. backend 的 descriptor(Metal/CUDA/OpenCL)作为静态引用存在于
+    //!    crate 内,符号正确,id 字符串符合预期。
     //!
     //! 这些是 host-agnostic 的契约 — 任何 host 上都应该通过。
     //! 真正的 GPU 路径(检测是否能加速)由各自的 `probe()` 在目标

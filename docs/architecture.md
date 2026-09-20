@@ -18,7 +18,8 @@ src/
 │   ├── mod.rs
 │   ├── feature.rs      # 5 feature families + custom-rect layout.
 │   ├── cascade.rs      # Cascade struct, EvalCache, save/load (.rfcf).
-│   └── params.rs       # Bundled demo cascade (smoke-test only).
+│   ├── params.rs       # Bundled demo cascade (smoke-test only).
+│   └── bundled.rs      # Bundled cascade bytes embedded in the default build.
 ├── cnn/                # Optional 24×24 CNN detector.
 │   └── mod.rs          # Conv→ReLU→Pool→FC→Sigmoid with `_into` scratch API.
 ├── image/              # 8-bit Gray/RGB types, codec, PNG encoder.
@@ -33,8 +34,11 @@ src/
 │   └── synthetic.rs    # Test://N synthetic test pattern.
 ├── pool/               # Small worker-pool scratch buffer.
 │   └── mod.rs
-├── gpu/                # Optional OpenCL backend.
-│   └── mod.rs          # Squared-integral + variance pre-filter + full cascade on GPU.
+├── gpu/                # GPU dispatch (OpenCL default-dlopen; metal/cuda behind features).
+│   ├── mod.rs          # OpenCL driver: squared-integral + variance pre-filter + cascade.
+│   ├── backend.rs      # GpuBackend trait + BACKENDS registry (metal, cuda, opencl).
+│   ├── metal.rs        # Apple Metal backend (feature `metal-backend`).
+│   └── cuda.rs         # NVIDIA CUDA backend (feature `cuda-backend`).
 └── bin/                # Debug binaries.
     ├── bench_detect.rs # CLI benchmark.
     ├── cnn_train.rs    # Train CNN on synthetic data.
@@ -119,8 +123,10 @@ on PR review.
 ## Honesty
 
 This project is an exercise in classical CV. Real-face detection works
-within the constraints documented in the README, but the bundled CNN
-weights are placeholders and the rotated Haar features evaluate to 0
+within the constraints documented in the README, but the CNN's built-in
+starter weights encode a hand-crafted face-like template rather than
+trained knowledge (train real ones with `cargo run --bin cnn_train`)
+and the rotated Haar features evaluate to 0
 (the rotated integral's Rust implementation is non-trivial to keep
 correct under the borrow checker; we still use it for the few rotated
 features in OpenCV's frontalface cascade, just with 0 contribution).

@@ -9,16 +9,20 @@ pub struct WeakFeature {
     pub feature_index: u32,
     /// Threshold for the decision stump (response vs threshold).
     pub threshold: f32,
-    /// Sign: `left_val` is used when response ≤ threshold (sign = -1)
-    ///       or when response > threshold (sign = +1).
+    /// Legacy leaf-selection flag from old OpenCV XML encodings. Modern
+    /// OpenCV (and this crate) always uses the same predicate — `left_val`
+    /// when the variance-normalised response is below [`Self::threshold`],
+    /// `right_val` otherwise — so the field is stored for format
+    /// round-tripping but never consulted. Loaded `.rfcf` cascades set it to
+    /// `1`; see [`Cascade::classify`].
     pub sign: i8,
     pub left_val: f32,
     pub right_val: f32,
 }
 
-/// One cascade stage. A window passes the stage iff the weighted sum of weak
-/// features (using `feature_value = if sign>0 { left_val if r≤t else right_val }`)
-/// is `≥ stage_threshold`.
+/// One cascade stage. A window passes the stage iff the sum of the selected
+/// leaf values is `≥ stage_threshold + stage_bias` (the exact predicate used
+/// by [`Cascade::classify`]).
 #[derive(Clone, Debug)]
 pub struct Stage {
     pub stage_threshold: f32,
@@ -32,11 +36,13 @@ pub struct Cascade {
     pub window_h: usize,
     pub features: Vec<HaarFeature>,
     pub stages: Vec<Stage>,
-    /// Per-stage bias added to each `stage_threshold` after load. OpenCV's
-    /// INTER_AREA resize produces slightly different integral sums than our
-    /// `resize_area`; on real photographs the cascade needs ~-10 to match
-    /// OpenCV's detection rate. Set to 0 if your cascade was trained against
-    /// our exact pipeline.
+    /// Per-stage bias added to every `stage_threshold` at evaluation time.
+    /// The loaded OpenCV cascade matches OpenCV detections with the default
+    /// `0.0`; a negative bias relaxes rejection (more detections, more false
+    /// positives) and a positive one tightens it. This is a calibration escape
+    /// hatch for cascades trained against a slightly different resize or
+    /// grayscale pipeline, not a required correction — only the CLI's
+    /// `--stage-bias` override sets it.
     pub stage_bias: f32,
 }
 
@@ -246,8 +252,20 @@ impl Cascade {
         &self.features
     }
 
-    /// Evaluate one stage, returning the per-weak response and the sum.
-    /// Used for diagnostics.
+    /// Evaluate one stage with the **exact production arithmetic** used by
+    /// [`Self::classify`] — variance-normalised feature responses, the
+    /// `response < threshold → left_val else right_val` leaf rule, and the
+    /// `stage_threshold + stage_bias` pass mark. Intended for diagnostics.
+    ///
+    /// Returns `(stage_sum, effective_threshold, details)` where each detail
+    /// tuple is `(feature_index, normalised_response, leaf_value)`. The stage
+    /// passes iff `stage_sum >= effective_threshold`, which is precisely what
+    /// `classify` checks. Returns `None` when the window has zero variance and
+    /// production would reject it before evaluating any feature.
+    ///
+    /// `cache` must be the same cache (including the same squared-integral-
+    /// image attachment, if any) used for `classify`; otherwise the trace
+    /// will not match production decisions.
     #[allow(dead_code)]
     pub fn eval_stage(
         &self,
@@ -256,37 +274,38 @@ impl Cascade {
         x: usize,
         y: usize,
         stage_idx: usize,
-    ) -> Option<(f32, Vec<(usize, f32, f32)>)> {
+        cache: &mut EvalCache,
+    ) -> Option<(f32, f32, Vec<(usize, f32, f32)>)> {
+        let variance_norm_factor = self.variance_norm(ii, x, y, false, None, cache)?;
         let stage = &self.stages[stage_idx];
         let mut sum = 0.0f32;
-        let mut details = Vec::new();
+        let mut details = Vec::with_capacity(stage.weak_features.len());
+        cache.clear();
+        let ii_w = ii.width();
+        let ii_h = ii.height();
         for w in &stage.weak_features {
-            let f = &self.features[w.feature_index as usize];
-            let r = f.eval(
+            let raw = cache.get_or_eval(
+                w.feature_index as usize,
+                &self.features[w.feature_index as usize],
                 ii,
                 ri,
                 x,
                 y,
                 self.window_w,
                 self.window_h,
-                ii.width(),
-                ii.height(),
+                ii_w,
+                ii_h,
             );
-            let v = if w.sign > 0 {
-                if r > w.threshold {
-                    w.right_val
-                } else {
-                    w.left_val
-                }
-            } else if r > w.threshold {
+            let value = raw * variance_norm_factor;
+            let v = if value < w.threshold {
                 w.left_val
             } else {
                 w.right_val
             };
             sum += v;
-            details.push((w.feature_index as usize, r, v));
+            details.push((w.feature_index as usize, value, v));
         }
-        Some((sum, details))
+        Some((sum, stage.stage_threshold + self.stage_bias, details))
     }
 
     /// Evaluate a window. Returns `Some(score)` if the window passes all stages,
@@ -349,22 +368,25 @@ impl Cascade {
         self.classify_impl(ii, ri, x, y, cache, true, Some(sums))
     }
 
-    fn classify_impl(
+    /// OpenCV's `varianceNormFactor` for one window: `1 / sqrt(N·Σx² − (Σx)²)`
+    /// measured over the inner norm rect `(1, 1, ww−2, wh−2)` in window-local
+    /// coordinates — i.e. `(x+1, y+1, x+ww−1, y+wh−1)` in integral-image
+    /// coordinates, matching `HaarEvaluator::setWindow` in OpenCV 4.x.
+    ///
+    /// With no squared integral image attached, normalisation is skipped and
+    /// raw responses are used (factor `1.0`). `None` means zero variance: the
+    /// window is flat and production rejects it before evaluating a feature.
+    fn variance_norm(
         &self,
         ii: &IntegralImage,
-        ri: &RotatedIntegralImage,
         x: usize,
         y: usize,
-        cache: &mut EvalCache,
         inbounds: bool,
         sums: Option<(u64, u64)>,
+        cache: &EvalCache,
     ) -> Option<f32> {
         let ww = self.window_w;
         let wh = self.window_h;
-        // OpenCV's variance normalization: compute over the inner rect
-        // (1, 1, ww-2, wh-2) in *window-local* coordinates, which means
-        // (x+1, y+1, x+ww-1, y+wh-1) in integral-image coordinates.
-        // Matches `HaarEvaluator::setWindow` in OpenCV 4.x.
         let nw = ww.saturating_sub(2);
         let nh = wh.saturating_sub(2);
         let nx1 = x + 1;
@@ -389,24 +411,36 @@ impl Cascade {
             let sq = cache.sum_sq_rect_sum(nx1, ny1, nx2, ny2);
             (s, sq)
         };
-        let variance_norm_factor: f32 = if cache.has_squared_iis() {
+        if cache.has_squared_iis() {
             // OpenCV variance: var = E[X²] - E[X]² = (sum_sq / N) - (sum / N)²
             // Multiplying by N² gives the scale-invariant numerator we compare
             // against the integral-image accumulator widths.
             let variance_part = nw_area * (sum_sq_in as f64) - (sum_in as f64) * (sum_in as f64);
             if variance_part > 0.0 {
-                (1.0 / variance_part.sqrt()) as f32
+                Some((1.0 / variance_part.sqrt()) as f32)
             } else {
-                0.0
+                None
             }
         } else {
             // No squared integral image attached (e.g. demo cascade). Skip
             // variance normalisation — use raw feature response.
-            1.0
-        };
-        if variance_norm_factor == 0.0 {
-            return None;
+            Some(1.0)
         }
+    }
+
+    fn classify_impl(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        cache: &mut EvalCache,
+        inbounds: bool,
+        sums: Option<(u64, u64)>,
+    ) -> Option<f32> {
+        let ww = self.window_w;
+        let wh = self.window_h;
+        let variance_norm_factor = self.variance_norm(ii, x, y, inbounds, sums, cache)?;
 
         let mut total: f32 = 0.0;
         cache.clear();
@@ -494,9 +528,17 @@ impl Cascade {
         Ok(())
     }
 
+    /// Load a `.rfcf` v2 cascade from a file path.
     pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
-        use std::io::Read;
         let mut f = std::fs::File::open(path)?;
+        Self::from_reader(&mut f)
+    }
+
+    /// Parse a `.rfcf` v2 cascade from any byte stream. This is what powers
+    /// the compile-time bundled cascade (`include_bytes!`) and the file
+    /// loader [`Cascade::load`]; both paths share one parser.
+    pub fn from_reader<R: std::io::Read + ?Sized>(f: &mut R) -> std::io::Result<Self> {
+        use std::io::Read;
         let mut magic = [0u8; 4];
         f.read_exact(&mut magic)?;
         if &magic != b"RFCF" {

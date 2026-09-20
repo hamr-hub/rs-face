@@ -89,7 +89,8 @@ pub struct JobStats {
     pub frames_with_face: u64,
     pub total_detections: u64,
     pub elapsed_ms: u64,
-    /// 当前 job 使用的算法(haar/cnn/yunet/mtcnn/hog)。
+    /// 当前 job 使用的算法(haar/cnn/luminance;历史数据里也可能出现已下线的
+    /// yunet/mtcnn/hog,展示与聚合时原样保留)。
     /// run_job 构建 detector 后写入,供 stats 聚合 + 前端过滤 chip 使用。
     pub algo: String,
 }
@@ -103,10 +104,10 @@ pub struct Job {
     pub status: Mutex<JobStatus>,
     pub frames: Mutex<Vec<FrameResult>>,
     pub stats: Mutex<JobStats>,
-    /// 检测算法名(haar/cnn/yunet/mtcnn/hog),由 run_job 在 detector 构建后写入,
+    /// 检测算法名(haar/cnn/luminance),由 run_job 在 detector 构建后写入,
     /// 摘要里暴露给前端做算法过滤 chip。
     pub algo: Mutex<Option<String>>,
-    /// 用户在 upload 时指定的算法(haar/cnn/yunet/mtcnn/hog/luminance);
+    /// 用户在 upload 时指定的算法(haar/cnn/luminance);
     /// 优先于 `RSFACE_ALGO` 环境变量。`None` = 走环境变量 / 默认。
     /// 在 `Job::create` 之前由 `api::handle_upload` 写入(基于 multipart
     /// `algo` 字段),`run_job` 在构建 detector 时读取。
@@ -635,7 +636,7 @@ impl JobRegistry {
             }
         }
 
-        // 3) 检测器:按 cfg + RSFACE_ALGO 选择 5 种算法之一(haar/cnn/yunet/mtcnn/hog)。
+        // 3) 检测器:按 cfg + RSFACE_ALGO 选择 3 种 zero-dep 算法之一(haar/cnn/luminance)。
         //    全部对外暴露同一份 `detect(gray) -> Vec<Detection>` 接口,后续
         //    frame 循环无需分支。SSE 事件同时带 `mode` (旧) 和 `algo` (新)
         //    字段,前端新老代码都能识别。
@@ -1207,33 +1208,27 @@ impl Drop for StreamGuard {
 }
 
 // ---------------------------------------------------------------------------
-// 检测器抽象:在平台层把 5 种算法包成同一份接口,run_job 主体不分支。
+// 检测器抽象:在平台层把 3 种 zero-dep 算法包成同一份接口,run_job 主体不分支。
 // ---------------------------------------------------------------------------
 
 /// 平台层自有的检测器枚举。
 /// - `Haar`:core `Detector`(多尺度滑动窗口 + Viola-Jones 级联 + NMS)。
 /// - `Cnn`: core `CnnDetector`(24×24 窗口 + CNN 前向推理 + NMS)。
-/// - `Yunet`: core `YunetDetector`(5 个 anchor scale + 15-dim 输出 + NMS)。
-/// - `MtCnn`: core `MtcnnDetector`(P-Net → R-Net → O-Net 三段级联)。
-/// - `HogSvm`: core `HogFaceDetector`(HOG 8x8 cell + Linear SVM 64x128 窗口)。
 /// - `Luminance`: core `LuminanceFaceDetector`(带状亮度 + 镜像对称 + 边缘密度)。
 ///
-/// 内部使用一次构建、每次 run_job 独立持有一个实例(CnnDetector/Yunet 的
+/// 内部使用一次构建、每次 run_job 独立持有一个实例(CnnDetector 的
 /// scratch 是 !Sync,需独占单线程使用,正好匹配 run_job 的单 std::thread 模型)。
 #[allow(clippy::large_enum_variant)] // 单线程构造一次,box 化不划算(856B 栈占用可接受)
 pub enum DetectorKind {
     Haar(Detector),
     Cnn(CnnDetector),
-    Yunet(rsface::yunet::YunetDetector),
-    MtCnn(rsface::mtcnn::MtcnnDetector),
-    HogSvm(rsface::hog_face::HogFaceDetector),
     Luminance(LuminanceFaceDetector),
 }
 
 impl DetectorKind {
-    /// 统一 `detect` 接口:Haar/Cnn/Yunet/MtCnn/HogSvm/Luminance 各自调 core 的 detect,
+    /// 统一 `detect` 接口:Haar/Cnn/Luminance 各自调 core 的 detect,
     /// Cnn 先把 GrayImage → f32 [0,1] 缓冲,其它直接用 GrayImage。
-    /// 6 个 detector 都返回 `Vec<Detection>`,run_job 不需要任何分支。
+    /// 3 个 detector 都返回 `Vec<Detection>`,run_job 不需要任何分支。
     pub fn detect(&self, gray: &GrayImage) -> Vec<Detection> {
         match self {
             DetectorKind::Haar(d) => d.detect(gray),
@@ -1255,9 +1250,6 @@ impl DetectorKind {
                     })
                     .collect()
             }
-            DetectorKind::Yunet(d) => d.detect(gray),
-            DetectorKind::MtCnn(d) => d.detect(gray),
-            DetectorKind::HogSvm(d) => d.detect(gray),
             DetectorKind::Luminance(d) => d.detect(gray),
         }
     }
@@ -1267,9 +1259,6 @@ impl DetectorKind {
         match self {
             DetectorKind::Haar(_) => "haar",
             DetectorKind::Cnn(_) => "cnn",
-            DetectorKind::Yunet(_) => "yunet",
-            DetectorKind::MtCnn(_) => "mtcnn",
-            DetectorKind::HogSvm(_) => "hog",
             DetectorKind::Luminance(_) => "luminance",
         }
     }
@@ -1283,8 +1272,7 @@ fn select_algo_name(cfg: &Config) -> String {
         .ok()
         .map(|s| s.trim().to_ascii_lowercase());
     match from_env.as_deref() {
-        Some("haar") | Some("cnn") | Some("yunet") | Some("mtcnn") | Some("hog")
-        | Some("luminance") => from_env.unwrap(),
+        Some("haar") | Some("cnn") | Some("luminance") => from_env.unwrap(),
         Some(other) => {
             eprintln!("[jobs] unknown RSFACE_ALGO='{other}', falling back to haar/cnn logic");
             if cfg.use_cnn || cfg.cnn_weights.is_some() {
@@ -1306,7 +1294,7 @@ fn select_algo_name(cfg: &Config) -> String {
 /// 根据 Config + `RSFACE_ALGO` 环境变量选择并构建检测器。
 /// 默认行为兼容老配置:`use_cnn=true` 或 `cnn_weights` 路径已设置时走 CNN,
 /// 否则走 Haar。新的 `RSFACE_ALGO` 显式覆盖以上规则,接受
-/// `haar` / `cnn` / `yunet` / `mtcnn` / `hog` / `luminance`。
+/// `haar` / `cnn` / `luminance`。
 ///
 /// `override_algo` 优先于 env 与默认(per-job 覆盖,来自 upload 表单)。
 /// 必须是 `available_algos()` 之一;否则忽略。
@@ -1352,15 +1340,6 @@ pub fn build_detector(cfg: &Config, override_algo: Option<&str>) -> std::io::Res
             };
             Ok(DetectorKind::Cnn(det))
         }
-        "yunet" => Ok(DetectorKind::Yunet(rsface::yunet::YunetDetector::new(
-            rsface::yunet::YunetConfig::default(),
-        ))),
-        "mtcnn" => Ok(DetectorKind::MtCnn(rsface::mtcnn::MtcnnDetector::new(
-            rsface::mtcnn::MtcnnConfig::default(),
-        ))),
-        "hog" => Ok(DetectorKind::HogSvm(
-            rsface::hog_face::HogFaceDetector::new(rsface::hog_face::HogConfig::default()),
-        )),
         "luminance" => Ok(DetectorKind::Luminance(LuminanceFaceDetector::new(
             LuminanceConfig::default(),
         ))),
@@ -1390,15 +1369,6 @@ pub fn build_detector_by_name(name: &str) -> std::io::Result<DetectorKind> {
             )))
         }
         "cnn" => Ok(DetectorKind::Cnn(CnnDetector::new(CnnConfig::default()))),
-        "yunet" => Ok(DetectorKind::Yunet(rsface::yunet::YunetDetector::new(
-            rsface::yunet::YunetConfig::default(),
-        ))),
-        "mtcnn" => Ok(DetectorKind::MtCnn(rsface::mtcnn::MtcnnDetector::new(
-            rsface::mtcnn::MtcnnConfig::default(),
-        ))),
-        "hog" => Ok(DetectorKind::HogSvm(
-            rsface::hog_face::HogFaceDetector::new(rsface::hog_face::HogConfig::default()),
-        )),
         "luminance" => Ok(DetectorKind::Luminance(LuminanceFaceDetector::new(
             LuminanceConfig::default(),
         ))),
@@ -1410,8 +1380,12 @@ pub fn build_detector_by_name(name: &str) -> std::io::Result<DetectorKind> {
 }
 
 /// 列出所有可用的算法名(给 `/api/config` 和 `/compare` 用)。
+///
+/// 注意:历史 job 行(DB / stats)里可能仍带有已下线算法的名字
+/// (`yunet` / `mtcnn` / `hog`)。这些字符串只用于展示与聚合,不经过本列表
+/// 校验 —— `aggregate_algo_stats` 按原始字符串分桶,原样返回,绝不 panic。
 pub fn available_algos() -> &'static [&'static str] {
-    &["haar", "cnn", "yunet", "mtcnn", "hog", "luminance"]
+    &["haar", "cnn", "luminance"]
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,12 +1539,30 @@ mod tests {
 
     #[test]
     fn agg_avg_ms_is_zero_when_no_terminal() {
-        let samples = vec![sample("yunet", JobStatus::Running, 5000, 9)];
+        let samples = vec![sample("luminance", JobStatus::Running, 5000, 9)];
         let agg = aggregate_algo_stats(&samples);
-        let y = &agg["yunet"];
+        let y = &agg["luminance"];
         assert_eq!(y.timed_count, 0);
         assert_eq!(y.elapsed_ms_sum, 0);
         assert_eq!(y.active, 1);
+    }
+
+    /// 历史 DB / stats 行里可能残留已下线算法名(yunet/mtcnn/hog)。
+    /// 聚合按原始字符串分桶,必须原样保留、绝不 panic 或丢数据。
+    #[test]
+    fn agg_tolerates_legacy_unknown_algo_strings() {
+        let samples = vec![
+            sample("yunet", JobStatus::Done, 100, 0),
+            sample("mtcnn", JobStatus::Error, 50, 0),
+            sample("hog", JobStatus::Done, 200, 0),
+        ];
+        let agg = aggregate_algo_stats(&samples);
+        assert_eq!(agg["yunet"].total, 1);
+        assert_eq!(agg["mtcnn"].error, 1);
+        assert_eq!(agg["hog"].timed_count, 1);
+        // 历史名字不出现在可选构造列表里,但仍能作为聚合 key 存在。
+        assert!(!available_algos().contains(&"yunet"));
+        assert!(agg.contains_key("yunet"));
     }
 
     #[test]
@@ -1651,7 +1643,7 @@ mod tests {
         };
         let job = reg.create(JobKind::Stream, "t".into()).unwrap();
         let id = job.id.clone();
-        for good in ["haar", "cnn", "yunet", "mtcnn", "hog", "luminance"] {
+        for good in ["haar", "cnn", "luminance"] {
             reg.set_algo_override(&id, good.to_string());
             assert_eq!(
                 job.algo_override.lock().unwrap().as_deref(),

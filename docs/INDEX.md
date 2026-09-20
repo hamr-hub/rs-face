@@ -28,10 +28,10 @@ do I start?", read in the order below.
 
 Recognition (zero-dep, no external weights):
 
-- [`docs/recognition-lbph.md`](recognition-lbph.md) — uniform LBP histograms, chi-square distance; 62/68 rank-1 on the 77-crop / 21-identity hard drama gallery (33/33 easy), 6×6 grid chosen by a 9-point sweep.
+- [`docs/recognition-lbph.md`](recognition-lbph.md) — OpenCV-`elbp_`-exact uniform LBP histograms, chi-square distance; 60/68 rank-1 on the 77-crop / 21-identity hard drama gallery (32/33 easy), 6×6 grid statistically tied with 8×8/10×10 across the 9-point sweep.
 - [`docs/recognition-eigenface.md`](recognition-eigenface.md) — PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`, strict per-probe LOO retraining; 58/68 = the measured PCA ceiling.
 - [`docs/recognition-fisherface.md`](recognition-fisherface.md) — Fisherfaces/LDA (Belhumeur 1997): n−C PCA reduction then ≤ C−1 class-discriminant axes, pseudo-inverse whitening; 59/68 rank-1 and the best zero-dep pair EER (≈ 12.8 %).
-- [`docs/gallery-persistence.md`](gallery-persistence.md) — zero-dep binary LBPH gallery format (`RSLB` v1): bit-exact f32 descriptors, full decode validation, atomic save; survives restarts without the original crops.
+- [`docs/gallery-persistence.md`](gallery-persistence.md) — zero-dep binary persistence: the LBPH gallery (`RSLB` v2, bit-exact f32 descriptors) and trained eigenfaces/Fisherfaces models (`RSEF`/`RSLD` v1); full decode validation, atomic save; survive restarts without the original crops.
 - [`docs/recognition-video.md`](recognition-video.md) — **video-level identification** across one or many videos: tracker + single-linkage clusterer + cross-video re-id (`src/video_id.rs`, `examples/identify_short_drama.rs`).
 
 Detection (zero-dep):
@@ -48,14 +48,13 @@ Detection (ONNX, opt-in via `ort-backend` or `tract-backend`):
 
 | doc | what it covers |
 |---|---|
-| [`docs/architecture.md`](architecture.md) | crate map, multi-threaded pipeline plumbing, the 5-detector uniform trait story. |
+| [`docs/architecture.md`](architecture.md) | crate map, multi-threaded pipeline plumbing, the 3-detector uniform trait story. |
 | [`docs/algorithms.md`](algorithms.md) | per-algorithm reference + **algorithm picker matrix** (start here when picking `--algo`). |
 | [`docs/format.md`](format.md) | binary `.rfcf` cascade format, manifest JSON schema, ONNX model registry digests. |
 | [`docs/benchmarks.md`](benchmarks.md) | reproducible bench scripts and what they measure. |
 | [`docs/BENCHMARK_BASELINE.md`](BENCHMARK_BASELINE.md) | the pinned baseline numbers — every regression report compares to this. |
 | [`docs/CPU_VS_GPU_REPORT.md`](CPU_VS_GPU_REPORT.md) | when GPU helps, when it doesn't, and why small images regress. |
-| [`docs/GPU_BACKENDS.md`](GPU_BACKENDS.md) | `cpu` / `metal` / `cuda` / `rocm` / `mlu` / `ascend` — what's wired vs scaffold. |
-| [`docs/CASCADE_FIX.md`](CASCADE_FIX.md) | history of the OpenCV XML → `.rfcf` parser bugs and the canonical converter. |
+| [`docs/GPU_BACKENDS.md`](GPU_BACKENDS.md) | `cpu` / `metal` / `cuda` / `opencl` — what's wired vs behind-a-feature, plus the add-a-vendor recipe (ROCm/Ascend/MLU are future work, not stubs). |
 
 ---
 

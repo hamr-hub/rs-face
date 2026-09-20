@@ -24,6 +24,10 @@ pub struct Crop {
 /// Ground-truth labels come from the filename convention
 /// `<identity>__<source>__<frame>.*` (part before the first `__`), falling back to
 /// the parent directory name.
+///
+/// Entries are visited in sorted path order: `read_dir` alone returns
+/// filesystem-defined order, and exact distance ties in the LOO loop would make
+/// the reported rank-1 vary between runs.
 pub fn load_crops(root: &Path) -> Vec<Crop> {
     let mut out = Vec::new();
     walk(root, &mut out);
@@ -31,8 +35,12 @@ pub fn load_crops(root: &Path) -> Vec<Crop> {
 }
 
 fn walk(dir: &Path, out: &mut Vec<Crop>) {
-    for entry in fs::read_dir(dir).expect("read crops dir") {
-        let path = entry.expect("dir entry").path();
+    let mut paths: Vec<_> = fs::read_dir(dir)
+        .expect("read crops dir")
+        .map(|entry| entry.expect("dir entry").path())
+        .collect();
+    paths.sort();
+    for path in paths {
         if path.is_dir() {
             walk(&path, out);
             continue;

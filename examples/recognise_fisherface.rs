@@ -97,4 +97,29 @@ fn main() {
     // 5. Verification: does this crop look like alice?
     let score = rec.verify("alice", &probe).unwrap_or(f32::INFINITY);
     println!("fisherfaces verify(alice, probe) = {score:.3}");
+
+    // 6. Persistence: the trained model (mean, Fisher axes, projections)
+    //    survives a restart as the zero-dependency `RSLD` blob — no retrain
+    //    and no original crops needed to reload. Reload is bit-exact.
+    let model_path = std::env::temp_dir().join(format!(
+        "rsface_example_fisher_{}_{}.fisher",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    rec.save(&model_path).expect("save fisherfaces model");
+    let before = rec.rank_crop(&probe);
+    drop(rec);
+
+    let reloaded = FisherfaceRecognizer::load(&model_path).expect("load fisherfaces model");
+    println!(
+        "fisherfaces model reloaded: {} identities, {} crop(s)",
+        reloaded.len(),
+        reloaded.crop_count()
+    );
+    assert_eq!(reloaded.rank_crop(&probe), before);
+    std::fs::remove_file(&model_path).expect("cleanup model");
+    println!("fisherfaces persistence round-trip OK (ranking unchanged)");
 }

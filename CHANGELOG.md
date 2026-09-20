@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — real OpenCV cascade bundled; zero-arg install works
+- **The classical OpenCV frontal-face cascade now ships inside the binary**
+  (`src/weights/haarcascade_frontalface_default.rfcf`, converted from OpenCV
+  4.10.0's Apache-2.0 XML; source hash pinned in `src/weights/NOTICE.md`).
+  Embedded via `include_bytes!` and served by
+  `rsface::haar::bundled::bundled_frontalface_cascade()`, the CLI uses it by
+  default — no `--cascade` path and no model download are needed to detect
+  real faces. The 930 KB audit XML is kept beside it but excluded from the
+  crates.io package.
+- **`rs-face demo`** is a zero-argument post-install smoke test: the bundled
+  cascade runs against an embedded 256×256 portrait (fixture under
+  `tests/fixtures/`), prints the detection, writes an annotated PNG to
+  `rsface-demo/`, and exits non-zero when no face is found.
+- **Uniform `FaceRecognizer` trait** (`src/recognizer.rs`): LBPH /
+  eigenfaces / Fisherfaces now dispatch behind one API with a shared
+  `Recognition` outcome (including incremental enroll); cookbook snippet in
+  `examples/recognise_uniform.rs`.
+
+### Removed — placeholder-weight detectors
+- **`src/mtcnn.rs`, `src/hog_face.rs`, `src/yunet.rs` and the random-weight
+  blobs under `src/weights/` were deleted.** They shipped 1–3 KB of random
+  bytes as "trained" weights and returned zero detections on every frame;
+  apologetic labels (`Maturity::Scaffold`, `[SCAFFOLD — detects nothing]`)
+  cannot make a non-algorithm useful. The zero-dep detector set is now
+  honestly three: `haar`, `cnn` (a genuinely trainable starter net —
+  `cargo run --bin cnn_train`), and `luminance`. The `Maturity::Scaffold`
+  enum variant and its labelling machinery were removed with them.
+- The real, Apache-2.0 **YuNet 2023mar ONNX model stays pinned in
+  `src/models.rs`** (SHA-256, fetchable via `tools/fetch_models.sh`) for a
+  future ONNX runner; only the fake in-tree implementation is gone.
+- `benches/perf_compare.rs` no longer prints YuNet/MTCNN/HoG N/A rows for
+  algorithms that are not in the crate.
+- Plain `cargo run` now launches the CLI (`default-run = "rs-face"`).
+
+### Changed — reference parity
+- **SCRFD preprocessing matches InsightFace's `scrfd.py` exactly**: Python-int
+  letterbox with the long side pinned to the input size (and the reference
+  quirk of applying the y-derived scale to both axes), and cv2
+  INTER_LINEAR-equivalent resampling (centre mapping, 4-tap bilinear, edge
+  replication) instead of nearest neighbour. Regression tests pin both.
+- `Cascade::eval_stage` now reports the same verdict as the production
+  classifier: inner-`normrect` variance normalisation, the
+  `value < threshold ? left : right` leaf rule (the legacy `sign` field is
+  stored for format round-tripping but never consulted), and the effective
+  threshold `stage_threshold + stage_bias`.
+
+### Changed — LBPH now matches OpenCV's `elbp_` bit-for-bit (gallery format v2)
+- **The LBP sampler was rewritten to the exact OpenCV `face::LBPHFaceRecognizer`
+  convention**, verified against `lbph_faces.cpp` in OpenCV 4.x, 3.4.20 and the
+  2.4.9 `facerec.cpp`: neighbour `n` sits at angle `2πn/P` with bit 0 at the
+  **3 o'clock** sample (the previous build used 6 o'clock), neighbours are
+  **bilinear-interpolated at every radius** with OpenCV's floor/ceil corners and
+  `w1..w4` weights (negative row offsets floor like the C++ `cvFloor(int)`
+  cast), the comparison is `v > center || |v−center| < f32::EPSILON`, and
+  spatial cells are fixed `interior/grid` rectangles whose right/bottom
+  remainder strip is dropped. No edge clamping exists upstream and none here:
+  only interior pixels (`radius..size−radius`) contribute. Two new unit tests
+  pin the ring geometry and the 3 o'clock bit-0 code.
+- **χ² distance now returns `None` only when *both* descriptors have zero
+  mass** in a cell (the crate's own border-degenerate all-zero descriptor); a
+  one-sided zero mass yields the finite sum, matching OpenCV behaviour.
+- **The on-disk gallery format is now `RSLB` v2; v1 is rejected** with
+  `LbphStoreError::UnsupportedVersion(1)`. v1 was only ever written by
+  pre-release builds and its uniform-bin permutation under the old sampling
+  convention is not distance-comparable, so mixing the two silently would
+  corrupt rankings. The header layout itself is unchanged.
+- **Benchmarks are now deterministic**: `bench_lbph` walks crop directories in
+  sorted path order — `fs::read_dir` order varied between runs, and exact χ²
+  ties (integer-count histograms) made strict LOO rank-1 fluctuate by up to
+  four probes. Canonical output is now byte-identical across consecutive runs.
+- **All accuracy numbers were re-measured honestly under the new sampler**
+  (hard gallery, 77 crops / 21 identities / 68 repeated probes): LOO rank-1 is
+  **60/68 = 88.2 %** (was 62/68 = 91.2 % under the old sampler — the old and
+  new numbers are not comparable); the easy no-regression gallery is 32/33 at
+  the shipped 6×6 grid (finer grids reach 33/33). At `DEFAULT_MAX_DISTANCE`
+  16.7: FAR 0.00 %, FRR 50.8 %, pair accuracy 96.6 %; closest impostor 17.5;
+  EER ≈ 23.2 (FAR ≈ FRR ≈ 19.7 %). The 9-point sweep now shows 6×6, 8×8 and
+  10×10 grids statistically tied (all up to 60/68); 6×6 stays the shipped
+  default for its smaller descriptor, and the tie is documented as such.
+  Docs refreshed: `docs/recognition-lbph.md`, `docs/gallery-persistence.md`,
+  `docs/algorithms.md`, `README.md`.
+
+### Added — zero-dependency trained-model persistence (eigenfaces / Fisherfaces)
+- **Trained subspace recognisers survive restarts without retraining**
+  (`src/subspace_store.rs`, new module, `src/binio.rs` shared with the LBPH
+  codec): `EigenfaceRecognizer` and `FisherfaceRecognizer` gain `to_bytes` /
+  `from_bytes` / `save` / `load`. The blobs carry new magics **`RSEF` v1**
+  (mean, unit eigenvectors, per-axis inverse-eigenvalue Mahalanobis scales,
+  projected coefficients, metric byte, variance-kept, suggested threshold) and
+  **`RSLD` v1** (mean, ≤ C−1 discriminant axes, projected coefficients).
+  Everything is stored as raw IEEE-754 `f32` bits, so reload is bit-exact and
+  rankings are unchanged (round-trip tests assert it).
+- Both decoders are untrusted-input boundaries: magic/version checks, bounds-
+  checked reads, finite/non-negative scalars, `variance_kept ∈ (0,1]`, exact
+  vector lengths, `coeffs == k` per member, up-front allocation cap
+  (`MAX_MODEL_FLOATS = 67 108 864`), count/label sanity caps, and
+  no-trailing-bytes; errors come back as `SubspaceStoreError`
+  (`std::error::Error`), never panics. Saves use the same sibling
+  `.<name>.tmp` + atomic-rename mechanism as the LBPH gallery.
+- Layout documented byte-by-byte in `docs/gallery-persistence.md` §7–11
+  (common 19-byte header, per-format extensions, member sections; ≈ 0.84 MB for
+  a k=50 eigenfaces model on the current 77-crop gallery and ≤ ≈ 345 KiB for
+  Fisherfaces); cross-feeding an `RSEF` blob to the Fisherfaces decoder (or any
+  other permutation) fails with `BadMagic`.
+
 ### Added — project governance (enforced, not just documented)
 - **`.github/workflows/ci.yml` strengthened**: the existing CI covered
   build/test/zero-dep but had no `fmt`/`clippy` gate and never built the
@@ -72,6 +177,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`README.md § Project layout`**: rewritten to show the full tree
   (with platform/ sub-tree, tests/, benches/, examples/, docs/, tools/,
   data/) and point at `CONTRIBUTING.md` for the canonical version.
+- **No new top-level directories (STRUCTURE §2.1)**: the feature branch that
+  added the bundled cascade had introduced `assets/`; its contents moved to
+  the documented homes — cascade weights + `NOTICE.md` under `src/weights/`,
+  the embedded demo portrait under `tests/fixtures/` — with `include_bytes!`
+  paths, the `.gitignore` rfcf exception and the crates.io package excludes
+  updated. `docs/CASCADE_FIX.md`, the last `*_fix.md` scratch note banned by
+  STRUCTURE §2.2 (its uppercase name slipped past the earlier audit), was
+  deleted and its three inbound links cleaned.
 
 ### Fixed — platform deploy permissions
 - **`platform/docker-compose.yml` — rustfs 容器锁定 UID:GID = 1000:1000**:

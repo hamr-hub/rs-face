@@ -13,11 +13,20 @@ zero-third-party-dependency** build and reports its measured accuracy on real fa
 LBPH ([Ahonen, Hadid, Pietikäinen, ECCV 2004](https://link.springer.com/chapter/10.1007/978-3-540-24670-1_36))
 needs no training-time download: the "model" is the set of per-identity histograms
 collected at enrolment. The implementation lives in `src/lbph.rs` and uses only
-`std` plus image primitives already in `src/image/`. The descriptor, the uniform-pattern
-lookup table, and the chi-square metric follow OpenCV's `face::LBPHFaceRecognizer`
-(radius 1, 8 neighbours, 59-bin uniform mapping, chi-square distance). One deliberate
-deviation: the spatial grid is **6×6 cells rather than OpenCV's 8×8**, chosen by a
-measured sweep (§4.2); 8×8 and 10×10 remain one config field away.
+`std` plus image primitives already in `src/image/`. The sampler, the uniform-pattern
+lookup table, spatial-cell geometry, and the chi-square metric match OpenCV's
+`face::LBPHFaceRecognizer` bit-for-bit (`elbp_`: bit 0 at the 3 o'clock sample,
+neighbour `n` at `(r·cos 2πn/P, −r·sin 2πn/P)`, bilinear interpolation at every
+radius, epsilon-tie comparison, interior-only, fixed `interior/grid` cell rectangles;
+8 neighbours, 59-bin uniform mapping). One deliberate deviation: the spatial grid is
+**6×6 cells rather than OpenCV's 8×8** — under the exact sampler both land at 60/68
+LOO rank-1 on the hard gallery (§4.2) and 6×6 keeps the descriptor compact; 8×8 and
+10×10 remain one config field away.
+
+> Numbers in §4 are measured with this OpenCV-exact sampler and sorted-path bench
+> order. Earlier revisions of this document used a nearest-pixel 6 o'clock convention
+> and unsorted directory iteration; their results are **not comparable** across the
+> change (the gallery format was bumped from `RSLB` v1 to v2 for the same reason).
 
 ## 2. Pipeline
 
@@ -25,9 +34,11 @@ measured sweep (§4.2); 8×8 and 10×10 remain one config field away.
 gray frame
   └─ face box (Haar in the zero-dep build; SCRFD when a model is present)
        └─ square box crop, +30 % margin, resize to 120×120
-            └─ LBP codes (3×3, 8 neighbours, threshold vs. centre)
+            └─ LBP codes (8 neighbours on the r-ring, bilinear-sampled,
+                 OpenCV elbp convention: bit 0 at 3 o'clock, ≥-with-eps tie)
                  └─ map to 59 uniform bins
-                      └─ 6×6 spatial cell histograms, L1-normalised per cell
+                      └─ 6×6 spatial cell histograms (fixed interior/grid
+                         rectangles, edge remainder dropped), L1 per cell
                            └─ χ² distance Σ(a−b)²/(a+b) to enrolled histograms
 ```
 
@@ -39,8 +50,8 @@ shot generalises poorly across pose). Decisions use `max_distance` (accept radiu
 an optional `min_margin` (best identity must beat the runner-up).
 
 The LBP operator is invariant to monotone photometric changes (gain/offset) by
-construction. Histogram equalisation is offered as a config option but made no
-difference on either evaluation set (numbers below).
+construction. Histogram equalisation is offered as a config option but loses on both
+current evaluation sets (§4), so it stays opt-in.
 
 ## 3. Evaluation methodology
 
@@ -70,7 +81,8 @@ accurate model path; the recogniser under evaluation never sees an ONNX runtime:
    yields a χ² distance labelled same/different identity, and a leave-one-out rank-1
    loop runs against the remaining crops. The bench also sweeps grid size
    (6×6/8×8/10×10), crop size (90/120/150 px), and histogram equalisation;
-   configurations rank by LOO rank-1, then margin.
+   configurations rank by LOO rank-1, then margin. Crops are visited in sorted
+   path order so exact distance ties resolve deterministically between runs.
 
 77 of the 150 frames pass the face gate and form the current **hard gallery: 21
 identities, 195 same-identity and 2 731 different-identity pairs**. Nine identities
@@ -94,58 +106,67 @@ Pair-distance distributions for the shipped configuration (raw LBP, 6×6, 120 px
 
 | pair type | n | mean | p5 | p50 | p95 | extreme |
 |---|--:|--:|--:|--:|--:|--:|
-| same identity | 195 | 15.14 | 4.73 | 15.77 | 26.36 | max 37.74 |
-| different identity | 2 731 | 25.53 | 20.50 | 25.33 | 31.51 | min 13.18 |
+| same identity | 195 | 15.92 | 4.85 | 17.31 | 29.22 | max 37.92 |
+| different identity | 2 731 | 26.41 | 21.08 | 26.03 | 33.10 | min 17.50 |
 
-Mean margin: **10.39** on the χ² scale, and the tails overlap (the closest impostor,
-13.18, sits below the farthest genuine pair, 37.74). Leave-one-out **rank-1
-identification is 62/68 = 91.2 %** over repeated identities.
+Mean margin: **10.49** on the χ² scale, and the tails overlap (the closest impostor,
+17.50, sits below the farthest genuine pair, 37.92). Leave-one-out **rank-1
+identification is 60/68 = 88.2 %** over repeated identities.
 
 | operating point | threshold | pair accuracy | FAR | FRR |
 |---|--:|--:|--:|--:|
-| **crate default** `DEFAULT_MAX_DISTANCE` | **16.7** | **96.5 %** | **0.26 %** | **48.7 %** |
-| best pair accuracy | 16.68 | 96.5 % | 0.22 % | 48.7 % |
-| equal-error (EER) | 22.47 | — | 20.0 % | 20.0 % |
+| **crate default** `DEFAULT_MAX_DISTANCE` | **16.7** | **96.6 %** | **0.00 %** | **50.8 %** |
+| best pair accuracy | 17.86 | 96.8 % | 0.07 % | 47.7 % |
+| equal-error (EER) | 23.21 | — | 19.7 % | 19.5 % |
 
-Histogram equalisation changes nothing of substance (62/68 rank-1, EER 22.24) —
-consistent with the operator's built-in monotone-lighting invariance.
+Histogram equalisation hurts slightly here (56/68 rank-1, EER 23.04, FAR 0.04 % at
+the default) — consistent enough with the operator's built-in monotone-lighting
+invariance that the raw variant stays the default; benchmark both on your own data.
 
 The full generated report (including per-identity crop counts) is committed at
 `docs/bench-results-lbph.md`.
 
-### 4.2 Hyperparameter sweep — why the default grid is 6×6
+### 4.2 Hyperparameter sweep — why the default grid stays 6×6
 
-LOO rank-1 over the 68 repeated-identity probes, raw LBP:
+LOO rank-1 over the 68 repeated-identity probes, raw LBP (sorted-path order):
 
 | grid | 90 px | 120 px | 150 px |
 |---|--:|--:|--:|
-| **6×6 (shipped)** | 61/68 | **62/68** | 61/68 |
-| 8×8 (OpenCV default) | 59/68 | 59/68 | 60/68 |
-| 10×10 | 59/68 | 60/68 | 59/68 |
+| **6×6 (shipped)** | 60/68 | **60/68** | 60/68 |
+| 8×8 (OpenCV default) | 59/68 | 60/68 | 60/68 |
+| 10×10 | 57/68 | 59/68 | 60/68 |
 
-The coarser 6×6 grid beats OpenCV's 8×8 at **every** crop size, by 2–3 probes: larger
-cells pool the box-crop localisation jitter that an unaligned pipeline (no eye
-positions, detector box only) inevitably produces. The same configs on the easy
-35-crop gallery are all 33/33 — the change costs nothing there. Deployments feeding
-landmark-aligned crops can set 8×8 or 10×10 and gain spatial precision instead.
+Under the OpenCV-exact sampler the three grids are statistically tied on 68 probes:
+the best 8×8 and 10×10 cells reach 60/68, the same as 6×6, and the bench's
+margin tiebreak names 10×10/150 (pair-distance margin 35.4) the formal winner. 6×6 at
+120 px stays the shipped default because it sits on that rank-1 Pareto front with a
+smaller descriptor (2 124 bins vs 3 776 at 8×8, 5 900 at 10×10); claiming a multi-probe
+accuracy edge for any cell here would be noise. On the easy 35-crop gallery finer
+grids do pick up one probe (6×6: 32/33 at every crop size; 8×8: 32/33→33/33 from
+120 px; 10×10: 33/33 throughout). Deployments feeding landmark-aligned crops may
+prefer 8×8/10×10 for the extra spatial precision.
 
 ### 4.3 Easy gallery (no-regression set) — 35 crops, 8 identities
 
-The original gallery stays near-frontal and well lit; every swept configuration
-reaches 33/33 rank-1. At the shipped constant 16.7 the pair operating point is
-**FAR 1.2 %, FRR 16.5 %** (85 same / 510 different pairs) — the same conservative
-threshold that nearly suppresses false accepts on the hard set is usable there too.
+The original gallery stays near-frontal and well lit; the shipped config reaches
+32/33 rank-1 (97.0 %) and finer grids reach 33/33. Same-identity distances stay low
+(mean 10.3, p95 29.2) while every impostor pair is ≥ 17.9, so at the shipped
+constant 16.7 the pair operating point is **FAR 0.0 %, FRR 17.6 %** (85 same / 510
+different pairs; EER 22.95, FAR/FRR ≈ 12.9 %): the same conservative threshold that
+suppresses false accepts on the hard set works here as well.
 
 ### 4.4 Threshold policy
 
 False accepts are the expensive error in access-control-style verification, so
 `DEFAULT_MAX_DISTANCE = 16.7` ships a **deliberately conservative low-FAR point**, not
-the EER: on the hard gallery it accepts roughly half of genuine probes while admitting
-under 0.3 % of impostors, and uncertain probes surface as
-`LbphMatch::BelowThreshold`. The distributions overlap there — *no* threshold gives
-both low FAR and low FRR — so for the close-set case ("which enrolled person is
-this?"), prefer the threshold-free `LbphRecognizer::rank_crop` API, whose 91.2 %
-rank-1 is the honest headline on hard data. The χ² scale is descriptor-specific
+the EER: it sits just below the closest measured impostor distance on both sets
+(17.5 hard / 17.9 easy), so the measured false-accept count is 0/2 731 and 0/510
+while it accepts roughly half of genuine probes on the hard set (FRR 50.8 %);
+uncertain probes surface as `LbphMatch::BelowThreshold`. The distributions overlap
+there — *no* threshold gives both low FAR and low FRR (EER ≈ 20 %) — so for the
+close-set case ("which enrolled person is this?"), prefer the threshold-free
+`LbphRecognizer::rank_crop` API, whose 88.2 % rank-1 (60/68) is the honest headline
+on hard data. The χ² scale is descriptor-specific
 (grid × crop size); rerun `bench_lbph` on your own crops before trusting the constant.
 (`f32::MAX` would be OpenCV's "always identify" default — useless for verification.)
 
@@ -163,7 +184,7 @@ rank-1 is the honest headline on hard data. The χ² scale is descriptor-specifi
 * **Small, clustered dataset.** 77 accepted crops across 21 identities from one
   content type (vertically shot drama); identities are uneven (1–11 crops each) and
   nine are singletons. There is no age/large-pose/heavy-occlusion split and no
-  cross-title identity overlap. Treat 91.2 % rank-1 as "works on this harder domain",
+  cross-title identity overlap. Treat 88.2 % rank-1 as "works on this harder domain",
   not as an LFW-style claim.
 * **No landmark alignment.** ArcFace normalises eyes/mouth to fixed coordinates; LBPH
   only sees the detector box. Pose and box jitter are exactly what the spatial
@@ -204,8 +225,9 @@ rec.save("gallery.lbph")?;                 // atomic sibling-temp + rename
 let rec = LbphRecognizer::load("gallery.lbph")?; // bit-exact, fully validated
 ```
 
-The gallery file format (`RSLB` v1, zero-dependency little-endian, ~8.5 KB per
-crop at the 6×6 default) is specified in
+The gallery file format (`RSLB` v2, zero-dependency little-endian, ~8.5 KB per
+crop at the 6×6 default; v1 was a pre-release build with a different sampling
+convention and is rejected) is specified in
 [`gallery-persistence.md`](gallery-persistence.md).
 
 All inputs are `GrayImage`; use `RgbImage::to_gray()` and the built-in resize if your
