@@ -152,12 +152,13 @@
 //! ## License
 //!
 //! The crate is MIT. The `ort-backend` feature pulls in ONNX Runtime (MIT) and
-//! requires `libonnxruntime` on the host. The crate ships no opaque weight
-//! blobs: the Haar cascade is embedded as human-readable parameters, the CNN
-//! starter weights are trainable via the `cnn_train` binary, and ONNX models
-//! are fetched on demand through the SHA-256-pinned registry in [`models`]
-//! (InsightFace weights are non-commercial research-only; YuNet is
-//! Apache-2.0).
+//! requires `libonnxruntime` on the host. The only embedded weight blob is the
+//! classical OpenCV `haarcascade_frontalface_default` cascade (Apache-2.0,
+//! provenance in `src/weights/NOTICE.md`), shipped as the documented `.rfcf`
+//! format; the CNN starter weights are trainable via the `cnn_train` binary,
+//! and ONNX models are fetched on demand through the SHA-256-pinned registry
+//! in [`models`] (InsightFace weights are non-commercial research-only;
+//! the YuNet model pin is Apache-2.0).
 
 #![allow(clippy::too_many_arguments)] // Pipeline knobs are independently tuned; bundling them hides call sites.
 #![allow(clippy::type_complexity)] // Detector/Cascade generics are spelled out in public APIs; not worth a type alias.

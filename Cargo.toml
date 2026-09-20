@@ -20,8 +20,10 @@ exclude = [
     "data",
     "out/",
     "rsface-demo/",
-    "assets/",
     "target/",
+    # Audit/regeneration copy of the OpenCV source XML (930 KB); only the
+    # ~118 KB .rfcf is embedded at build time.
+    "src/weights/*.xml",
 ]
 # benches/accuracy.rs is registered explicitly as a [[bin]] below; auto-discovery would
 # also pick it up as a bench and emit a "multiple build targets" warning.

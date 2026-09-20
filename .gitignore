@@ -8,11 +8,11 @@ platform/target/
 
 # ---- Build artifacts / generated files ----
 # Cascades converted from OpenCV XML via tools/convert_opencv_xml.py are local
-# build products — EXCEPT the one shipped in assets/, which is a versioned
-# source artifact embedded into the binary via include_bytes! (see
-# assets/NOTICE.md for the pinned source hash).
+# build products — EXCEPT the one shipped in src/weights/, which is a
+# versioned source artifact embedded into the binary via include_bytes! (see
+# src/weights/NOTICE.md for the pinned source hash).
 *.rfcf
-!assets/*.rfcf
+!src/weights/*.rfcf
 
 # ---- Local-only user state ----
 .claude/

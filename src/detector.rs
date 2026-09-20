@@ -959,9 +959,9 @@ mod tests {
     /// Honest about the demo cascade: it is calibrated for synthetic test
     /// patterns, so this test is intentionally lax — it would only fail if the
     /// detector panicked, returned NaN scores, or produced boxes outside the
-    /// image. The full real-face measurement lives in
-    /// `docs/CASCADE_FIX.md` + `docs/bench-results.md` for users who load a
-    /// trained `.rfcf` cascade.
+    /// image. The production path uses the bundled OpenCV cascade
+    /// (`crate::haar::bundled`); measured numbers for trained `.rfcf`
+    /// cascades live in `docs/bench-results.md`.
     #[test]
     fn demo_cascade_runs_on_real_face_fixture() {
         let fixture = Path::new("tests/fixtures/lena.ppm");

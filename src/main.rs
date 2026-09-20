@@ -515,7 +515,7 @@ fn main() {
 /// download, no sample files, zero third-party runtime.
 fn run_demo(out_dir: Option<&std::path::Path>) {
     let out_dir = out_dir.unwrap_or_else(|| std::path::Path::new("rsface-demo"));
-    let mut pgm: &[u8] = include_bytes!("../assets/demo_face_256.pgm");
+    let mut pgm: &[u8] = include_bytes!("../tests/fixtures/demo_face_256.pgm");
     let gray = match rsface::image::codec::read_pgm(&mut pgm) {
         Ok(img) => img,
         Err(e) => {

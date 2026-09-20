@@ -1,4 +1,8 @@
-# Bundled assets — provenance & licenses
+# Bundled weights — provenance & licenses
+
+Per `STRUCTURE.md` §1.1, weights compiled into the zero-dep build via
+`include_bytes!` live under `src/weights/`. The demo portrait referenced
+below lives with the other test fixtures in `tests/fixtures/`.
 
 ## `haarcascade_frontalface_default.rfcf`
 
@@ -13,21 +17,25 @@
   The upstream XML is kept alongside the converted file for audit and
   reproducibility.
 - **Conversion:** `python3 tools/convert_opencv_xml.py \
-  assets/haarcascade_frontalface_default.xml \
-  assets/haarcascade_frontalface_default.rfcf`
+  src/weights/haarcascade_frontalface_default.xml \
+  src/weights/haarcascade_frontalface_default.rfcf`
   → 25 stages, 2 913 features, no tilted rects, 24×24 window (121 200 bytes).
   The `.rfcf` format is a pure representation change (f32 weights, little
   endian); no retraining or coefficient modification is performed.
 
-The cascade is embedded into the binary via `include_bytes!` and returned by
-`rsface::haar::bundled::bundled_frontalface_cascade()`.
+The cascade is embedded into the binary via `include_bytes!`
+(`src/haar/bundled.rs`) and returned by
+`rsface::haar::bundled::bundled_frontalface_cascade()`. The XML is audit /
+regeneration material only and is excluded from the published crates.io
+package; only the `.rfcf` is needed at build time.
 
 OpenCV's full Apache-2.0 license text: https://www.apache.org/licenses/LICENSE-2.0
 
-## `demo_face_256.pgm`
+## `tests/fixtures/demo_face_256.pgm`
 
 - **Source:** area-downscaled (512×512 PPM → 256×256 P5 PGM, BT.601 luma)
-  from the standard Lena test image vendored in `tests/fixtures/lena.ppm` —
+  from the standard Lena test image vendored alongside it in
+  `tests/fixtures/lena.ppm` —
   the ubiquitous 1972 image-processing test photograph, the same portrait
   OpenCV ships as `samples/data/lena.jpg`.
 - **Use:** embedded into the **`rs-face` CLI binary only** (via

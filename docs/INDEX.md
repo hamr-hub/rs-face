@@ -48,14 +48,13 @@ Detection (ONNX, opt-in via `ort-backend` or `tract-backend`):
 
 | doc | what it covers |
 |---|---|
-| [`docs/architecture.md`](architecture.md) | crate map, multi-threaded pipeline plumbing, the 5-detector uniform trait story. |
+| [`docs/architecture.md`](architecture.md) | crate map, multi-threaded pipeline plumbing, the 3-detector uniform trait story. |
 | [`docs/algorithms.md`](algorithms.md) | per-algorithm reference + **algorithm picker matrix** (start here when picking `--algo`). |
 | [`docs/format.md`](format.md) | binary `.rfcf` cascade format, manifest JSON schema, ONNX model registry digests. |
 | [`docs/benchmarks.md`](benchmarks.md) | reproducible bench scripts and what they measure. |
 | [`docs/BENCHMARK_BASELINE.md`](BENCHMARK_BASELINE.md) | the pinned baseline numbers — every regression report compares to this. |
 | [`docs/CPU_VS_GPU_REPORT.md`](CPU_VS_GPU_REPORT.md) | when GPU helps, when it doesn't, and why small images regress. |
 | [`docs/GPU_BACKENDS.md`](GPU_BACKENDS.md) | `cpu` / `metal` / `cuda` / `opencl` — what's wired vs behind-a-feature, plus the add-a-vendor recipe (ROCm/Ascend/MLU are future work, not stubs). |
-| [`docs/CASCADE_FIX.md`](CASCADE_FIX.md) | history of the OpenCV XML → `.rfcf` parser bugs and the canonical converter. |
 
 ---
 

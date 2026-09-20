@@ -8,15 +8,15 @@
 //! *real* faces out of the box — no model download, no third-party runtime.
 //!
 //! Provenance and license (Apache-2.0) are documented in
-//! `assets/NOTICE.md`; the exact SHA-256 of the source XML is recorded there
-//! for reproducibility. Re-generate with
+//! `src/weights/NOTICE.md`; the exact SHA-256 of the source XML is recorded
+//! there for reproducibility. Re-generate with
 //! `python3 tools/convert_opencv_xml.py`.
 
 use super::cascade::Cascade;
 
-/// The embedded `.rfcf` bytes live in `assets/`; ~118 KiB on disk, which
+/// The embedded `.rfcf` bytes live in `src/weights/`; ~118 KiB on disk, which
 /// buys production-quality face detection with zero runtime setup.
-static BUNDLED_RFCF: &[u8] = include_bytes!("../../assets/haarcascade_frontalface_default.rfcf");
+static BUNDLED_RFCF: &[u8] = include_bytes!("../weights/haarcascade_frontalface_default.rfcf");
 
 /// Parse and return the bundled OpenCV frontal-face cascade.
 ///

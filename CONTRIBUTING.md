@@ -121,7 +121,6 @@ rs-face/
 │   ├── benchmarks.md   # reproducible bench scripts
 │   ├── BENCHMARK_BASELINE.md # pinned regression baselines
 │   ├── bench-results*.md # measured accuracy / throughput tables
-│   ├── CASCADE_FIX.md  # history of OpenCV XML parser bugs
 │   ├── CPU_VS_GPU_REPORT.md # when GPU helps, when it doesn't
 │   ├── format.md       # `.rfcf` binary cascade format
 │   ├── GPU_BACKENDS.md # CPU / Metal / CUDA / ROCm / MLU / Ascend
