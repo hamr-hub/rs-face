@@ -1563,10 +1563,14 @@ const upload = (() => {
     utils.$$('.new-type').forEach(b => b.addEventListener('click', () => selectType(b.dataset.type)));
     // data-close 点击委托已由 modalKit.init() 统一处理
     setupDropzone('#dz-image', '#file-image', files => {
+      if (typeof dropzonePreview !== 'undefined') dropzonePreview.renderImage(files);
       if (files.length > 1) for (const f of files) submitImage(f); else submitImage(files[0]);
       closeAllModals();
     });
-    setupDropzone('#dz-video', '#file-video', files => { submitVideo(files[0]); closeAllModals(); });
+    setupDropzone('#dz-video', '#file-video', files => {
+      if (typeof dropzonePreview !== 'undefined') dropzonePreview.renderVideo(files);
+      submitVideo(files[0]); closeAllModals();
+    });
     utils.$('#video-url-go').addEventListener('click', () => {
       const url = utils.$('#video-url').value.trim();
       if (!url) return toast.warn('请输入视频 URL');
@@ -2355,6 +2359,7 @@ function initKeys() {
 async function init() {
   theme.init(); modalKit.init();
   if (typeof uploadQueue !== 'undefined' && uploadQueue && typeof uploadQueue.init === 'function') uploadQueue.init();
+  if (typeof dropzonePreview !== 'undefined' && dropzonePreview && typeof dropzonePreview.init === 'function') dropzonePreview.init();
   sidebar.init(); upload.init(); batch.init(); confirmModal.init(); initKeys();
   visibilityCtl.init();
   // 平台 KPI 实时拉取
@@ -2471,4 +2476,5 @@ window.__rsface = {
   state, api, sidebar, preview, sse, batch, theme, toast, dashboard, lightbox, hashRouter,
   kpi, visibilityCtl, modalKit, ctxMenu, confirmModal,
   uploadQueue: (typeof uploadQueue !== 'undefined') ? uploadQueue : null,
+  dropzonePreview: (typeof dropzonePreview !== 'undefined') ? dropzonePreview : null,
 };

@@ -749,6 +749,50 @@ body {
 .dz-icon { font-size: 30px; margin-bottom: 4px; }
 .hint { color: var(--fg-dim); font-size: 11px; }
 
+/* 拖放区预览行:选中 / 拖入后展示在 dropzone 下方 */
+.dz-preview {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: var(--bg-3); border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+.dz-preview.hidden { display: none; }
+.dz-preview-thumb {
+  flex: 0 0 56px; width: 56px; height: 56px;
+  border-radius: 6px;
+  background-color: var(--bg-4);
+  background-size: cover; background-position: center;
+  border: 1px solid var(--border);
+}
+.dz-preview-icon {
+  flex: 0 0 56px; width: 56px; height: 56px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 30px;
+  background: var(--bg-4); border-radius: 6px;
+}
+.dz-preview-meta {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.dz-preview-line1 {
+  color: var(--fg); font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dz-preview-line2 {
+  color: var(--fg-dim); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 240px;
+}
+.dz-preview-clear {
+  flex: 0 0 24px; width: 24px; height: 24px;
+  background: transparent; border: 1px solid var(--border);
+  color: var(--fg-dim); border-radius: 4px;
+  cursor: pointer; font-size: 12px; line-height: 1;
+}
+.dz-preview-clear:hover { color: var(--danger); border-color: var(--danger); }
+
 .url-row { display: flex; gap: 8px; margin-top: 10px; }
 .url-row input {
   flex: 1; background: var(--bg-3); border: 1px solid var(--border);

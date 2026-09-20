@@ -258,11 +258,27 @@
         <input type="file" id="file-image" accept="image/*" multiple hidden>
         <div class="dz-inner"><div class="dz-icon" aria-hidden="true">🖼</div><p>点击选择 / 拖入图片(支持多选)</p><p class="hint">PNG / JPG / BMP · Ctrl+V 粘贴自动上传</p></div>
       </div>
+      <div class="dz-preview hidden" id="dz-image-preview" aria-live="polite">
+        <div class="dz-preview-thumb" aria-hidden="true"></div>
+        <div class="dz-preview-meta">
+          <div class="dz-preview-line1"></div>
+          <div class="dz-preview-line2"></div>
+        </div>
+        <button type="button" class="dz-preview-clear" data-clear aria-label="清空选择">✕</button>
+      </div>
     </div>
     <div class="new-pane hidden" id="pane-video">
       <div class="dropzone" id="dz-video">
         <input type="file" id="file-video" accept="video/*" hidden>
         <div class="dz-inner"><div class="dz-icon" aria-hidden="true">🎬</div><p>点击选择 / 拖入视频文件</p><p class="hint">MP4 / MOV / MKV / WEBM</p></div>
+      </div>
+      <div class="dz-preview hidden" id="dz-video-preview" aria-live="polite">
+        <div class="dz-preview-icon" aria-hidden="true">🎬</div>
+        <div class="dz-preview-meta">
+          <div class="dz-preview-line1"></div>
+          <div class="dz-preview-line2"></div>
+        </div>
+        <button type="button" class="dz-preview-clear" data-clear aria-label="清空选择">✕</button>
       </div>
       <div class="url-row"><input id="video-url" type="text" placeholder="或视频 URL(http/https/m3u8)"><button id="video-url-go" class="pv-btn primary">导入并识别</button></div>
       <p class="hint">处理完成后返回 S3 局域网链接,浏览器可直链播放。</p>
@@ -462,6 +478,7 @@
 <script defer src="/visibility.js"></script>
 <script defer src="/compare.js"></script>
 <script defer src="/upload-queue.js"></script>
+<script defer src="/dropzone-preview.js"></script>
 <script defer src="/telemetry.js"></script>
 <script defer src="/app.js"></script>
 </body></html>
