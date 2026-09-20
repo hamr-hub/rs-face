@@ -459,8 +459,7 @@ fn main() {
             batch_cfg.only_with_face
         );
         let t0 = Instant::now();
-        let (stats, results) = match rsface::batch::run_batch_dir(cascade, &dir, &out, &batch_cfg)
-        {
+        let (stats, results) = match rsface::batch::run_batch_dir(cascade, &dir, &out, &batch_cfg) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("batch error: {}", e);
