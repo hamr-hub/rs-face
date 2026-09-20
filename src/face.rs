@@ -385,6 +385,30 @@ mod tests {
     }
 
     #[test]
+    fn iou_nested_box() {
+        // Inner fully contained in outer: IoU = area(inner)/area(outer).
+        let outer = det(0.0, 0.0, 100.0, 100.0, 1.0);
+        let inner = det(10.0, 10.0, 30.0, 30.0, 1.0);
+        // inner is 20x20=400, outer is 100x100=10000, IoU=0.04.
+        assert!((inner.iou(&outer) - 0.04).abs() < 1e-6);
+        assert!((outer.iou(&inner) - 0.04).abs() < 1e-6);
+    }
+
+    #[test]
+    fn iou_is_symmetric() {
+        // a.iou(b) == b.iou(a) across disjoint, partial-overlap, and nested cases.
+        let a = det(0.0, 0.0, 10.0, 10.0, 1.0);
+        let b = det(5.0, 0.0, 15.0, 10.0, 1.0);
+        assert!((a.iou(&b) - b.iou(&a)).abs() < 1e-6);
+
+        let c = det(50.0, 50.0, 60.0, 60.0, 1.0);
+        assert!((a.iou(&c) - c.iou(&a)).abs() < 1e-6);
+
+        let inner = det(2.0, 2.0, 8.0, 8.0, 1.0);
+        assert!((a.iou(&inner) - inner.iou(&a)).abs() < 1e-6);
+    }
+
+    #[test]
     fn nms_suppresses_overlapping_keeps_highest() {
         let dets = vec![
             det(0.0, 0.0, 10.0, 10.0, 0.9),
