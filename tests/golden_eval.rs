@@ -163,8 +163,16 @@ where
         fp += f;
         total_gt += entry.gt.boxes.len();
     }
-    let precision = if tp + fp > 0 { tp as f32 / (tp + fp) as f32 } else { 0.0 };
-    let recall = if total_gt > 0 { tp as f32 / total_gt as f32 } else { 0.0 };
+    let precision = if tp + fp > 0 {
+        tp as f32 / (tp + fp) as f32
+    } else {
+        0.0
+    };
+    let recall = if total_gt > 0 {
+        tp as f32 / total_gt as f32
+    } else {
+        0.0
+    };
     let f1 = if precision + recall > 0.0 {
         2.0 * precision * recall / (precision + recall)
     } else {
@@ -185,7 +193,12 @@ where
 /// to keep the CNN's slow pure-Rust forward pass tractable on
 /// biden-class images. Skipped entries still contribute their GT box
 /// count to the recall denominator.
-fn run_algo_skip_large<F>(name: &'static str, imgs: &[ImageEntry], max_pixels: usize, mut detect: F) -> ScoreReport
+fn run_algo_skip_large<F>(
+    name: &'static str,
+    imgs: &[ImageEntry],
+    max_pixels: usize,
+    mut detect: F,
+) -> ScoreReport
 where
     F: FnMut(&GrayImage) -> Vec<Detection>,
 {
@@ -209,8 +222,16 @@ where
         fp += f;
         total_gt += entry.gt.boxes.len();
     }
-    let precision = if tp + fp > 0 { tp as f32 / (tp + fp) as f32 } else { 0.0 };
-    let recall = if total_gt > 0 { tp as f32 / total_gt as f32 } else { 0.0 };
+    let precision = if tp + fp > 0 {
+        tp as f32 / (tp + fp) as f32
+    } else {
+        0.0
+    };
+    let recall = if total_gt > 0 {
+        tp as f32 / total_gt as f32
+    } else {
+        0.0
+    };
     let f1 = if precision + recall > 0.0 {
         2.0 * precision * recall / (precision + recall)
     } else {
@@ -287,7 +308,10 @@ fn golden_eval_inspect() {
                 buf[i] = p as f32 / 255.0;
             }
             let cnn_dets = cnn_cal.detect(&buf, w, h);
-            println!("  cnn-cal: {} detections (showing up to 10)", cnn_dets.len());
+            println!(
+                "  cnn-cal: {} detections (showing up to 10)",
+                cnn_dets.len()
+            );
             for d in cnn_dets.iter().take(10) {
                 println!(
                     "    x={} y={} w={} h={} conf={:.3}",
@@ -624,8 +648,16 @@ fn run_ensemble(
         total_ms += t0.elapsed().as_secs_f32() * 1000.0;
     }
 
-    let precision = if tp + fp > 0 { tp as f32 / (tp + fp) as f32 } else { 0.0 };
-    let recall = if total_gt > 0 { tp as f32 / total_gt as f32 } else { 0.0 };
+    let precision = if tp + fp > 0 {
+        tp as f32 / (tp + fp) as f32
+    } else {
+        0.0
+    };
+    let recall = if total_gt > 0 {
+        tp as f32 / total_gt as f32
+    } else {
+        0.0
+    };
     let f1 = if precision + recall > 0.0 {
         2.0 * precision * recall / (precision + recall)
     } else {
@@ -687,12 +719,7 @@ fn golden_eval_table() {
         "[golden-eval] haar: P={:.3} R={:.3} F1={:.3} emit={}",
         haar_report.precision, haar_report.recall, haar_report.f1, haar_report.emitted_total
     );
-    let lum_report = report_from_cache(
-        "luminance",
-        &imgs,
-        &cache.luminance.0,
-        cache.luminance.1,
-    );
+    let lum_report = report_from_cache("luminance", &imgs, &cache.luminance.0, cache.luminance.1);
     eprintln!(
         "[golden-eval] luminance: P={:.3} R={:.3} F1={:.3} emit={}",
         lum_report.precision, lum_report.recall, lum_report.f1, lum_report.emitted_total
@@ -710,22 +737,12 @@ fn golden_eval_table() {
         lum_strict_report.f1,
         lum_strict_report.emitted_total
     );
-    let cnn_raw_report = report_from_cache(
-        "cnn-raw",
-        &imgs,
-        &cache.cnn_raw.0,
-        cache.cnn_raw.1,
-    );
+    let cnn_raw_report = report_from_cache("cnn-raw", &imgs, &cache.cnn_raw.0, cache.cnn_raw.1);
     eprintln!(
         "[golden-eval] cnn-raw: emit={}",
         cnn_raw_report.emitted_total
     );
-    let cnn_cal_report = report_from_cache(
-        "cnn-cal",
-        &imgs,
-        &cache.cnn_cal.0,
-        cache.cnn_cal.1,
-    );
+    let cnn_cal_report = report_from_cache("cnn-cal", &imgs, &cache.cnn_cal.0, cache.cnn_cal.1);
     eprintln!(
         "[golden-eval] cnn-cal: emit={}",
         cnn_cal_report.emitted_total
@@ -835,8 +852,16 @@ fn report_from_cache(
         fp += f;
         total_gt += entry.gt.boxes.len();
     }
-    let precision = if tp + fp > 0 { tp as f32 / (tp + fp) as f32 } else { 0.0 };
-    let recall = if total_gt > 0 { tp as f32 / total_gt as f32 } else { 0.0 };
+    let precision = if tp + fp > 0 {
+        tp as f32 / (tp + fp) as f32
+    } else {
+        0.0
+    };
+    let recall = if total_gt > 0 {
+        tp as f32 / total_gt as f32
+    } else {
+        0.0
+    };
     let f1 = if precision + recall > 0.0 {
         2.0 * precision * recall / (precision + recall)
     } else {
