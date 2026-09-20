@@ -12,7 +12,8 @@ libm.so.6
 libc.so.6
 ```
 
-> One crate, four detectors, three zero-dep recognisers, one ONNX path to
+> One crate, four detectors, three zero-dep gallery recognisers plus a
+> zero-dependency trainable embedding CNN (`embednet`), one ONNX path to
 > industrial accuracy. Every algorithm implements the same `FaceDetector`
 > trait, so swapping implementations is a one-line change.
 
@@ -30,6 +31,7 @@ libc.so.6
 | **lbph** | OpenCV-`elbp_`-exact uniform LBP histograms + chi-square, zero deps, no weights; incremental enrolment, atomic on-disk gallery persistence (`save`/`load`, crops not required) | ✅ | **60/68** hard-gallery LOO rank-1, 32/33 easy |
 | **fisherface** | Fisherfaces/LDA — n−C PCA reduction then C−1 class-discriminant axes, pure `std` | ✅ | **59/68** hard-gallery LOO rank-1, **best zero-dep EER ≈ 12.8 %**, 33/33 easy |
 | **eigenface** | PCA / Turk-Pentland, Jacobi eigendecomp in pure `std` | ✅ | **58/68** hard-gallery strict LOO (PCA ceiling), 33/33 easy |
+| **embednet** | tiny trainable embedding CNN (im2col convs, full backprop, contrastive-pair Adam), L2-normalised 128-d vectors into the same gallery matcher as ArcFace, `.rsen` weights | ✅ | trainable from scratch, no bundled weights — train your own (`embednet_train`); gradient-checked vs finite differences |
 | **arcface** | ArcFace R50 / MobileFaceNet via ONNX Runtime / tract | opt-in | cosine margin measured on real faces |
 
 ## 5-minute start
@@ -98,6 +100,7 @@ tools/fetch_models.sh                              # downloads pinned ONNX model
 | Variable face sizes in drama / Reels / vertical video | `--algo haar --scale 1.4 --stride 3 --only-with-face` |
 | Need real accuracy on unconstrained faces | build with `--features ort-backend` and drive `rsface::scrfd_detector::ScrfdDetector` (see the `detect_scrfd_arcface` example) |
 | Recognise identities with no downloads | use `rsface::lbph::LbphRecognizer` (incremental enrolment) or the train-once `rsface::eigenface::EigenfaceRecognizer` / `rsface::fisherface::FisherfaceRecognizer` |
+| Need deep embeddings but cannot ship a C++ runtime | `rsface::embednet` — pure-`std` trainable embedding CNN (`cargo run --bin embednet_train -- root/<label>/`); you supply the labelled crops |
 | Lowest verification EER with zero deps | `rsface::fisherface::FisherfaceRecognizer` (EER ≈ 12.8 % on the hard drama gallery; rerun `bench_fisherface` on your own data) |
 | Need verification under pose / lighting drift | `--features ort-backend` + `rsface::arcface_recognizer::ArcFaceRecognizer` |
 
@@ -276,6 +279,7 @@ required:
 | `recognise_lbph` | enrol + identify with LBPH, no weights; ends with an atomic save/load round-trip |
 | `recognise_eigenface` | train + identify with eigenfaces/PCA, no weights |
 | `recognise_fisherface` | train + identify with fisherfaces/LDA, no weights |
+| `recognise_embednet` | train the zero-dep embedding CNN on synthetic identities, identify via the uniform trait, `.rsen` save/load round-trip |
 | `cascade_dump` | parse a `.rfcf` cascade and print its structure |
 | `synthetic_smoke` | minimal pipeline smoke-test (no external data) |
 | `lena_classify_stages` | walk a real cascade stage by stage |
@@ -303,7 +307,7 @@ Crate map (25+ modules, see `src/lib.rs` for full descriptions):
 | core numerical | `integral`, `image`, `haar` |
 | detection (zero-dep) | `detector`, `cnn`, `luminance_face` |
 | detection (ONNX) | `scrfd`, `scrfd_detector`, `onnx` |
-| recognition (zero-dep) | `eigenface`, `fisherface`, `lbph`, `lbph_store` (versioned binary gallery persistence), `linalg` (shared Jacobi eigensolver) |
+| recognition (zero-dep) | `eigenface`, `fisherface`, `lbph`, `lbph_store` (versioned binary gallery persistence), `embednet` (trainable embedding CNN + contrastive trainer), `linalg` (shared Jacobi eigensolver) |
 | recognition (ONNX) | `arcface`, `arcface_recognizer` |
 | domain types | `face`, `face_detector`, `models`, `align`, `embedding` |
 | pipeline / I/O | `pipeline`, `source`, `output`, `gpu`, `pool` |
