@@ -33,6 +33,7 @@ Recognition (zero-dep, no external weights):
 - [`docs/recognition-fisherface.md`](recognition-fisherface.md) — Fisherfaces/LDA (Belhumeur 1997): n−C PCA reduction then ≤ C−1 class-discriminant axes, pseudo-inverse whitening; 59/68 rank-1 and the best zero-dep pair EER (≈ 12.8 %).
 - [`docs/gallery-persistence.md`](gallery-persistence.md) — zero-dep binary persistence: the LBPH gallery (`RSLB` v2, bit-exact f32 descriptors) and trained eigenfaces/Fisherfaces models (`RSEF`/`RSLD` v1); full decode validation, atomic save; survive restarts without the original crops.
 - [`docs/recognition-video.md`](recognition-video.md) — **video-level identification** across one or many videos: tracker + single-linkage clusterer + cross-video re-id (`src/video_id.rs`, `examples/identify_short_drama.rs`).
+- [`src/embednet.rs`](../src/embednet.rs) (module doc) — **zero-dependency trainable embedding CNN**: im2col convs with full analytic backprop, contrastive-pair loss + Adam, L2-normalised 128-d embeddings into the same `embedding::Gallery` as ONNX ArcFace; `.rsen` weights via `cargo run --bin embednet_train -- <root/<label>/*.{pgm,ppm,png}>`. Trainable from scratch, no bundled weights (same maturity tier as `cnn`); demo in `examples/recognise_embednet.rs`.
 
 Detection (zero-dep):
 
@@ -72,7 +73,25 @@ cargo test --lib                                       # unit tests
 cargo bench                                            # benches/perf_compare.rs
 cargo test --features tract-backend --test real_model_e2e -- --nocapture --test-threads=1
 tools/fetch_models.sh                                  # downloads pinned ONNX models (Y/N prompt)
+cargo run --release --example recognise_embednet       # zero-dep trainable embeddings: toy end-to-end demo
 ```
+
+### Zero-dep deep embeddings (EmbedNet)
+
+`embednet` needs labelled crops but no model download and no C++ runtime:
+
+```bash
+# root/<label>/*.{pgm,ppm,png}, one folder per identity (≥ 2)
+cargo run --release --bin embednet_train -- ./faces 4000 embednet.rsen
+```
+
+Training is deterministic given the seed arg; held-out pair accuracy and
+same/different mean distances print every 200 steps, and the best snapshot
+is saved. Analytic gradients are checked against central finite differences
+by the `gradcheck_matches_finite_differences` unit test, so weight/architecture
+changes are verifiable without a dataset. The ONNX ArcFace path remains the
+industrial-accuracy option — EmbedNet covers single-static-binary deployments
+that own a labelled gallery but cannot ship `libonnxruntime`.
 
 ---
 
