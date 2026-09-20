@@ -685,6 +685,21 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn detector_with_zero_area_image_returns_no_detections() {
+        // 0×0, 10×0 and 0×10 images are valid GrayImage buffers but the
+        // pyramid / scan code must skip them rather than panic. Lock this
+        // in so a future refactor of the pyramid doesn't regress it.
+        let det = Detector::new(demo_face_cascade(), DetectorConfig::default());
+        for (w, h) in [(0, 0), (10, 0), (0, 10)] {
+            let img = GrayImage::new(w, h);
+            assert!(
+                det.detect(&img).is_empty(),
+                "zero-area image {w}x{h} must produce zero detections"
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "GPU/OpenCL init via OnceLock is flaky under multi-thread test runner on this Tegra box. Passes in isolation with --nocapture, segfaults when run with other tests. Tracked separately."]
     fn detects_bright_center_in_uniform_image() {
         let mut img = GrayImage::new(120, 120);
