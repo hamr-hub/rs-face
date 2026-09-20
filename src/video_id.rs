@@ -19,9 +19,11 @@
 //!    singletons so the public id space starts at 1 and is stable as new videos
 //!    are added.
 //!
-//! 3. [`identify_videos`] — the convenience wrapper: take a list of video
-//!    paths, an arbitrary detect/embed closure pair, and produce a
-//!    [`VideoIdentification`] manifest.
+//! 3. [`identify_video`] — the per-video wrapper: pull frames from a
+//!    [`FrameSource`], pass them through any detector + embedder pair
+//!    implementing [`Identify`], and return one [`VideoIdentification`]
+//!    manifest. Run it once per video and feed the results into
+//!    [`IdentityCluster::finalise`] for cross-video identity merging.
 //!
 //! ## Design notes
 //!
@@ -549,6 +551,12 @@ impl<D: std::fmt::Display, E: std::fmt::Display> std::fmt::Display for IdentifyE
 impl<D: std::error::Error + 'static, E: std::error::Error + 'static> std::error::Error
     for IdentifyError<D, E>
 {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            IdentifyError::Detect(d) => Some(d),
+            IdentifyError::Embed(e) => Some(e),
+        }
+    }
 }
 
 /// Per-video identification result.
