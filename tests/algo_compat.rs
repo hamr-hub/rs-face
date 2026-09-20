@@ -27,7 +27,13 @@ fn synth_face_image() -> GrayImage {
             let dx = x as f32 - cx;
             let dy = y as f32 - cy;
             let d = (dx * dx + dy * dy).sqrt();
-            let v = if d < r { 220 } else if d < r * 1.4 { 160 } else { 30 };
+            let v = if d < r {
+                220
+            } else if d < r * 1.4 {
+                160
+            } else {
+                30
+            };
             img[(x, y)] = v;
         }
     }
@@ -130,7 +136,11 @@ fn haar_on_zero_sized_image_returns_empty_not_panic() {
         let img = GrayImage::new(w, h);
         let det = Detector::new(demo_face_cascade(), DetectorConfig::default());
         let dets = det.detect(&img);
-        assert!(dets.is_empty(), "expected empty on {w}x{h}, got {}", dets.len());
+        assert!(
+            dets.is_empty(),
+            "expected empty on {w}x{h}, got {}",
+            dets.len()
+        );
     }
 }
 
@@ -143,7 +153,11 @@ fn luminance_on_zero_sized_image_returns_empty_not_panic() {
         let img = GrayImage::new(w, h);
         let det = LuminanceFaceDetector::new(LuminanceConfig::default());
         let dets = det.detect(&img);
-        assert!(dets.is_empty(), "expected empty on {w}x{h}, got {}", dets.len());
+        assert!(
+            dets.is_empty(),
+            "expected empty on {w}x{h}, got {}",
+            dets.len()
+        );
     }
 }
 
@@ -151,8 +165,8 @@ fn luminance_on_zero_sized_image_returns_empty_not_panic() {
 #[test]
 fn haar_detector_name_matches_brand_string() {
     use rsface::detector::{Detector, DetectorConfig};
-    use rsface::haar::params::demo_face_cascade;
     use rsface::face_detector::HaarDetector;
+    use rsface::haar::params::demo_face_cascade;
 
     let det = HaarDetector::new(demo_face_cascade(), DetectorConfig::default());
     assert_eq!(det.name(), "haar");
