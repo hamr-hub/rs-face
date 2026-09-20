@@ -8,7 +8,7 @@ A compact binary format for AdaBoost cascades. Used by the bundled
 
 ```
 "Magic"   4 bytes  "RFCF"
-"Version" u32 LE   currently 2
+"Version" u32 LE   writer emits 3; readers accept 2 and 3
 "win_w"   u32 LE   cascade window width in pixels
 "win_h"   u32 LE   cascade window height in pixels
 "nfeat"   u32 LE   number of features
@@ -26,19 +26,29 @@ For each of `nfeat`:
                 3 = VerticalCenter
                 4 = HorizontalCenter
                 5 = CustomRects
-"fw"     u8    feature-local width (units)
-"fh"     u8    feature-local height (units)
+"fw"     u8    feature-local width (units; 0 for CustomRects)
+"fh"     u8    feature-local height (units; 0 for CustomRects)
+"flags"  u8    version 3 only; bit 0 = tilted (45° rotated rects,
+               evaluated against the rotated integral table).
+               Other bits are reserved and must be zero.
 "nrect"  u32 LE number of sub-rectangles
 for each rect:
-  "x"      u8    feature-local x
-  "y"      u8    feature-local y
+  "x"      u8    feature-local x (window-pixel x for CustomRects)
+  "y"      u8    feature-local y (window-pixel y for CustomRects)
   "w"      u8    feature-local width
   "h"      u8    feature-local height
   "weight" f32 LE signed weight
 ```
 
-`feature-local` coordinates are mapped to window pixels at eval time:
-`pixel_x = x + r.x * win_w / fw`.
+For kinds 0–4 the `feature-local` coordinates are mapped to window
+pixels at eval time: `pixel_x = x + r.x * win_w / fw`. Kind 5
+(`CustomRects`, what the OpenCV converter emits) stores window-pixel
+coordinates directly and uses `fw = fh = 0`.
+
+A tilted feature (`flags & 1 == 1`, or kind 2 `DiagonalEdge`) reads
+every rectangle sum from the 45° rotated integral table using
+OpenCV's `CV_TILTED_OFS` corner arithmetic — see
+`RotatedIntegralImage::tilted_rect_sum` in `src/integral.rs`.
 
 ## Stage records
 
@@ -75,9 +85,13 @@ Use it:
 
 ## Notes
 
-- **Version 1** uses a different feature layout (single packed format
-  with 6-tuple rectangles). The current code reads version 2; older
-  files should be regenerated via the converter.
+- **Version 3** adds the per-feature `flags` byte so OpenCV cascades
+  with `<tilted>1</tilted>` features convert faithfully. The current
+  converter always writes v3.
+- **Version 2** has no flags byte; every feature loads upright
+  (`tilted = false`). v2 files keep loading unchanged.
+- **Version 1** used a different feature layout and is rejected on
+  load; regenerate old files with the current converter.
 - The converter is a self-contained Python script in
   `tools/convert_opencv_xml.py` and only depends on the standard
   library.

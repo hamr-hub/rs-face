@@ -7,9 +7,9 @@
 //!
 //! Three layers, each independently usable:
 //!
-//! 1. [`LightTracker`] — single-video IoU tracker. Takes a stream of
-//!    `(frame_index, timestamp_ms, Vec<Detection>, Vec<Embedding>)` tuples and emits
-//!    [`Track`]s with stable `track_id`s. Pure std, O(detections · active_tracks) per
+//! 1. [`LightTracker`] — single-video IoU tracker. Takes a stream of frames
+//!    carrying detections plus index-tagged embeddings and emits [`Track`]s
+//!    with stable `track_id`s. Pure std, O(detections · active_tracks) per
 //!    frame, no Kalman / Hungarian — short-drama cuts are the dominant motion.
 //!
 //! 2. [`IdentityCluster`] — pairwise single-linkage clustering over unit embeddings.
@@ -132,7 +132,12 @@ pub struct FrameObservation<'a> {
     pub frame_index: u64,
     pub timestamp_ms: u64,
     pub detections: &'a [Detection],
-    pub embeddings: &'a [Embedding],
+    /// Sparse, index-tagged embeddings: each pair is the index of the
+    /// detection (within `detections`) that produced it and its embedding.
+    /// Detections without an entry are dropped, and a positional `zip`
+    /// would silently attach later embeddings to the wrong detections after
+    /// a drop — this contract makes that mis-pairing unrepresentable.
+    pub embeddings: &'a [(usize, Embedding)],
 }
 
 /// Single-video IoU tracker. Greedy nearest-match by IoU, with an age-based
@@ -180,11 +185,11 @@ impl LightTracker {
 
     /// Feed one frame's worth of detections + embeddings into the tracker.
     ///
-    /// `detections` and `embeddings` must be the same length and in the same
-    /// order — the caller is the one that produced both, usually via
-    /// `ArcFaceRecognizer::embed_all` or `LbphRecognizer::embed`. Detections
-    /// with no corresponding embedding are silently dropped, which matches
-    /// `embed_all`'s "embedding only when we can" contract.
+    /// Embeddings in `obs` are sparse and tagged with the producing
+    /// detection's index (the shape returned by
+    /// `ArcFaceRecognizer::embed_all`). Detections without a matching
+    /// embedding are silently dropped, which matches `embed_all`'s
+    /// "embedding only when we can" contract.
     pub fn update(&mut self, obs: FrameObservation<'_>) -> Vec<Track> {
         let mut retired = Vec::new();
 
@@ -203,7 +208,17 @@ impl LightTracker {
         // by the end.
         let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let initial_active = self.active.len();
-        for (det, emb) in obs.detections.iter().zip(obs.embeddings.iter()) {
+        for (det_idx, det) in obs.detections.iter().enumerate() {
+            // Resolve this detection's embedding by its index; a dropped
+            // embedding must not shift later embeddings onto this detection.
+            let Some(emb) = obs
+                .embeddings
+                .iter()
+                .find(|(idx, _)| *idx == det_idx)
+                .map(|(_, e)| e)
+            else {
+                continue;
+            };
             if (det.w.max(det.h) as u32) < self.cfg.min_face_px {
                 continue;
             }
@@ -490,14 +505,14 @@ pub trait Identify {
         &mut self,
         gray: &GrayImage,
         rgb: Option<&RgbImage>,
-    ) -> Result<(Vec<Detection>, Vec<Embedding>), Self::Err>;
+    ) -> Result<(Vec<Detection>, Vec<(usize, Embedding)>), Self::Err>;
 }
 
 /// Closure-based [`Identify`] for ad-hoc pipelines.
 pub struct ClosureIdentify<D, E, Dr, Er>
 where
     D: FnMut(&GrayImage) -> Result<Vec<Detection>, Dr>,
-    E: FnMut(&RgbImage, &[Detection]) -> Result<Vec<Embedding>, Er>,
+    E: FnMut(&RgbImage, &[Detection]) -> Result<Vec<(usize, Embedding)>, Er>,
 {
     pub detect: D,
     pub embed: E,
@@ -506,7 +521,7 @@ where
 impl<D, E, Dr, Er> Identify for ClosureIdentify<D, E, Dr, Er>
 where
     D: FnMut(&GrayImage) -> Result<Vec<Detection>, Dr>,
-    E: FnMut(&RgbImage, &[Detection]) -> Result<Vec<Embedding>, Er>,
+    E: FnMut(&RgbImage, &[Detection]) -> Result<Vec<(usize, Embedding)>, Er>,
     Dr: std::fmt::Debug,
     Er: std::fmt::Debug,
 {
@@ -515,7 +530,7 @@ where
         &mut self,
         gray: &GrayImage,
         rgb: Option<&RgbImage>,
-    ) -> Result<(Vec<Detection>, Vec<Embedding>), Self::Err> {
+    ) -> Result<(Vec<Detection>, Vec<(usize, Embedding)>), Self::Err> {
         let dets = (self.detect)(gray).map_err(IdentifyError::Detect)?;
         // If we don't have RGB, derive a placeholder by replicating gray.
         let embeddings = match rgb {
@@ -735,7 +750,7 @@ mod tests {
             frame_index: 0,
             timestamp_ms: 0,
             detections: &[det(10, 10, 50, 50, 0.9)],
-            embeddings: &[emb.clone()],
+            embeddings: &[(0, emb.clone())],
         });
         assert!(retired.is_empty(), "no retirement on first frame");
 
@@ -744,7 +759,7 @@ mod tests {
             frame_index: 1,
             timestamp_ms: 33,
             detections: &[det(12, 10, 50, 50, 0.9)],
-            embeddings: &[emb.clone()],
+            embeddings: &[(0, emb.clone())],
         });
         assert!(retired.is_empty(), "same track continues");
 
@@ -753,7 +768,7 @@ mod tests {
             frame_index: 2,
             timestamp_ms: 66,
             detections: &[det(200, 200, 40, 40, 0.9)],
-            embeddings: &[emb.clone()],
+            embeddings: &[(0, emb.clone())],
         });
         assert!(retired.is_empty());
 
@@ -764,7 +779,7 @@ mod tests {
                 frame_index: f,
                 timestamp_ms: f * 33,
                 detections: &[det(200, 200, 40, 40, 0.9)],
-                embeddings: &[emb.clone()],
+                embeddings: &[(0, emb.clone())],
             });
             if !last_retired.is_empty() {
                 break;
@@ -775,6 +790,53 @@ mod tests {
     }
 
     #[test]
+    fn dropped_embedding_does_not_shift_later_pairs() {
+        // Regression for the positional-zip bug: three detections in one
+        // frame but the middle detection's embedding was dropped (the shape
+        // embed_all returns). Pairs must bind by detection index —
+        // otherwise the third embedding shifts onto the middle box and the
+        // third detection vanishes.
+        let mut t = LightTracker::new(PathBuf::from("clip.mp4"), VideoIdConfig::default());
+        let e0 = unit_along(8, 0);
+        let e2 = unit_along(8, 2);
+
+        let retired = t.update(FrameObservation {
+            frame_index: 0,
+            timestamp_ms: 0,
+            detections: &[
+                det(10, 10, 40, 40, 0.9),
+                det(100, 10, 40, 40, 0.9), // embedding dropped
+                det(200, 10, 40, 40, 0.9),
+            ],
+            embeddings: &[(0, e0.clone()), (2, e2.clone())],
+        });
+        assert!(retired.is_empty());
+
+        let tracks = t.finish();
+        assert_eq!(
+            tracks.len(),
+            2,
+            "middle detection must be dropped, not paired"
+        );
+        let left = tracks
+            .iter()
+            .find(|tr| tr.best_bbox.x == 10)
+            .expect("first detection opens a track");
+        let right = tracks
+            .iter()
+            .find(|tr| tr.best_bbox.x == 200)
+            .expect("third detection must open its own track, not be consumed");
+        assert!(
+            tracks.iter().all(|tr| tr.best_bbox.x != 100),
+            "the dropped middle detection must not receive the shifted embedding"
+        );
+        assert_eq!(left.embeddings.len(), 1);
+        assert_eq!(left.embeddings[0].cosine(&e0), Some(1.0));
+        assert_eq!(right.embeddings.len(), 1);
+        assert_eq!(right.embeddings[0].cosine(&e2), Some(1.0));
+    }
+
+    #[test]
     fn tracker_retires_on_finish() {
         let mut t = LightTracker::new(PathBuf::from("clip.mp4"), VideoIdConfig::default());
         let emb = unit_along(8, 0);
@@ -782,7 +844,7 @@ mod tests {
             frame_index: 0,
             timestamp_ms: 0,
             detections: &[det(10, 10, 50, 50, 0.9)],
-            embeddings: &[emb],
+            embeddings: &[(0, emb)],
         });
         let drained = t.finish();
         assert_eq!(drained.len(), 1);

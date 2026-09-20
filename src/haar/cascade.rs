@@ -498,15 +498,22 @@ impl Cascade {
     /// Format: magic "RFCF" u32, version=2, then feature + stage records.
     /// Version 2 uses f32 weights and supports arbitrary rectangle layouts.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        use std::io::Write;
         let mut f = std::fs::File::create(path)?;
+        self.save_to_writer(&mut f)
+    }
+
+    /// Serialize as `.rfcf` v3 to any byte sink.
+    pub fn save_to_writer<W: std::io::Write>(&self, f: &mut W) -> std::io::Result<()> {
+        use std::io::Write;
         f.write_all(b"RFCF")?;
-        f.write_all(&2u32.to_le_bytes())?; // version 2
+        // Version 3: per-feature flags byte (bit 0 = OpenCV `<tilted>`).
+        f.write_all(&3u32.to_le_bytes())?;
         f.write_all(&(self.window_w as u32).to_le_bytes())?;
         f.write_all(&(self.window_h as u32).to_le_bytes())?;
         f.write_all(&(self.features.len() as u32).to_le_bytes())?;
         for feat in &self.features {
-            f.write_all(&[feat.kind as u8, feat.width, feat.height])?;
+            let flags = u8::from(feat.tilted);
+            f.write_all(&[feat.kind as u8, feat.width, feat.height, flags])?;
             f.write_all(&(feat.rects.len() as u32).to_le_bytes())?;
             for r in &feat.rects {
                 f.write_all(&[r.x, r.y, r.w, r.h])?;
@@ -556,10 +563,31 @@ impl Cascade {
         let wh = u32::from_le_bytes(vbuf) as usize;
         f.read_exact(&mut vbuf)?;
         let nfeat = u32::from_le_bytes(vbuf) as usize;
+        if !(2..=3).contains(&version) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported rfcf version {version}"),
+            ));
+        }
         let mut features = Vec::with_capacity(nfeat);
         for _ in 0..nfeat {
-            let mut head = [0u8; 3];
-            f.read_exact(&mut head)?;
+            // v2 head: kind, width, height. v3 adds a flags byte
+            // (bit 0 = tilted; other bits reserved and must be 0).
+            let mut head = [0u8; 4];
+            f.read_exact(&mut head[..3])?;
+            let tilted = if version >= 3 {
+                let mut fb = [0u8; 1];
+                f.read_exact(&mut fb)?;
+                if fb[0] & !1 != 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unknown rfcf feature flag bits",
+                    ));
+                }
+                fb[0] == 1
+            } else {
+                false
+            };
             let kind = match head[0] {
                 0 => super::feature::FeatureKind::VerticalEdge,
                 1 => super::feature::FeatureKind::HorizontalEdge,
@@ -591,6 +619,7 @@ impl Cascade {
                 kind,
                 width: head[1],
                 height: head[2],
+                tilted,
                 rects,
             });
         }
@@ -629,7 +658,6 @@ impl Cascade {
                 weak_features,
             });
         }
-        let _ = version;
         Ok(Self {
             window_w: ww,
             window_h: wh,
@@ -724,5 +752,61 @@ mod tests {
         let mut fresh2 = EvalCache::new(cascade.features.len());
         let b = cascade.classify(&ii, &ri, 5, 3, &mut fresh2);
         assert_eq!(a.map(|s| s.to_bits()), b.map(|s| s.to_bits()));
+    }
+
+    #[test]
+    fn rfcf_v3_roundtrip_preserves_tilted_flag() {
+        use crate::haar::feature::{FeatureKind, HaarFeature, Rect};
+        let mut c = Cascade::new(24, 24);
+        c.features.push(HaarFeature {
+            kind: FeatureKind::CustomRects,
+            width: 0,
+            height: 0,
+            tilted: true,
+            rects: vec![Rect::new(2, 2, 6, 4, 1.0)],
+        });
+        c.stages.push(Stage {
+            stage_threshold: 0.0,
+            weak_features: vec![WeakFeature {
+                feature_index: 0,
+                threshold: 1.0,
+                sign: 1,
+                left_val: 1.0,
+                right_val: -1.0,
+            }],
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        c.save_to_writer(&mut buf).unwrap();
+        assert_eq!(&buf[4..8], 3u32.to_le_bytes(), "must write v3");
+        let loaded = Cascade::from_reader(&mut buf.as_slice()).unwrap();
+        assert!(loaded.features[0].tilted);
+    }
+
+    #[test]
+    fn rfcf_v2_loads_without_tilted_flag() {
+        // Hand-built v2 record: magic, version 2, 24x24 window, one
+        // CustomRects feature with one rect, one stage, one weak classifier.
+        use std::io::Write;
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"RFCF");
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(&24u32.to_le_bytes());
+        buf.extend_from_slice(&24u32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // 1 feature
+                                                    // v2 head is 3 bytes: kind=5, fw=0, fh=0 (no flags byte).
+        buf.extend_from_slice(&[5, 0, 0]);
+        buf.extend_from_slice(&1u32.to_le_bytes()); // 1 rect
+        buf.extend_from_slice(&[2, 2, 6, 4]);
+        buf.extend_from_slice(&1.0f32.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // 1 stage
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // threshold
+        buf.extend_from_slice(&1u32.to_le_bytes()); // 1 weak
+        buf.extend_from_slice(&0u32.to_le_bytes()); // feature index
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // threshold
+        buf.write_all(&[1i8 as u8]).unwrap(); // sign
+        buf.extend_from_slice(&1.0f32.to_le_bytes()); // left
+        buf.extend_from_slice(&(-1.0f32).to_le_bytes()); // right
+        let loaded = Cascade::from_reader(&mut buf.as_slice()).unwrap();
+        assert!(!loaded.features[0].tilted, "v2 features default to upright");
     }
 }
