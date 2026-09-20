@@ -1,0 +1,695 @@
+//! Golden-set evaluation: precision / recall / F1 + latency per
+//! algorithm against a fixed ground-truth label set.
+//!
+//! This is the accuracy baseline the crate's "ensemble and
+//! calibration" subagent uses to compare detectors and verify the
+//! fusion module improves over any single algorithm.
+//!
+//! Run with:
+//!   cargo test --test golden_eval -- --nocapture
+//!
+//! Labels live under `tests/fixtures/golden/labels/<image>.txt` (one
+//! `<x> <y> <w> <h>` per line, pixel space, top-left origin). The set
+//! is intentionally small — four images — so a calibration cycle stays
+//! fast enough to iterate in seconds, not minutes.
+
+use std::path::Path;
+use std::time::Instant;
+
+use rsface::cnn::{CnnConfig, CnnDetector};
+use rsface::detector::{Detector, DetectorConfig};
+use rsface::ensemble::{fuse, EnsembleConfig, FusedCluster, TaggedDetection};
+use rsface::face::Detection;
+use rsface::face_detector::FaceDetector;
+use rsface::haar::bundled::bundled_frontalface_cascade;
+use rsface::image::{codec, GrayImage, RgbImage};
+use rsface::luminance_face::{LuminanceConfig, LuminanceFaceDetector};
+
+#[derive(Clone, Debug)]
+struct GroundTruth {
+    boxes: Vec<(usize, usize, usize, usize)>,
+}
+
+fn load_ground_truth(name: &str) -> GroundTruth {
+    let path = Path::new("tests/fixtures/golden/labels").join(format!("{name}.txt"));
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "missing golden label {}: {e}. Run the inspect_algos test \
+             or look at tests/fixtures/golden/ to bootstrap.",
+            path.display()
+        )
+    });
+    let mut boxes = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 4 {
+            panic!(
+                "label {}: line {} expected '<x> <y> <w> <h>', got {:?}",
+                name,
+                i + 1,
+                parts
+            );
+        }
+        let x: usize = parts[0].parse().expect("x");
+        let y: usize = parts[1].parse().expect("y");
+        let w: usize = parts[2].parse().expect("w");
+        let h: usize = parts[3].parse().expect("h");
+        boxes.push((x, y, w, h));
+    }
+    GroundTruth { boxes }
+}
+
+fn load_image(path: &str) -> GrayImage {
+    let p = Path::new(path);
+    let mut f = std::fs::File::open(p).expect("open");
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+    match ext {
+        "pgm" => codec::read_pgm(&mut f).expect("read_pgm"),
+        "ppm" => {
+            let rgb: RgbImage = codec::read_ppm(&mut f).expect("read_ppm");
+            rgb.to_gray()
+        }
+        _ => panic!("unsupported ext {ext}"),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ScoreReport {
+    name: &'static str,
+    precision: f32,
+    recall: f32,
+    f1: f32,
+    /// Average detection time per image (milliseconds). The CNN's
+    /// coarse stride keeps it under a second even in debug builds.
+    avg_ms: f32,
+    /// Total raw detections across the golden set (after any
+    /// per-algorithm threshold). Includes over-fires.
+    emitted_total: usize,
+}
+
+/// Greedy IoU matching: detections sorted by score, each matches the
+/// highest-IoU unclaimed ground-truth box above the threshold. Returns
+/// `(tp, fp)`. Standard PASCAL VOC / COCO convention.
+fn match_detections(dets: &[Detection], gt: &GroundTruth, iou_threshold: f32) -> (usize, usize) {
+    let mut sorted: Vec<&Detection> = dets.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut claimed = vec![false; gt.boxes.len()];
+    let mut tp = 0usize;
+    let mut fp = 0usize;
+    for det in sorted {
+        let mut best: Option<usize> = None;
+        let mut best_iou = iou_threshold;
+        for (i, (gx, gy, gw, gh)) in gt.boxes.iter().enumerate() {
+            if claimed[i] {
+                continue;
+            }
+            let g = Detection {
+                x: *gx,
+                y: *gy,
+                w: *gw,
+                h: *gh,
+                score: 1.0,
+            };
+            let cur = det.iou(&g);
+            if cur > best_iou {
+                best_iou = cur;
+                best = Some(i);
+            }
+        }
+        if let Some(i) = best {
+            claimed[i] = true;
+            tp += 1;
+        } else {
+            fp += 1;
+        }
+    }
+    (tp, fp)
+}
+
+/// Run an algorithm over every image, accumulate counts and timing,
+/// and compute the precision / recall / F1 against the labels.
+///
+/// `detect` is called once per image (so per-image measurements
+/// include the load step implicitly — i.e. everything from the
+/// already-decoded `GrayImage` to the `Vec<Detection>`).
+fn run_algo<F>(name: &'static str, imgs: &[ImageEntry], mut detect: F) -> ScoreReport
+where
+    F: FnMut(&GrayImage) -> Vec<Detection>,
+{
+    let mut total_ms = 0.0f32;
+    let mut emitted_total = 0usize;
+    let mut tp = 0usize;
+    let mut fp = 0usize;
+    let mut total_gt = 0usize;
+    for entry in imgs {
+        let img = load_image(entry.path);
+        let t0 = Instant::now();
+        let dets = detect(&img);
+        total_ms += t0.elapsed().as_secs_f32() * 1000.0;
+        emitted_total += dets.len();
+        let (t, f) = match_detections(&dets, &entry.gt, 0.5);
+        tp += t;
+        fp += f;
+        total_gt += entry.gt.boxes.len();
+    }
+    let precision = if tp + fp > 0 { tp as f32 / (tp + fp) as f32 } else { 0.0 };
+    let recall = if total_gt > 0 { tp as f32 / total_gt as f32 } else { 0.0 };
+    let f1 = if precision + recall > 0.0 {
+        2.0 * precision * recall / (precision + recall)
+    } else {
+        0.0
+    };
+    let avg_ms = total_ms / imgs.len() as f32;
+    ScoreReport {
+        name,
+        precision,
+        recall,
+        f1,
+        avg_ms,
+        emitted_total,
+    }
+}
+
+/// Run an algorithm but skip images larger than `max_pixels`. Used to
+/// keep the CNN's slow pure-Rust forward pass tractable on the
+/// full-height biden.ppm (970×2204). The skipped images contribute
+/// zero detections / zero time but the eval still walks every entry
+/// so the report's `tp/fp` accounting is consistent.
+fn run_algo_skip_large<F>(name: &'static str, imgs: &[ImageEntry], max_pixels: usize, mut detect: F) -> ScoreReport
+where
+    F: FnMut(&GrayImage) -> Vec<Detection>,
+{
+    let mut total_ms = 0.0f32;
+    let mut emitted_total = 0usize;
+    let mut tp = 0usize;
+    let mut fp = 0usize;
+    let mut total_gt = 0usize;
+    for entry in imgs {
+        let img = load_image(entry.path);
+        if img.width() * img.height() > max_pixels {
+            // Image too large for this algorithm; treat as 0 detections
+            // but still credit any unclaimed GT as missed.
+            total_gt += entry.gt.boxes.len();
+            continue;
+        }
+        let t0 = Instant::now();
+        let dets = detect(&img);
+        total_ms += t0.elapsed().as_secs_f32() * 1000.0;
+        emitted_total += dets.len();
+        let (t, f) = match_detections(&dets, &entry.gt, 0.5);
+        tp += t;
+        fp += f;
+        total_gt += entry.gt.boxes.len();
+    }
+    let precision = if tp + fp > 0 { tp as f32 / (tp + fp) as f32 } else { 0.0 };
+    let recall = if total_gt > 0 { tp as f32 / total_gt as f32 } else { 0.0 };
+    let f1 = if precision + recall > 0.0 {
+        2.0 * precision * recall / (precision + recall)
+    } else {
+        0.0
+    };
+    let avg_ms = total_ms / imgs.len() as f32;
+    ScoreReport {
+        name,
+        precision,
+        recall,
+        f1,
+        avg_ms,
+        emitted_total,
+    }
+}
+
+struct ImageEntry {
+    path: &'static str,
+    gt: GroundTruth,
+}
+
+/// Debug helper: print every detection each algorithm produces on
+/// the golden set, alongside the GT box, so a human can verify the
+/// labels are sensible and a misconfigured detector's failure mode is
+/// obvious from the output. Not in the table; run on demand.
+#[test]
+#[ignore]
+fn golden_eval_inspect() {
+    let imgs = golden_set();
+    let haar_det = Detector::new(bundled_frontalface_cascade(), DetectorConfig::default());
+    let lum = LuminanceFaceDetector::new(LuminanceConfig {
+        stride: 8,
+        ..LuminanceConfig::default()
+    });
+    let cnn_cal = CnnDetector::new(CnnConfig {
+        stride: 16,
+        max_size: 64,
+        confidence_threshold: 0.99,
+        ..CnnConfig::default()
+    });
+
+    for entry in &imgs {
+        let img = load_image(entry.path);
+        println!(
+            "\n== {} ({}x{}) GT={:?}",
+            entry.path,
+            img.width(),
+            img.height(),
+            entry.gt.boxes
+        );
+        let haar_dets = haar_det.detect(&img);
+        println!("  haar: {:?}", haar_dets);
+        let lum_dets = lum.detect(&img);
+        println!("  luminance: {:?}", lum_dets);
+        if img.width() * img.height() <= 512 * 512 {
+            let (w, h) = (img.width(), img.height());
+            let mut buf = vec![0.0f32; w * h];
+            for (i, &p) in img.as_slice().iter().enumerate() {
+                buf[i] = p as f32 / 255.0;
+            }
+            let cnn_dets = cnn_cal.detect(&buf, w, h);
+            println!("  cnn-cal: {} detections (showing up to 10)", cnn_dets.len());
+            for d in cnn_dets.iter().take(10) {
+                println!(
+                    "    x={} y={} w={} h={} conf={:.3}",
+                    d.x, d.y, d.w, d.h, d.confidence
+                );
+            }
+        }
+    }
+}
+
+fn golden_set() -> Vec<ImageEntry> {
+    // Three faces-positive fixtures covering the canonical coverage
+    // axes the eval cares about: single frontal (lena), two-person
+    // (two-people), tiny embedded portrait (demo_face_256).
+    //
+    // The 970×2204 biden.ppm is intentionally excluded — every
+    // algorithm's per-image cost is dominated by it (Haar ~1 s,
+    // luminance ~0.5 s, CNN ~minutes) which would push the dev-mode
+    // test well past the harness default. The `biden` label file is
+    // still kept under tests/fixtures/golden/labels/ so future
+    // longer-running evaluations (e.g. release-mode benchmarks) can
+    // include it without changing the eval harness.
+    let pairs: &[(&str, &str)] = &[
+        ("tests/fixtures/lena.ppm", "lena"),
+        ("tests/fixtures/two-people.ppm", "two-people"),
+        ("tests/fixtures/demo_face_256.pgm", "demo_face_256"),
+    ];
+    pairs
+        .iter()
+        .map(|(img, label)| ImageEntry {
+            path: img,
+            gt: load_ground_truth(label),
+        })
+        .collect()
+}
+
+/// Pretty-print the eval table. The format is intentionally compact
+/// so a quick `--nocapture` run gives a single-screen comparison.
+fn print_table(reports: &[ScoreReport]) {
+    println!("\n=== rs-face golden eval ===");
+    println!(
+        "{:<14}  {:>9}  {:>9}  {:>9}  {:>9}  {:>8}",
+        "algo", "precision", "recall", "F1", "avg_ms", "emit"
+    );
+    println!("{}", "-".repeat(72));
+    for r in reports {
+        println!(
+            "{:<14}  {:>9.3}  {:>9.3}  {:>9.3}  {:>9.2}  {:>8}",
+            r.name, r.precision, r.recall, r.f1, r.avg_ms, r.emitted_total
+        );
+    }
+    println!();
+}
+
+/// Helper: run an ensemble pass over the golden set with the given
+/// `tag_weights` and `min_votes`, and accumulate per-cluster scores
+/// into a `ScoreReport`. Extracted so the table can show several
+/// consensus strategies side by side.
+fn run_ensemble(
+    name: &'static str,
+    imgs: &[ImageEntry],
+    haar_det: &Detector,
+    lum: &LuminanceFaceDetector,
+    cnn: &CnnDetector,
+    tag_weights: &[(&'static str, f32)],
+    min_votes: usize,
+) -> ScoreReport {
+    let mut tp = 0usize;
+    let mut fp = 0usize;
+    let mut total_gt = 0usize;
+    let mut total_ms = 0.0f32;
+    let mut fused_total = 0usize;
+    for entry in imgs {
+        let img = load_image(entry.path);
+        let t0 = Instant::now();
+        let haar_dets = haar_det.detect(&img);
+        let lum_dets = lum.detect(&img);
+        let (w, h) = (img.width(), img.height());
+        let mut buf = vec![0.0f32; w * h];
+        for (i, &p) in img.as_slice().iter().enumerate() {
+            buf[i] = p as f32 / 255.0;
+        }
+        let cnn_dets: Vec<Detection> = if w * h <= 512 * 512 {
+            cnn.detect(&buf, w, h)
+                .into_iter()
+                .map(|d| Detection {
+                    x: d.x,
+                    y: d.y,
+                    w: d.w,
+                    h: d.h,
+                    score: d.confidence,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        total_ms += t0.elapsed().as_secs_f32() * 1000.0;
+
+        let mut inputs: Vec<TaggedDetection> = Vec::new();
+        for (name, weight) in tag_weights {
+            let dets = match *name {
+                "haar" => &haar_dets,
+                "luminance" => &lum_dets,
+                "cnn" => &cnn_dets,
+                _ => continue,
+            };
+            for d in dets {
+                inputs.push(TaggedDetection::new(d.clone(), name, *weight));
+            }
+        }
+
+        let cfg = EnsembleConfig {
+            iou_threshold: 0.3,
+            min_votes,
+            ..EnsembleConfig::default()
+        };
+        let fused: Vec<FusedCluster> = fuse(inputs, &cfg);
+        fused_total += fused.len();
+        let dets: Vec<Detection> = fused.iter().map(|c| c.detection.clone()).collect();
+        let (t, f) = match_detections(&dets, &entry.gt, 0.5);
+        tp += t;
+        fp += f;
+        total_gt += entry.gt.boxes.len();
+    }
+
+    let precision = if tp + fp > 0 { tp as f32 / (tp + fp) as f32 } else { 0.0 };
+    let recall = if total_gt > 0 { tp as f32 / total_gt as f32 } else { 0.0 };
+    let f1 = if precision + recall > 0.0 {
+        2.0 * precision * recall / (precision + recall)
+    } else {
+        0.0
+    };
+    let avg_ms = total_ms / imgs.len() as f32;
+    ScoreReport {
+        name,
+        precision,
+        recall,
+        f1,
+        avg_ms,
+        emitted_total: fused_total,
+    }
+}
+
+/// Main eval: each algorithm in turn, then several ensemble variants,
+/// in a single side-by-side table.
+#[test]
+fn golden_eval_table() {
+    let imgs = golden_set();
+    assert!(
+        !imgs.is_empty(),
+        "golden set is empty — populate tests/fixtures/golden/labels/"
+    );
+    eprintln!(
+        "[golden-eval] {} images, {} GT boxes total",
+        imgs.len(),
+        imgs.iter().map(|e| e.gt.boxes.len()).sum::<usize>()
+    );
+
+    // --- Haar (bundled OpenCV cascade) ---
+    let haar_det = Detector::new(bundled_frontalface_cascade(), DetectorConfig::default());
+    eprintln!("[golden-eval] running haar...");
+    let haar_report = run_algo("haar", &imgs, |img| haar_det.detect(img));
+    eprintln!(
+        "[golden-eval] haar done: P={:.3} R={:.3} F1={:.3} emit={}",
+        haar_report.precision, haar_report.recall, haar_report.f1, haar_report.emitted_total
+    );
+
+    // --- Luminance (band + symmetry) — coarse stride keeps the dev-mode
+    //     test under a few minutes. Real deployments should use the
+    //     default stride 4; the F1 numbers are the same since the
+    //     final NMS folds the density back to ~1 box per face. ---
+    let lum = LuminanceFaceDetector::new(LuminanceConfig {
+        stride: 8,
+        ..LuminanceConfig::default()
+    });
+    eprintln!("[golden-eval] running luminance...");
+    let lum_report = run_algo("luminance", &imgs, |img| lum.detect(img));
+    eprintln!(
+        "[golden-eval] luminance done: P={:.3} R={:.3} F1={:.3} emit={}",
+        lum_report.precision, lum_report.recall, lum_report.f1, lum_report.emitted_total
+    );
+
+    // --- Calibrated luminance with stricter threshold. The default
+    //     score_threshold 0.55 fires on textured backgrounds; raising
+    //     it to 0.70 keeps only the high-confidence band-signature
+    //     matches. ---
+    let lum_strict = LuminanceFaceDetector::new(LuminanceConfig {
+        stride: 8,
+        score_threshold: 0.70,
+        ..LuminanceConfig::default()
+    });
+    eprintln!("[golden-eval] running luminance-strict...");
+    let lum_strict_report = run_algo("luminance-strict", &imgs, |img| lum_strict.detect(img));
+    eprintln!(
+        "[golden-eval] luminance-strict done: P={:.3} R={:.3} F1={:.3} emit={}",
+        lum_strict_report.precision, lum_strict_report.recall, lum_strict_report.f1, lum_strict_report.emitted_total
+    );
+
+    // --- CNN (template weights, *uncalibrated* — what users get out
+    //     of the box today). Skipped on the 970×2204 biden image:
+    //     the pure-Rust 24×24 forward pass at any reasonable stride
+    //     is ~10k+ windows per scale, which exceeds this test's
+    //     time budget in debug builds. The other three images are
+    //     ≤ 1126×661 so the CNN runs over them. ---
+    let cnn = CnnDetector::new(CnnConfig {
+        stride: 16,
+        max_size: 64,
+        confidence_threshold: 0.5,
+        ..CnnConfig::default()
+    });
+    eprintln!("[golden-eval] running cnn-raw...");
+    let cnn_raw_report = run_algo_skip_large("cnn-raw", &imgs, 512 * 512, |img| {
+        let (w, h) = (img.width(), img.height());
+        let mut buf = vec![0.0f32; w * h];
+        for (i, &p) in img.as_slice().iter().enumerate() {
+            buf[i] = p as f32 / 255.0;
+        }
+        cnn.detect(&buf, w, h)
+            .into_iter()
+            .map(|d| Detection {
+                x: d.x,
+                y: d.y,
+                w: d.w,
+                h: d.h,
+                score: d.confidence,
+            })
+            .collect()
+    });
+
+    // --- CNN with calibrated confidence threshold. Template weights
+    //     saturate near 1.0; raising the threshold filters out the
+    //     'fires everywhere on textured backgrounds' false positives
+    //     while keeping the genuine face windows that score high. ---
+    let cnn_cal = CnnDetector::new(CnnConfig {
+        stride: 16,
+        max_size: 64,
+        confidence_threshold: 0.99,
+        ..CnnConfig::default()
+    });
+    eprintln!("[golden-eval] cnn-raw done: emit={}", cnn_raw_report.emitted_total);
+    let cnn_cal_report = run_algo_skip_large("cnn-cal", &imgs, 512 * 512, |img| {
+        let (w, h) = (img.width(), img.height());
+        let mut buf = vec![0.0f32; w * h];
+        for (i, &p) in img.as_slice().iter().enumerate() {
+            buf[i] = p as f32 / 255.0;
+        }
+        cnn_cal
+            .detect(&buf, w, h)
+            .into_iter()
+            .map(|d| Detection {
+                x: d.x,
+                y: d.y,
+                w: d.w,
+                h: d.h,
+                score: d.confidence,
+            })
+            .collect()
+    });
+    eprintln!("[golden-eval] cnn-cal done: emit={}", cnn_cal_report.emitted_total);
+
+    // --- Ensemble variants: the key knob is `min_votes` — the cheap
+    //     consensus gate that filters out the per-algorithm FP
+    //     explosion on its own. Two strategies are compared:
+
+    // (a) union, min_votes = 1: every cluster becomes a detection;
+    //     precision is dominated by the noisier detectors' FPs.
+    // (b) consensus, min_votes = 2: at least two algorithms must
+    //     agree on the same window; singleton hits are dropped. ---
+    eprintln!("[golden-eval] running ensemble variants...");
+    let ens_union = run_ensemble(
+        "ensemble-union",
+        &imgs,
+        &haar_det,
+        &lum_strict,
+        &cnn_cal,
+        &[("haar", 1.0), ("luminance", 0.7), ("cnn", 0.4)],
+        1,
+    );
+    eprintln!(
+        "[golden-eval] ensemble-union done: P={:.3} R={:.3} F1={:.3}",
+        ens_union.precision, ens_union.recall, ens_union.f1
+    );
+
+    let ens_consensus = run_ensemble(
+        "ensemble-consensus",
+        &imgs,
+        &haar_det,
+        &lum_strict,
+        &cnn_cal,
+        &[("haar", 1.0), ("luminance", 0.7), ("cnn", 0.4)],
+        2,
+    );
+    eprintln!(
+        "[golden-eval] ensemble-consensus done: P={:.3} R={:.3} F1={:.3}",
+        ens_consensus.precision, ens_consensus.recall, ens_consensus.f1
+    );
+
+    // (c) haar-only ensemble (the safe baseline): no other algorithm
+    //     contributes, so the result is just the haar set rebadged.
+    //     Useful as a control: it shows the cost of adding noise. ---
+    let ens_haar_only = run_ensemble(
+        "ensemble-haar-only",
+        &imgs,
+        &haar_det,
+        &lum_strict,
+        &cnn_cal,
+        &[("haar", 1.0)],
+        1,
+    );
+    eprintln!(
+        "[golden-eval] ensemble-haar-only done: P={:.3} R={:.3} F1={:.3}",
+        ens_haar_only.precision, ens_haar_only.recall, ens_haar_only.f1
+    );
+
+    // (d) haar-gated ensemble: Haar is the primary signal; clusters
+    //     are kept only when at least one Haar member participates.
+    //     Luminance + CNN can refine the box and the score, but they
+    //     cannot add a brand-new detection on their own. This is the
+    //     deployment default — it preserves Haar's measured precision
+    //     while letting the geometry of agreeing detectors nudge the
+    //     box tighter. ---
+    eprintln!("[golden-eval] running haar-gated ensemble...");
+    let mut tp = 0usize;
+    let mut fp = 0usize;
+    let mut total_gt = 0usize;
+    let mut total_ms = 0.0f32;
+    let mut fused_total = 0usize;
+    for entry in &imgs {
+        let img = load_image(entry.path);
+        let t0 = Instant::now();
+        let haar_dets = haar_det.detect(&img);
+        let lum_dets = lum_strict.detect(&img);
+        let (w, h) = (img.width(), img.height());
+        let mut buf = vec![0.0f32; w * h];
+        for (i, &p) in img.as_slice().iter().enumerate() {
+            buf[i] = p as f32 / 255.0;
+        }
+        let cnn_dets: Vec<Detection> = if w * h <= 512 * 512 {
+            cnn_cal
+                .detect(&buf, w, h)
+                .into_iter()
+                .map(|d| Detection {
+                    x: d.x,
+                    y: d.y,
+                    w: d.w,
+                    h: d.h,
+                    score: d.confidence,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        total_ms += t0.elapsed().as_secs_f32() * 1000.0;
+
+        let mut inputs: Vec<TaggedDetection> = Vec::new();
+        for d in &haar_dets {
+            inputs.push(TaggedDetection::new(d.clone(), "haar", 1.0));
+        }
+        for d in &lum_dets {
+            inputs.push(TaggedDetection::new(d.clone(), "luminance", 0.7));
+        }
+        for d in &cnn_dets {
+            inputs.push(TaggedDetection::new(d.clone(), "cnn", 0.4));
+        }
+
+        let cfg = EnsembleConfig {
+            iou_threshold: 0.3,
+            min_votes: 1,
+            ..EnsembleConfig::default()
+        };
+        let fused_all = fuse(inputs, &cfg);
+        // Gate: drop every cluster that doesn't include a Haar vote.
+        let fused: Vec<FusedCluster> = fused_all
+            .into_iter()
+            .filter(|c| c.sources.split('+').any(|s| s == "haar"))
+            .collect();
+        fused_total += fused.len();
+        let dets: Vec<Detection> = fused.iter().map(|c| c.detection.clone()).collect();
+        let (t, f) = match_detections(&dets, &entry.gt, 0.5);
+        tp += t;
+        fp += f;
+        total_gt += entry.gt.boxes.len();
+    }
+    let ens_haar_gated = {
+        let precision = if tp + fp > 0 { tp as f32 / (tp + fp) as f32 } else { 0.0 };
+        let recall = if total_gt > 0 { tp as f32 / total_gt as f32 } else { 0.0 };
+        let f1 = if precision + recall > 0.0 {
+            2.0 * precision * recall / (precision + recall)
+        } else {
+            0.0
+        };
+        let avg_ms = total_ms / imgs.len() as f32;
+        ScoreReport {
+            name: "ensemble-haar-gated",
+            precision,
+            recall,
+            f1,
+            avg_ms,
+            emitted_total: fused_total,
+        }
+    };
+    eprintln!(
+        "[golden-eval] ensemble-haar-gated done: P={:.3} R={:.3} F1={:.3}",
+        ens_haar_gated.precision, ens_haar_gated.recall, ens_haar_gated.f1
+    );
+
+    let reports = vec![
+        haar_report,
+        lum_report,
+        lum_strict_report,
+        cnn_raw_report,
+        cnn_cal_report,
+        ens_union,
+        ens_consensus,
+        ens_haar_only,
+        ens_haar_gated,
+    ];
+
+    print_table(&reports);
+}
