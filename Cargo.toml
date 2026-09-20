@@ -181,6 +181,10 @@ name = "bench_components"
 required-features = ["detector-haar"]
 
 [[test]]
+name = "integral_image_tests"
+required-features = ["detector-haar"]
+
+[[test]]
 name = "bench_detect"
 required-features = ["detector-haar"]
 
