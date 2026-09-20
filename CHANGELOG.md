@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — stale docs after detector / GPU backend cleanup
+- **`CONTRIBUTING.md`** — removed references to deleted source files
+  (`src/hog_face.rs`, `src/mtcnn.rs`, `src/yunet.rs`), corrected the
+  `src/gpu/` description (currently `metal/cuda/mod/backend.rs` behind
+  features, not the 6-vendor matrix in CONTRIBUTING), and updated
+  `src/weights/` (now bundled real OpenCV cascade, not placeholder
+  `*.bin`s). Also clarified `examples/detect_uniform.rs` and
+  `docs/GPU_BACKENDS.md` to match the current `haar/cnn/luminance`
+  detector set and `Metal/CUDA` GPU set.
+- **`docs/CPU_VS_GPU_REPORT.md`** — removed references to non-existent
+  `src/gpu/rocm.rs`, `src/gpu/ascend.rs`, `src/gpu/mlu.rs` stubs and
+  the stale "AMD / Mac / NVIDIA / 国产 GPU 全部接好" claim. Reality:
+  Apple Silicon (Metal) and NVIDIA (CUDA, feature-gated) are the only
+  actively supported paths; ROCm / Ascend / MLU / DirectML are
+  intentionally off the roadmap.
+
+## [Unreleased]
+
+### Changed — code-quality sweep (no behaviour change)
+- **`src/main.rs`** — `run_cnn_pipeline` and `run_algo_pipeline` were
+  near-identical (~120 lines of duplicated frame-loop / RGB-fallback /
+  record-building / manifest-write code). Replaced by a single shared
+  `run_with_detector` driver; the CNN path now adapts its `&[f32]` /
+  `CnnDetection` contract to the shared `Fn(&GrayImage) -> Vec<Detection>`
+  signature via a small closure. Same manifest layout, same `--only-with-face`
+  semantics, same `--out` paths.
+- **`OnnxError::source()`** (`src/onnx/mod.rs`) now exposes the wrapped
+  `io::Error` as the error source (matches the `LbphStoreError` /
+  `SubspaceStoreError` pattern). Previously only `Display` carried the
+  underlying message; `Error::source()` returned `None`.
+- **`IdentifyError<D, E>::source()`** (`src/video_id.rs`) now surfaces
+  the inner detect / embed error through `Error::source()`; previously
+  the default empty impl hid them.
+
+### Fixed — broken intra-doc links & stale cross-references
+- 7 broken intra-doc links in the library (`IntegralTable`,
+  `prefix_sums_fit_u32`, `DEFAULT_FRAMES`, `crate::linalg`,
+  `identify_videos` → real `identify_video`, plus two `SquaredIntegralImage`
+  / `Detector::detect` resolutions) and 4 in `src/bin/cnn_train.rs`
+  (`[epochs]`/`[out_path]`/`[seed]` were being parsed as doc links; usage
+  example is now wrapped in a `text` code block; `CnnDetector` now uses
+  the qualified `rsface::cnn::CnnDetector` path).
+- 4 doc warnings in `platform/server/` (`Vec<u8>` / `Vec<bool>` /
+  `Arc<JobRegistry>` / `[0,1]` were being read as HTML tags or range
+  links); now escaped with backticks.
+- **`src/gpu/metal.rs`** — replaced a dangling `// FIXME` reference with a
+  concrete note pointing at the existing `MetalBackend::detect_windows_cpu`.
+- **`docs/GPU_BACKENDS.md`** — dropped the corresponding `FIXME` cross-link.
+- **`src/pipeline.rs`** — removed the unused `#[allow(dead_code)]
+  fn _ensure_grayimage_send` stub.
+
+### Added — edge-case detector tests
+- `detection_iou_nested_and_symmetric` (`src/detector.rs`) covers IoU for
+  one box fully contained in another, partial overlap, and verifies
+  `a.iou(b) == b.iou(a)`.
+- `detector_with_empty_image_returns_no_detections` covers the
+  `0×0`, `10×0`, `0×10` zero-area cases so future refactors cannot
+  regress the empty-source path.
+
 ### Added — real OpenCV cascade bundled; zero-arg install works
 - **The classical OpenCV frontal-face cascade now ships inside the binary**
   (`src/weights/haarcascade_frontalface_default.rfcf`, converted from OpenCV
