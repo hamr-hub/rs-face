@@ -26,7 +26,8 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const DEFAULT_CASCADE: &str = "cascade.rfcf";
+// 权重随 core 分发在 src/weights/(bench 的 cwd 是仓库根)。
+const DEFAULT_CASCADE: &str = "src/weights/haarcascade_frontalface_default.rfcf";
 const REPO_ROOT_HINT: &[&str] = &[
     "platform/testdata",
     "testdata",

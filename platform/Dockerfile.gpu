@@ -8,6 +8,11 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY platform ./platform
+# Cargo.toml 里显式声明的 [[bin]]/[[bench]]/[[example]]/[[test]] 目标,
+# cargo 加载 manifest 时即校验路径存在(虽然只构建 platform bin)。
+COPY examples ./examples
+COPY benches ./benches
+COPY tests ./tests
 RUN cargo build --release --manifest-path platform/Cargo.toml
 
 # ---- 运行时镜像:Ubuntu 24.04 + CUDA 12.6 + OpenCL ICD + ffmpeg ----
@@ -33,7 +38,8 @@ RUN mkdir -p /etc/OpenCL/vendors \
 # 复制构建产物
 COPY --from=build /build/platform/target/release/rsface-server /usr/local/bin/rsface-server
 COPY platform/web /app/web
-COPY cascade.rfcf /app/cascade.rfcf
+# 级联权重在 src/weights/(随 core 嵌入式分发);容器内路径仍保持 /app/cascade.rfcf。
+COPY src/weights/haarcascade_frontalface_default.rfcf /app/cascade.rfcf
 RUN mkdir -p /var/rsface-media /tmp/rsface-jobs \
     # 非 root 运行:rsface 用户(UID 10001)。NVIDIA 设备节点由
     # nvidia-container-cli 注入,权限走 video/render 组,普通用户可访问。

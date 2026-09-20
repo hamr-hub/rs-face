@@ -26,7 +26,7 @@ LOG="${LOG:-/tmp/e2e_server.log}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TESTDATA="$ROOT/platform/testdata"
 SERVER_BIN="$ROOT/platform/target/release/rsface-server"
-CASCADE="$ROOT/cascade.rfcf"
+CASCADE="$ROOT/src/weights/haarcascade_frontalface_default.rfcf"
 BASE="http://127.0.0.1:$PORT"
 
 pass=0

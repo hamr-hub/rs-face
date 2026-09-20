@@ -64,7 +64,7 @@ rs-face core 是一个零依赖、纯 Rust 的 Viola-Jones(+CNN)人脸检测内�
 ```
 rs-face/                    # core(不动)
 ├── src/…                   # 内核:haar/detector/pipeline/source/output/cnn/gpu
-├── cascade.rfcf            # OpenCV frontalface 级联(rfcf 格式)
+│   └── weights/            # 内嵌 Haar 级联权重(rfcf,随 core 分发;Dockerfile 也从这里 COPY)
 └── platform/               # ★ 平台层(本方案的主体,独立 Cargo 包)
     ├── Cargo.toml          # rsface-platform;依赖 core(path)+ axum/tokio/ureq/sha2/hmac
     ├── server/src/
