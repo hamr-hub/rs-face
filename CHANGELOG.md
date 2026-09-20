@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — package hygiene
+- The crates.io tarball no longer ships the multi-MB photo fixtures only the
+  opt-in ONNX e2e test needs (`biden.ppm`, `two-people.ppm`) nor the rendered
+  `docs/samples/` PNGs: package payload drops from ~14.3 MB to ~2.5 MB. Repo
+  checkouts and CI are unaffected; `lena.ppm` + the `include_bytes!`-embedded
+  `demo_face_256.pgm` used by the default test suite still ship.
+- All intra-doc links now resolve under `cargo doc`; the pasted crate-level
+  clippy-allow header was removed from the `cnn_train` bin (the workspace
+  `[lints]` table already applies to every target).
+
 ### Added — real OpenCV cascade bundled; zero-arg install works
 - **The classical OpenCV frontal-face cascade now ships inside the binary**
   (`src/weights/haarcascade_frontalface_default.rfcf`, converted from OpenCV

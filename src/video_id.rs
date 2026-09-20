@@ -19,9 +19,9 @@
 //!    singletons so the public id space starts at 1 and is stable as new videos
 //!    are added.
 //!
-//! 3. [`identify_videos`] — the convenience wrapper: take a list of video
-//!    paths, an arbitrary detect/embed closure pair, and produce a
-//!    [`VideoIdentification`] manifest.
+//! 3. [`identify_video`] — the convenience wrapper: one frame source plus an
+//!    arbitrary detect/embed closure pair, producing a [`VideoIdentification`]
+//!    manifest; [`merge_across_videos`] then links identities across videos.
 //!
 //! ## Design notes
 //!
