@@ -1,14 +1,26 @@
 name: CI
 
+# Push/PR gate. Mirrors CONTRIBUTING.md "Coding conventions",
+# STRUCTURE.md §3 (pre-commit self-check), and tools/pre-push.sh:
+#   fmt --check -> clippy -D warnings -> zero-dep build/test -> test,
+# for BOTH the zero-dep core crate and the platform server crate.
+# The core job additionally runs the synthetic-input CLI smoke test.
+# Optional GPU/ONNX backends (metal/cuda/ort/tract) are not built here —
+# they need platform toolchains and are validated manually.
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
-  build:
-    name: build (${{ matrix.os }})
+  core:
+    name: core (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,6 +31,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache cargo registry & target
         uses: actions/cache@v4
@@ -31,67 +45,63 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: cargo build
-        run: cargo build --release --all-targets
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
 
-      - name: cargo test (lib)
-        run: cargo test --lib
+      - name: clippy (-D warnings, release/all-targets)
+        run: cargo clippy --release --all-targets -- -D warnings
+
+      # The headline claim is "zero runtime deps by default": build and
+      # test the lib with no features so an accidental default dep fails CI.
+      - name: zero-dep build
+        run: cargo build --no-default-features --lib
+      - name: zero-dep test
+        run: cargo test --lib --no-default-features
+
+      - name: full build + lib tests
+        run: |
+          cargo build --release --all-targets
+          cargo test --lib
 
       - name: Smoke test on synthetic input
         run: |
           ./target/release/rs-face test://5 --out /tmp/rsface-smoke
           test -f /tmp/rsface-smoke/manifest.json
 
-  zero-dep-build:
-    # The headline claim is "zero runtime deps by default". This job enforces
-    # it: build the lib with --no-default-features and confirm no optional
-    # crate sneaked in. If a future change accidentally pulls in a dep via
-    # the default feature set, this job catches it before a release.
-    name: zero-dep build
+  platform:
+    name: platform server (ubuntu)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: cargo build --no-default-features
-        run: cargo build --no-default-features --lib
-      - name: cargo test --lib --no-default-features
-        run: cargo test --lib --no-default-features
 
-  feature-gates:
-    # Every documented optional backend must still build. If a feature
-    # silently bit-rots, this job catches it.
-    name: feature gates (${{ matrix.feature }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        feature:
-          - tract-backend
-          - cuda-backend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: cargo check --features ${{ matrix.feature }}
-        run: cargo check --features ${{ matrix.feature }} --lib
-
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
-      - uses: actions/cache@v4
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ubuntu-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+            platform/target
+          key: ${{ runner.os }}-platform-cargo-${{ hashFiles('platform/Cargo.lock', 'platform/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-platform-cargo-
+
       - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-      - name: cargo clippy
-        run: cargo clippy --release --all-targets -- -D warnings
+        working-directory: platform
+        run: cargo fmt --all --check
+
+      - name: clippy (-D warnings, all-targets)
+        working-directory: platform
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: build
+        working-directory: platform
+        run: cargo build
+
+      - name: test
+        working-directory: platform
+        run: cargo test

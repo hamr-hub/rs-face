@@ -4,7 +4,8 @@
 > It defines the canonical directory layout, what each top-level path is *for*,
 > and what an agent **must not** do. If a change conflicts with this file, this
 > file wins. See also [`CONTRIBUTING.md`](CONTRIBUTING.md) for the longer
-> rationale and [`CLAUDE.md`](CLAUDE.md) for AI-facing operational rules.
+> rationale, [`GOVERNANCE.md`](GOVERNANCE.md) for the branch/CI/commit process,
+> and [`CLAUDE.md`](CLAUDE.md) for AI-facing operational rules.
 
 ## 1. Canonical layout
 
@@ -24,6 +25,7 @@ rs-face/
 │   - CHANGELOG.md       — release history (Keep a Changelog format)
 │   - CONTRIBUTING.md    — dev workflow, full tree, module-split rationale
 │   - STRUCTURE.md       — this file: layout + hard constraints
+│   - GOVERNANCE.md      — branches, the CI/hook gate, commit rules, bot limits
 │   - CLAUDE.md          — AI agent operational rules
 │   - LICENSE            — MIT
 │
@@ -158,6 +160,10 @@ shell scripts under `platform/scripts/`, `tools/`, or as inline `docker compose`
 ---
 
 ## 3. Pre-commit self-check (for AI agents)
+
+Run `bash tools/install-hooks.sh` once per clone; the `pre-push` hook then
+enforces the whole list below automatically and the `commit-msg` hook enforces
+conventional subjects (see [`GOVERNANCE.md`](GOVERNANCE.md)).
 
 Before `git add`, run through this list. If any item fails, **don't commit**.
 

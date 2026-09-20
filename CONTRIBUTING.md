@@ -9,9 +9,18 @@ the README under "Limitations / honesty".
 ```bash
 git clone <repo>
 cd rs-face
+bash tools/install-hooks.sh   # pre-push gate + conventional commit-msg
 cargo build --release
 cargo test --lib
 ```
+
+After cloning, install the local quality gates once with
+`bash tools/install-hooks.sh`. They mirror CI (`.github/workflows/ci.yml`):
+a push is rejected unless `cargo fmt --check`, `cargo clippy -D warnings`,
+the zero-dep lib build, and both crates' tests pass, and commit subjects
+follow `<type>(<scope>): <summary>`. See [GOVERNANCE.md](GOVERNANCE.md) for
+the branch/review process — automated agents push branches and open PRs,
+they do not push to `main`.
 
 The binary needs `ffmpeg` on `PATH` to decode arbitrary video containers.
 Image-sequence inputs (`*.png` / `*.pgm` / `*.ppm`) and the synthetic test

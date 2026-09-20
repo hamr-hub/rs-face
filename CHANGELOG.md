@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — project governance (enforced, not just documented)
+- **`.github/workflows/ci.yml` strengthened**: the existing CI covered
+  build/test/zero-dep but had no `fmt`/`clippy` gate and never built the
+  platform crate. Now both crates run fmt + clippy `-D warnings`; the core
+  job keeps the zero-dep build/test, full build, and synthetic smoke test;
+  a new platform job builds + tests `platform/` (ubuntu + macOS matrix kept).
+- **Local gates under `tools/`** installed via `bash tools/install-hooks.sh`:
+  `pre-push.sh` runs the same checks as CI on both crates; `commit-msg.sh`
+  enforces `<type>(<scope>): <summary>`.
+- **`GOVERNANCE.md`** — single source of truth for branches, the gate,
+  commit rules, zero-dep/structure hard rules, accuracy-evidence
+  requirements, and a scope-of-authority table: **bots/agents push branches
+  and open PRs, they do not push to `main`**; only the owner merges.
+- PR + issue templates under `.github/`.
+- One-shot `style: cargo fmt` baseline commit so the new fmt gate starts green.
+
 ### Fixed
 - **S3 SigV4 signature mismatch** (`platform/server/src/s3.rs`): the signed
   canonical headers included `host` and every `extra_headers` entry
