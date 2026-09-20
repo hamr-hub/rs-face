@@ -101,7 +101,14 @@ impl fmt::Display for OnnxError {
     }
 }
 
-impl std::error::Error for OnnxError {}
+impl std::error::Error for OnnxError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            OnnxError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for OnnxError {
     fn from(e: std::io::Error) -> Self {
