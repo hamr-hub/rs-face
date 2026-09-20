@@ -50,6 +50,7 @@
 //! - [`eigenface`]           : PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`.
 //! - [`fisherface`]          : Fisherfaces / LDA (Belhumeur–Hespanha–Kriegman): n−C PCA reduction then C−1 class-discriminant axes; best zero-dep pair EER.
 //! - [`lbph`]                : uniform Local Binary Patterns histograms + chi-square distance.
+//! - [`embednet`]            : zero-dependency **trainable embedding CNN** (im2col convs, full backprop, contrastive-pair Adam trainer, `.rsen` weights) — a mini-ArcFace in pure `std`, producing 128-d embeddings for the same [`embedding::Gallery`] as ONNX ArcFace.
 //! - [`lbph_store`]          : zero-dep binary gallery persistence (save/load across restarts, no crops needed).
 //! - [`subspace_store`]      : trained-model persistence for eigenfaces/fisherfaces (mean, axes, projections).
 //! - [`video_id`]            : video-level identification — IoU tracker + single-linkage clusterer + cross-video re-id. Plugs any (detector, recogniser) pair via the [`video_id::Identify`] trait; example wires the zero-dep haar + LBPH path.
@@ -140,7 +141,7 @@
 //! | family            | default build | what extra you must do |
 //! |-------------------|---------------|------------------------|
 //! | `haar`, `luminance`, `lbph`, `eigenface`, `fisherface` | ✅ Production-grade out of the box | nothing |
-//! | `cnn`                                    | 🟡 Trainable toy net (starter weights only) | train with `cnn_train`, load via `--cnn-weights` |
+//! | `cnn`, `embednet`                        | 🟡 Genuinely trainable from scratch, no bundled weights | train with `cnn_train` / `embednet_train` (embednet = pure-Rust, zero-dep deep embeddings) |
 //! | `scrfd`, `arcface`                       | ⛔ Opt-in (`ort-backend` / `tract-backend`) | download ONNX models; `tools/fetch_models.sh` does this |
 //!
 //! ## `no_std` & threading
@@ -194,41 +195,112 @@
 #![allow(dead_code)] // Feature-gated GPU/ONNX backends and parity helpers keep primitives some builds don't call.
 #![allow(unused_variables)] // Same reason as dead_code: code paths compiled only behind a feature flag.
 
-pub mod align;
-pub mod arcface;
-pub mod arcface_recognizer;
-pub(crate) mod binio;
-pub mod cnn;
-pub mod detector;
-pub mod eigenface;
+// ---------------------------------------------------------------------------
+// Core types — compile with every feature selection, depend on nothing but
+// `std` (they stay allocation-light even where `std` is available).
+// ---------------------------------------------------------------------------
 pub mod embedding;
+pub mod embednet;
 pub mod face;
 pub mod face_detector;
-pub mod fisherface;
-pub mod gpu;
-pub mod haar;
 pub mod image;
-pub mod integral;
-pub mod lbph;
-pub mod lbph_store;
-pub(crate) mod linalg;
-pub mod luminance_face;
-pub mod models;
-pub mod onnx;
-pub mod output;
-pub mod pipeline;
-pub mod pool;
 pub mod recognizer;
-pub mod scrfd;
-pub mod scrfd_detector;
-pub mod source;
+
+// Little byte (de)serialiser shared by the gallery/model stores; only the
+// stores need it.
+#[cfg(any(
+    feature = "recognizer-lbph",
+    feature = "recognizer-eigenface",
+    feature = "recognizer-fisherface"
+))]
+pub(crate) mod binio;
+
+// ---------------------------------------------------------------------------
+// Haar cascade stack: buffer pool, integral tables, cascade definition and
+// the multi-scale sliding-window engine (+ its GPU driver module).
+// ---------------------------------------------------------------------------
+#[cfg(feature = "detector-haar")]
+pub mod detector;
+#[cfg(feature = "detector-haar")]
+pub mod gpu;
+#[cfg(feature = "detector-haar")]
+pub mod haar;
+#[cfg(feature = "detector-haar")]
+pub mod integral;
+#[cfg(feature = "detector-haar")]
+pub mod pool;
+
+// ---------------------------------------------------------------------------
+// Other detectors.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "detector-cnn")]
+pub mod cnn;
+#[cfg(feature = "detector-luminance")]
+pub mod luminance_face;
+
+// ---------------------------------------------------------------------------
+// Recognisers and their persistence formats. The subspace linear algebra is
+// shared by eigenfaces/Fisherfaces.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "recognizer-eigenface")]
+pub mod eigenface;
+#[cfg(feature = "recognizer-fisherface")]
+pub mod fisherface;
+#[cfg(feature = "recognizer-lbph")]
+pub mod lbph;
+#[cfg(feature = "recognizer-lbph")]
+pub mod lbph_store;
+#[cfg(any(feature = "recognizer-eigenface", feature = "recognizer-fisherface"))]
+pub(crate) mod linalg;
+#[cfg(any(feature = "recognizer-eigenface", feature = "recognizer-fisherface"))]
 pub mod subspace_store;
+
+// ---------------------------------------------------------------------------
+// I/O & orchestration.
+// ---------------------------------------------------------------------------
+#[cfg(feature = "output")]
+pub mod output;
+#[cfg(feature = "pipeline")]
+pub mod pipeline;
+#[cfg(feature = "source")]
+pub mod source;
+#[cfg(feature = "video-id")]
 pub mod video_id;
 
-pub use detector::{Detection, Detector};
-pub use face_detector::{FaceDetector, HaarDetector};
-pub use haar::Cascade;
+// ---------------------------------------------------------------------------
+// Opt-in industrial ONNX stack (SCRFD detector + ArcFace recogniser).
+// ---------------------------------------------------------------------------
+#[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
+pub mod align;
+#[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
+pub mod arcface;
+#[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
+pub mod arcface_recognizer;
+#[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
+pub mod models;
+#[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
+pub mod onnx;
+#[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
+pub mod scrfd;
+#[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
+pub mod scrfd_detector;
+
+// ---------------------------------------------------------------------------
+// Crate-root re-exports — keep the 0.2.x prelude paths working while each
+// row now follows its feature.
+// ---------------------------------------------------------------------------
+pub use face::Detection;
+pub use face_detector::FaceDetector;
 pub use image::GrayImage;
-pub use luminance_face::{LuminanceConfig, LuminanceFaceDetector};
-pub use pipeline::{Pipeline, PipelineConfig, PipelineStats};
 pub use recognizer::{FaceRecognizer, IncrementalRecognizer, Recognition};
+
+#[cfg(feature = "detector-haar")]
+pub use detector::Detector;
+#[cfg(feature = "detector-haar")]
+pub use face_detector::HaarDetector;
+#[cfg(feature = "detector-haar")]
+pub use haar::Cascade;
+#[cfg(feature = "detector-luminance")]
+pub use luminance_face::{LuminanceConfig, LuminanceFaceDetector};
+#[cfg(feature = "pipeline")]
+pub use pipeline::{Pipeline, PipelineConfig, PipelineStats};

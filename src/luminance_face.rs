@@ -52,7 +52,7 @@
 //! All public entry points are smoke-tested to never panic on empty /
 //! uniform input (see `tests/skin_face_no_panic_*` in the test suite).
 
-use crate::detector::{non_max_suppression, Detection};
+use crate::face::{non_max_suppression, Detection};
 use crate::face_detector::FaceDetector;
 use crate::image::GrayImage;
 

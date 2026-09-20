@@ -1,17 +1,121 @@
-//! Modern-detector value types: sub-pixel boxes and 5-point facial landmarks.
+//! Detection value types shared by every detector: the classical integer box
+//! ([`Detection`] + greedy [`non_max_suppression`]) and the modern sub-pixel
+//! box with 5-point landmarks ([`FaceDetection`] + [`nms`]).
 //!
-//! The classical [`crate::detector::Detection`] is integer/pixel-space and carries
-//! no landmarks, which is all a Haar cascade can produce. Modern single-stage
-//! detectors (SCRFD, RetinaFace, YuNet) regress *continuous* box offsets and five
-//! keypoints, and downstream face **recognition** is critically dependent on those
-//! keypoints: ArcFace embeddings are only comparable when every crop has been
-//! warped onto the same canonical landmark configuration.
+//! The classical [`Detection`] is pixel-space and carries no landmarks, which
+//! is all a Haar cascade can produce. Modern single-stage detectors (SCRFD,
+//! RetinaFace, YuNet) regress *continuous* box offsets and five keypoints, and
+//! downstream face **recognition** is critically dependent on those keypoints:
+//! ArcFace embeddings are only comparable when every crop has been warped onto
+//! the same canonical landmark configuration.
 //!
 //! Rounding to `usize` at detect time would throw away the sub-pixel precision that
-//! the similarity transform in [`crate::align`] needs, so these types keep `f32`
-//! throughout and only quantise at the drawing/serialisation boundary.
+//! the similarity transform in [`crate::align`] needs, so [`FaceDetection`] keeps
+//! `f32` throughout and only quantises at the drawing/serialisation boundary.
 
-use crate::detector::Detection;
+/// A single detection: pixel-space bounding box + confidence score.
+///
+/// This is the classical output type of every zero-dep detector; it lives in
+/// the `face` module (rather than next to the Haar scanner) so that
+/// landmark-based detectors can produce it without depending on the Haar
+/// detector machinery.
+#[derive(Clone, Debug)]
+pub struct Detection {
+    /// Left edge in pixels.
+    pub x: usize,
+    /// Top edge in pixels.
+    pub y: usize,
+    /// Width in pixels.
+    pub w: usize,
+    /// Height in pixels.
+    pub h: usize,
+    /// Detector confidence (cascade stage score or network sigmoid).
+    pub score: f32,
+}
+
+impl Detection {
+    /// Right edge (exclusive) of the bounding box.
+    #[inline]
+    pub fn right(&self) -> usize {
+        self.x + self.w
+    }
+
+    /// Bottom edge (exclusive) of the bounding box.
+    #[inline]
+    pub fn bottom(&self) -> usize {
+        self.y + self.h
+    }
+
+    /// Area in pixels (`w * h`).
+    #[inline]
+    pub fn area(&self) -> usize {
+        self.w * self.h
+    }
+
+    /// Intersection-over-union with another detection, in `[0, 1]`.
+    /// Overlapping boxes return `> 0`; disjoint boxes return exactly `0`.
+    pub fn iou(&self, other: &Detection) -> f32 {
+        iou(self, other)
+    }
+
+    /// Center point `(cx, cy)` of the bounding box.
+    #[inline]
+    pub fn center(&self) -> (f32, f32) {
+        (
+            self.x as f32 + self.w as f32 / 2.0,
+            self.y as f32 + self.h as f32 / 2.0,
+        )
+    }
+}
+
+/// Standard greedy NMS over integer boxes: highest score first, suppress all
+/// with IoU above the threshold.
+///
+/// Kept separate from [`nms`] (sub-pixel boxes): reusing one function for both
+/// would force a rounding pass whose ties change which near-identical box wins.
+pub fn non_max_suppression(mut dets: Vec<Detection>, iou_threshold: f32) -> Vec<Detection> {
+    dets.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut keep: Vec<Detection> = Vec::new();
+    let mut suppressed = vec![false; dets.len()];
+    for i in 0..dets.len() {
+        if suppressed[i] {
+            continue;
+        }
+        keep.push(dets[i].clone());
+        for j in (i + 1)..dets.len() {
+            if suppressed[j] {
+                continue;
+            }
+            if iou(&dets[i], &dets[j]) > iou_threshold {
+                suppressed[j] = true;
+            }
+        }
+    }
+    keep
+}
+
+#[inline]
+pub(crate) fn iou(a: &Detection, b: &Detection) -> f32 {
+    let x1 = a.x.max(b.x);
+    let y1 = a.y.max(b.y);
+    let x2 = (a.x + a.w).min(b.x + b.w);
+    let y2 = (a.y + a.h).min(b.y + b.h);
+    let w = (x2 as i64 - x1 as i64).max(0) as usize;
+    let h = (y2 as i64 - y1 as i64).max(0) as usize;
+    let inter = (w * h) as f32;
+    if inter <= 0.0 {
+        return 0.0;
+    }
+    let union = (a.w * a.h + b.w * b.h) as f32 - inter;
+    if union <= 0.0 {
+        return 0.0;
+    }
+    inter / union
+}
 
 /// Canonical index of each of the five landmarks, in InsightFace order.
 ///
@@ -224,8 +328,8 @@ impl From<Detection> for FaceDetection {
 
 /// Greedy NMS over sub-pixel boxes, highest score first.
 ///
-/// Separate from [`crate::detector::non_max_suppression`] because that function
-/// operates on integer boxes; reusing it would force a rounding pass whose ties
+/// Separate from [`non_max_suppression`] because that function operates on
+/// integer boxes; reusing one for both would force a rounding pass whose ties
 /// change which of two near-identical boxes survives.
 pub fn nms(mut dets: Vec<FaceDetection>, iou_threshold: f32) -> Vec<FaceDetection> {
     // Descending score. `total_cmp` avoids the partial-ord unwrap panic a NaN score
@@ -375,5 +479,63 @@ mod tests {
         let f = det(-3.0, -7.0, 10.0, 10.0, 0.9);
         let d = f.to_detection();
         assert_eq!((d.x, d.y), (0, 0));
+    }
+
+    #[test]
+    fn classical_detection_helpers() {
+        let a = Detection {
+            x: 10,
+            y: 20,
+            w: 30,
+            h: 40,
+            score: 0.75,
+        };
+        assert_eq!(a.right(), 40);
+        assert_eq!(a.bottom(), 60);
+        assert_eq!(a.area(), 1200);
+        assert_eq!(a.center(), (25.0, 40.0));
+        let b = a.clone();
+        assert!((a.iou(&b) - 1.0).abs() < 1e-6);
+        let c = Detection {
+            x: 200,
+            y: 200,
+            w: 10,
+            h: 10,
+            score: 0.1,
+        };
+        assert_eq!(a.iou(&c), 0.0);
+    }
+
+    #[test]
+    fn classical_nms_merges_overlapping_keeps_disjoint() {
+        let a = Detection {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 20,
+            score: 1.0,
+        };
+        let b = Detection {
+            x: 2,
+            y: 2,
+            w: 20,
+            h: 20,
+            score: 0.9,
+        };
+        let c = Detection {
+            x: 100,
+            y: 100,
+            w: 20,
+            h: 20,
+            score: 0.5,
+        };
+        let r = non_max_suppression(vec![a, b, c], 0.3);
+        assert_eq!(r.len(), 2, "should merge a+b but keep c");
+        assert_eq!(r[0].score, 1.0);
+    }
+
+    #[test]
+    fn classical_nms_empty_input_is_empty() {
+        assert!(non_max_suppression(Vec::new(), 0.3).is_empty());
     }
 }

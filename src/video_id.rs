@@ -1,6 +1,6 @@
 //! Video-level face identification.
 //!
-//! Builds on top of [`crate::embedding`], [`crate::detector`], and [`crate::source`]
+//! Builds on top of the `embedding`, `face` and `source` modules
 //! to answer a question the frame-level detectors don't:
 //!
 //! > Across one or many videos, **which physical people appear**, and **when**?
@@ -44,8 +44,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::detector::Detection;
 use crate::embedding::{Embedding, MatchConfig};
+use crate::face::Detection;
 use crate::image::{GrayImage, RgbImage};
 use crate::source::FrameSource;
 
