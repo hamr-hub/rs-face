@@ -5,7 +5,6 @@
 //! - Source frame pixels (grayscale, RGB)
 //! - Integral image (`(W+1) × (H+1)` u32)
 //! - Pyramid downscaled images (N × smaller allocations)
-//! - Detection lists (`Vec<Detection>`)
 //!
 //! Without pooling, every call to `IntegralImage::from_gray` and every
 //! pyramid level allocates a fresh `Vec<u32>`. With pooling we reuse the
@@ -25,7 +24,6 @@ struct Pool {
     rgb: HashMap<(usize, usize), Vec<RgbImage>>,
     integrals: HashMap<(usize, usize), Vec<Vec<u32>>>,
     integrals_u64: HashMap<(usize, usize), Vec<Vec<u64>>>,
-    detections: Vec<Vec<crate::detector::Detection>>,
 }
 
 impl Pool {
@@ -35,7 +33,6 @@ impl Pool {
             rgb: HashMap::new(),
             integrals: HashMap::new(),
             integrals_u64: HashMap::new(),
-            detections: Vec::new(),
         }
     }
 }
@@ -153,29 +150,6 @@ pub fn release_integral_u64(w: usize, h: usize, buf: Vec<u64>) {
     });
 }
 
-/// Acquire a `Vec<Detection>` that may have spare capacity from a previous frame.
-pub fn acquire_detections() -> Vec<crate::detector::Detection> {
-    POOL.with(|p| {
-        let mut p = p.borrow_mut();
-        if let Some(mut v) = p.detections.pop() {
-            v.clear();
-            return v;
-        }
-        Vec::with_capacity(64)
-    })
-}
-
-pub fn release_detections(mut v: Vec<crate::detector::Detection>) {
-    POOL.with(|p| {
-        let mut p = p.borrow_mut();
-        v.clear();
-        if v.capacity() > 4096 {
-            return;
-        } // don't grow unboundedly
-        p.detections.push(v);
-    });
-}
-
 /// Drop everything in the pool. Useful in tests or shutdown.
 pub fn clear() {
     POOL.with(|p| {
@@ -184,7 +158,6 @@ pub fn clear() {
         p.rgb.clear();
         p.integrals.clear();
         p.integrals_u64.clear();
-        p.detections.clear();
     });
 }
 
