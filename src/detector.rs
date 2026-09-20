@@ -494,6 +494,12 @@ impl Detector {
                             );
                             (s, ss)
                         };
+                        // The pre-filter expression `(ss * N - s²)` is the
+                        // same integer the cascade needs for its
+                        // varianceNormFactor sqrt. Compute it ONCE here in
+                        // f64 and hand both to the cascade — saves the
+                        // cascade from redoing `(nw_area * sum_sq - sum²)`
+                        // per window.
                         if !SquaredIntegralImage::passes_variance_sums_fast(
                             s,
                             ss,
@@ -503,13 +509,15 @@ impl Detector {
                         ) {
                             None
                         } else {
-                            self.cascade.classify_inbounds_with_sums(
+                            let variance_part = (n_pixels as f64) * (ss as f64)
+                                - (s as f64) * (s as f64);
+                            self.cascade.classify_inbounds_with_variance_part(
                                 &ii,
                                 &ri,
                                 x,
                                 y,
                                 &mut cache,
-                                (s, ss),
+                                variance_part,
                             )
                         }
                     } else {

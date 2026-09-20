@@ -383,6 +383,36 @@ impl Cascade {
         self.classify_impl(ii, ri, x, y, cache, true, Some(sums))
     }
 
+    /// [`Self::classify_inbounds_with_sums`] plus the cascade's
+    /// `varianceNormFactor` already pre-computed by the caller as
+    /// `(N * sum_sq - sum²)` in `f64`. Skips the duplicate
+    /// `nw_area * sum_sq - sum²` arithmetic that [`Self::variance_norm`]
+    /// would otherwise do — at ~50k windows per frame this is one
+    /// multiply, one subtract and one sqrt per window saved.
+    ///
+    /// `variance_part_f64` must equal the same expression `variance_norm`
+    /// would compute inside; otherwise the cascade's `value = raw * factor`
+    /// line will disagree bit-for-bit with the historical implementation.
+    pub(crate) fn classify_inbounds_with_variance_part(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        cache: &mut EvalCache,
+        variance_part_f64: f64,
+    ) -> Option<f32> {
+        debug_assert!(x + self.window_w <= ii.width() && y + self.window_h <= ii.height());
+        let factor = if cache.has_squared_iis() {
+            // Caller has already verified `variance_part > 0.0` (the
+            // detector's pre-filter does this with the threshold test).
+            (1.0 / variance_part_f64.sqrt()) as f32
+        } else {
+            1.0
+        };
+        self.classify_impl_with_factor(ii, ri, x, y, cache, true, factor)
+    }
+
     /// OpenCV's `varianceNormFactor` for one window: `1 / sqrt(N·Σx² − (Σx)²)`
     /// measured over the inner norm rect `(1, 1, ww−2, wh−2)` in window-local
     /// coordinates — i.e. `(x+1, y+1, x+ww−1, y+wh−1)` in integral-image
@@ -464,13 +494,80 @@ impl Cascade {
         let ww = self.window_w;
         let wh = self.window_h;
         let variance_norm_factor = self.variance_norm(ii, x, y, inbounds, sums, cache)?;
-
-        let mut total: f32 = 0.0;
-        cache.clear();
-        // Hoist ii/ri dimensions to stack — they're used per-rect and would
-        // otherwise be re-read inside the inner loop.
         let ii_w = ii.width();
         let ii_h = ii.height();
+        let mut total: f32 = 0.0;
+        cache.clear();
+        self.classify_with_factor_inner(
+            ii,
+            ri,
+            x,
+            y,
+            ww,
+            wh,
+            ii_w,
+            ii_h,
+            inbounds,
+            cache,
+            variance_norm_factor,
+            &mut total,
+        )
+    }
+
+    /// [`Self::classify_impl`] with the variance factor already pre-computed
+    /// by the caller (see [`Self::classify_inbounds_with_variance_part`]).
+    fn classify_impl_with_factor(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        cache: &mut EvalCache,
+        inbounds: bool,
+        variance_norm_factor: f32,
+    ) -> Option<f32> {
+        let ww = self.window_w;
+        let wh = self.window_h;
+        let ii_w = ii.width();
+        let ii_h = ii.height();
+        let mut total: f32 = 0.0;
+        cache.clear();
+        self.classify_with_factor_inner(
+            ii,
+            ri,
+            x,
+            y,
+            ww,
+            wh,
+            ii_w,
+            ii_h,
+            inbounds,
+            cache,
+            variance_norm_factor,
+            &mut total,
+        )
+    }
+
+    /// Shared inner loop for [`Self::classify_impl`] and
+    /// [`Self::classify_impl_with_factor`]. Walks every stage and weak
+    /// feature, computes `raw * variance_norm_factor`, picks the leaf
+    /// value, accumulates the stage sum and rejects on threshold. Returns
+    /// the cascade score on success.
+    fn classify_with_factor_inner(
+        &self,
+        ii: &IntegralImage,
+        ri: &RotatedIntegralImage,
+        x: usize,
+        y: usize,
+        ww: usize,
+        wh: usize,
+        ii_w: usize,
+        ii_h: usize,
+        inbounds: bool,
+        cache: &mut EvalCache,
+        variance_norm_factor: f32,
+        total: &mut f32,
+    ) -> Option<f32> {
         for stage in &self.stages {
             let mut stage_sum: f32 = 0.0;
             for w in &stage.weak_features {
@@ -512,9 +609,9 @@ impl Cascade {
             if stage_sum < stage.stage_threshold + self.stage_bias {
                 return None;
             }
-            total += stage_sum;
+            *total += stage_sum;
         }
-        Some(total)
+        Some(*total)
     }
 
     /// Save the cascade to a compact binary file.
