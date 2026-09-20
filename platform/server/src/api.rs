@@ -593,7 +593,7 @@ async fn job_detail(
                     .unwrap_or_default();
             Json(v).into_response()
         }
-        None => error_response(StatusCode::NOT_FOUND, "no such job"),
+        None => error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None),
     }
 }
 
@@ -606,7 +606,7 @@ async fn cancel_job(
             job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             Json(serde_json::json!({"ok": true})).into_response()
         }
-        None => error_response(StatusCode::NOT_FOUND, "no such job"),
+        None => error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None),
     }
 }
 
@@ -698,7 +698,7 @@ async fn retry_job(
 ) -> Response {
     let original = {
         let Some(j) = state.get(&id) else {
-            return error_response(StatusCode::NOT_FOUND, "no such job");
+            return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None);
         };
         let inp = j
             .original_input
@@ -721,7 +721,14 @@ async fn retry_job(
     let display = input.clone();
     let job = match state.create(kind, display) {
         Ok(j) => j,
-        Err(e) => return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string()),
+        Err(e) => {
+            return error_response_with(
+                StatusCode::TOO_MANY_REQUESTS,
+                "queue_full",
+                &e.to_string(),
+                Some("retry after queued jobs drain"),
+            );
+        }
     };
     let new_id = job.id.clone();
     state.set_original_input(&new_id, input.clone());
@@ -782,7 +789,7 @@ async fn compare_algos(
     // 2) 拿到 job 对应的原始媒体字节(S3 优先,失败回退到 local media dir)。
     let job = match state.get(&id) {
         Some(j) => j,
-        None => return error_response(StatusCode::NOT_FOUND, "no such job"),
+        None => return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None),
     };
     let media_key = job
         .original_media_key
@@ -1159,9 +1166,11 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
                 match stream_field_to_staging(&state.cfg, field, max_bytes).await {
                     Ok(p) => staged_path = Some(p),
                     Err(StagingError::TooLarge { len }) => {
-                        return error_response(
+                        return error_response_with(
                             StatusCode::PAYLOAD_TOO_LARGE,
+                            "upload_too_large",
                             &format!("upload too large: {} bytes (max {} bytes)", len, max_bytes),
+                            Some("reduce upload size or raise UPLOAD_LIMIT_*_MB env var"),
                         );
                     }
                     Err(StagingError::Io(e)) => {
@@ -1189,7 +1198,7 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         if let Some(p) = staged_path {
             let _ = tokio::fs::remove_file(p).await;
         }
-        return error_response(StatusCode::BAD_REQUEST, "missing 'file' field");
+        return error_response_with(StatusCode::BAD_REQUEST, "missing_field", "missing 'file' field", None);
     };
     let Some(staged) = staged_path else {
         return error_response(StatusCode::BAD_REQUEST, "empty upload");
@@ -1369,7 +1378,14 @@ async fn start_stream(
     let display = url.clone();
     let job = match state.create(JobKind::Stream, display) {
         Ok(j) => j,
-        Err(e) => return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string()),
+        Err(e) => {
+            return error_response_with(
+                StatusCode::TOO_MANY_REQUESTS,
+                "queue_full",
+                &e.to_string(),
+                Some("retry after queued jobs drain"),
+            );
+        }
     };
     let id = job.id.clone();
     state.set_original_input(&id, url.clone());
@@ -1508,7 +1524,7 @@ async fn job_events(
     Query(q): Query<EventsQuery>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return error_response(StatusCode::NOT_FOUND, "no such job");
+        return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None);
     };
     // 连接数限制:超限直接拒绝,不再 subscribe/spawn。
     let active = SSE_CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -1743,13 +1759,13 @@ async fn media(
         .or_else(|| key.strip_prefix("s3://").map(|s| s.to_string()))
         .unwrap_or_else(|| key.clone());
     if cleaned.contains("..") || cleaned.contains('\\') {
-        return error_response(StatusCode::BAD_REQUEST, "bad key");
+        return error_response_with(StatusCode::BAD_REQUEST, "bad_key", "bad key", None);
     }
     // 2026-09-20 security:拒绝绝对路径。`Path::join` 遇到绝对路径的右值会
     // 直接丢弃 base,否则 `/media//etc/passwd`(或 URL 编码的 %2F)会解析到
     // media 根之外,造成未授权任意文件读取。
     if cleaned.starts_with('/') {
-        return error_response(StatusCode::BAD_REQUEST, "bad key");
+        return error_response_with(StatusCode::BAD_REQUEST, "bad_key", "bad key", None);
     }
 
     // `inline://` 兜底:这种 key 表示数据 base64 嵌在 SSE 事件的 `inline`
@@ -1758,9 +1774,11 @@ async fn media(
     // 提示,避免前端误用 `/media/inline%3A%2F%2F...` 拿到空 404 后不知道
     // 是配置问题还是数据问题。
     if cleaned.starts_with("inline://") || key.starts_with("inline://") {
-        return error_response(
+        return error_response_with(
             StatusCode::GONE,
+            "media_gone",
             "inline:// keys must be fetched via SSE replay (look for `inline` field in frame events)",
+            Some("read the `inline` field from /api/jobs/{id}/events instead of /media/"),
         );
     }
 
@@ -1789,7 +1807,7 @@ async fn media(
             _ => false,
         };
         if !inside {
-            return error_response(StatusCode::BAD_REQUEST, "bad key");
+            return error_response_with(StatusCode::BAD_REQUEST, "bad_key", "bad key", None);
         }
         // 先拿文件长度(无 Range 时也直接读,旧路径)。
         let total = match tokio::fs::metadata(&local_path).await {
@@ -1969,7 +1987,7 @@ async fn download_zip(
     Path(id): Path<String>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return error_response(StatusCode::NOT_FOUND, "no such job");
+        return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None);
     };
     // Mutex 中毒也不 panic:取内部值继续,避免单个任务毒锁把请求线程带挂。
     let frames = job.frames.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -2144,8 +2162,46 @@ impl std::io::Write for ChannelWriter<'_> {
     }
 }
 
+/// 平台统一的错误响应格式(2026-09-20 标准化)。
+///
+/// 旧契约:`{"error": "<message>"}`。前端 `app.js` 仍按这个形状读 `data.error`。
+/// 新契约:在旧形状上叠加 `error_code` + `error_hint` 两个可选字段。
+/// - `error_code`:机器可读,小写 snake_case,前端可据此分支行为(401 vs 429 vs 503)。
+/// - `error_hint`:可选的人类可读修复提示,前端可原样显示给用户。
+///
+/// **兼容性**:旧契约的 `error` 字段保留为 message — 前端代码不需要改。
+/// API 消费者要切到新契约时,优先读 `error_code`,缺失再 fallback 到
+/// `error` 字符串前缀匹配(向后兼容)。
+///
+/// 已知 code 集合(自由扩展,未在 code 字段集中显式枚举):
+/// - `bad_input`     — 400/422,客户端发的参数有问题
+/// - `no_such_job`   — 404,id 不在内存索引
+/// - `queue_full`    — 429,并发 / 排队达到上限
+/// - `upload_too_large` — 413,超过 upload limit
+/// - `missing_field` — 400,multipart 缺字段
+/// - `ssrf_blocked`  — 403,导入 URL 在 blocked range
+/// - `media_gone`    — 410,inline:// key 误用 /media 路径
+/// - `internal`      — 500,服务端异常
+/// - `cascade_missing` — 500,haar 算法但 cascade 文件缺失
 fn error_response(code: StatusCode, msg: &str) -> Response {
-    (code, Json(serde_json::json!({"error": msg}))).into_response()
+    error_response_with(code, "internal", msg, None)
+}
+
+/// 同 error_response,但显式带 `error_code`(机器可读) + 可选 `error_hint`。
+fn error_response_with(
+    code: StatusCode,
+    error_code: &str,
+    msg: &str,
+    hint: Option<&str>,
+) -> Response {
+    let mut body = serde_json::json!({
+        "error": msg,            // 旧契约,前端读取用
+        "error_code": error_code, // 新契约,机器可读
+    });
+    if let Some(h) = hint {
+        body["error_hint"] = serde_json::Value::String(h.to_string());
+    }
+    (code, Json(body)).into_response()
 }
 
 /// `JobRegistry::create()` 已成功、但任务在进入 `run_job` 之前就失败时的统一
@@ -2410,15 +2466,23 @@ async fn import_video_url(
     // 平台本身是 LAN 部署,所以这个限制相对宽松 — 仍挡掉 169.254 / IPv6 link-local / 0.0.0.0。
     // 安全 #1+#2+#3:`::ffff:127.0.0.1` / `%31%32%37.0.0.1` / `user:pass@127.0.0.1`
     // 先规范化再 `is_blocked_host`,挡得住 SSRF 绕过。
+    // 错误响应使用 typed error_code(`ssrf_blocked`)便于客户端机器化处理。
     if let Some(host) = url_authority_host(&url) {
         match normalize_host_for_check(host) {
             Some(norm) if is_blocked_host(norm.as_str()) => {
-                return error_response(StatusCode::FORBIDDEN, "url host is in a blocked range");
+                return error_response_with(
+                    StatusCode::FORBIDDEN,
+                    "ssrf_blocked",
+                    "url host is in a blocked range",
+                    Some("use a public address or self-host the target"),
+                );
             }
             None => {
-                return error_response(
+                return error_response_with(
                     StatusCode::FORBIDDEN,
+                    "ssrf_invalid_host",
                     "url host contains forbidden characters",
+                    None,
                 );
             }
             _ => {}
@@ -2427,7 +2491,14 @@ async fn import_video_url(
 
     let job = match state.create(JobKind::Video, url.clone()) {
         Ok(j) => j,
-        Err(e) => return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string()),
+        Err(e) => {
+            return error_response_with(
+                StatusCode::TOO_MANY_REQUESTS,
+                "queue_full",
+                &e.to_string(),
+                Some("retry after queued jobs drain"),
+            );
+        }
     };
     let id = job.id.clone();
     state.set_original_input(&id, url.clone());
@@ -2503,7 +2574,7 @@ async fn import_urls(
     Path(id): Path<String>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return error_response(StatusCode::NOT_FOUND, "no such job");
+        return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None);
     };
     let original = job
         .original_media_key
