@@ -1,6 +1,6 @@
 //! Video-level face identification.
 //!
-//! Builds on top of [`crate::embedding`], [`crate::detector`], and [`crate::source`]
+//! Builds on top of the `embedding`, `face` and `source` modules
 //! to answer a question the frame-level detectors don't:
 //!
 //! > Across one or many videos, **which physical people appear**, and **when**?
@@ -19,9 +19,9 @@
 //!    singletons so the public id space starts at 1 and is stable as new videos
 //!    are added.
 //!
-//! 3. [`identify_videos`] — the convenience wrapper: take a list of video
-//!    paths, an arbitrary detect/embed closure pair, and produce a
-//!    [`VideoIdentification`] manifest.
+//! 3. [`identify_video`] — the convenience wrapper: one frame source plus an
+//!    arbitrary detect/embed closure pair, producing a [`VideoIdentification`]
+//!    manifest; [`merge_across_videos`] then links identities across videos.
 //!
 //! ## Design notes
 //!
@@ -44,8 +44,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::detector::Detection;
 use crate::embedding::{Embedding, MatchConfig};
+use crate::face::Detection;
 use crate::image::{GrayImage, RgbImage};
 use crate::source::FrameSource;
 

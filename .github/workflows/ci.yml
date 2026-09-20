@@ -2,11 +2,12 @@ name: CI
 
 # Push/PR gate. Mirrors CONTRIBUTING.md "Coding conventions",
 # STRUCTURE.md §3 (pre-commit self-check), and tools/pre-push.sh:
-#   fmt --check -> clippy -D warnings -> zero-dep build/test -> test,
-# for BOTH the zero-dep core crate and the platform server crate.
+#   fmt --check -> clippy -D warnings -> minimal-core build/test ->
+#   per-feature build/test matrix -> full default build/test,
+# for BOTH the core crate and the platform server crate.
 # The core job additionally runs the synthetic-input CLI smoke test.
-# Optional GPU/ONNX backends (metal/cuda/ort/tract) are not built here —
-# they need platform toolchains and are validated manually.
+# metal/cuda/ort are not built on hosted runners (platform toolchains);
+# tract-backend is pure Rust and is part of the feature matrix.
 
 on:
   push:
@@ -51,14 +52,14 @@ jobs:
       - name: clippy (-D warnings, release/all-targets)
         run: cargo clippy --release --all-targets -- -D warnings
 
-      # The headline claim is "zero runtime deps by default": build and
-      # test the lib with no features so an accidental default dep fails CI.
-      - name: zero-dep build
+      # Minimal core: only the always-compiled types (image, face,
+      # embedding, traits). An accidental non-core dependency here fails CI.
+      - name: minimal-core build
         run: cargo build --no-default-features --lib
-      - name: zero-dep test
+      - name: minimal-core test
         run: cargo test --lib --no-default-features
 
-      - name: full build + lib tests
+      - name: full default build + lib tests
         run: |
           cargo build --release --all-targets
           cargo test --lib
@@ -68,18 +69,38 @@ jobs:
           ./target/release/rs-face test://5 --out /tmp/rsface-smoke
           test -f /tmp/rsface-smoke/manifest.json
 
-  tract-feature:
-    # The pure-Rust ONNX backend must keep compiling even though the default
-    # build is zero-dep. cuda-backend is intentionally NOT gated on hosted
-    # runners (no CUDA toolkit -> always fails); validate it on a GPU host.
-    name: feature gate (tract-backend)
+  features:
+    # Every trimming knob must compile AND pass its own module tests on top
+    # of the minimal core. cuda/metal/ort are intentionally absent (hosted
+    # runners lack the toolchains); validate them on the matching GPU host.
+    name: feature matrix
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - detector-haar
+          - detector-luminance
+          - detector-cnn
+          - recognizer-lbph
+          - recognizer-eigenface
+          - recognizer-fisherface
+          - source
+          - source-http
+          - source-ffmpeg
+          - output
+          - pipeline
+          - video-id
+          - tract-backend
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo check --features tract-backend
-        run: cargo check --features tract-backend --lib
+      - name: build + lib tests (${{ matrix.features }})
+        run: >
+          cargo test --release --lib
+          --no-default-features
+          --features "${{ matrix.features }}"
 
   platform:
     name: platform server (ubuntu)

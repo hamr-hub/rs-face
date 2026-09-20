@@ -22,7 +22,7 @@ impl SyntheticSource {
     /// - `test://N`                 → `N` frames, e.g. `test://10`
     /// - `test://frames=N`          → `N` frames
     /// - `test://grid?frames=N`     → named grid with `N` frames
-    /// - `test://grid` / `test://` → [`DEFAULT_FRAMES`] frames
+    /// - `test://grid` / `test://` → `DEFAULT_FRAMES` (60) frames
     ///
     /// An unparsable count (e.g. `test://lots`) also falls back to the
     /// default rather than failing — the source is a development fixture.

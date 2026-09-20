@@ -17,7 +17,7 @@
 //!    singular in `d`-space (d ≫ n). The textbook reduction projects onto the leading
 //!    `n − C` principal directions of the total scatter first (the Gram-matrix trick
 //!    from [`crate::eigenface`], solved with the shared Jacobi routine in
-//!    [`crate::linalg`]). The projected within-class scatter is generically
+//!    the crate-private `linalg` module). The projected within-class scatter is generically
 //!    non-singular.
 //! 3. In the PCA space the scatter matrices are built directly:
 //!    `S_W = Σ_k Σ_{i∈k} (z_i − μ_k)(z_i − μ_k)ᵀ`,
@@ -649,6 +649,33 @@ fn coeff_distance(a: &[f32], b: &[f32]) -> f32 {
         .map(|(x, y)| (x - y).powi(2))
         .sum::<f32>()
         .sqrt()
+}
+
+// ---------------------------------------------------------------------------
+// Uniform trait dispatch — the impl lives next to the algorithm so the
+// recognizer trait module does not pull Fisherfaces into every feature
+// selection.
+// ---------------------------------------------------------------------------
+
+impl crate::recognizer::FaceRecognizer for FisherfaceRecognizer {
+    fn name(&self) -> &'static str {
+        "fisherface"
+    }
+    fn identify_crop(&self, crop: &GrayImage) -> crate::recognizer::Recognition {
+        self.identify_crop(crop)
+    }
+    fn rank_crop(&self, crop: &GrayImage) -> Vec<(String, f32)> {
+        self.rank_crop(crop)
+    }
+    fn verify(&self, label: &str, crop: &GrayImage) -> Option<f32> {
+        self.verify(label, crop)
+    }
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn crop_count(&self) -> usize {
+        self.crop_count()
+    }
 }
 
 // ---------------------------------------------------------------------------
