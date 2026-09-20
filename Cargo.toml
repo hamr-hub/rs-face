@@ -24,6 +24,14 @@ exclude = [
     # Audit/regeneration copy of the OpenCV source XML (930 KB); only the
     # ~118 KB .rfcf is embedded at build time.
     "src/weights/*.xml",
+    # Large photo fixtures used only by the opt-in ONNX real-model e2e test
+    # (tests/real_model_e2e.rs). The default test suite only needs the small
+    # lena.ppm + demo_face_256.pgm (the latter is include_bytes!-embedded).
+    "tests/fixtures/biden.ppm",
+    "tests/fixtures/two-people.ppm",
+    # Annotated sample renders linked from the README on GitHub; no code or
+    # test reads them, so they need not ship inside the crates.io tarball.
+    "docs/samples/",
 ]
 # benches/accuracy.rs is registered explicitly as a [[bin]] below; auto-discovery would
 # also pick it up as a bench and emit a "multiple build targets" warning.
