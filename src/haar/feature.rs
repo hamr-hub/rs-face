@@ -221,7 +221,7 @@ impl HaarFeature {
                 let rh = std::cmp::max(1, r.h as usize * win_h / fh);
                 (rx, ry, rw, rh)
             };
-// SAFETY (rect_sum_unchecked): rx < rx2 ≤ ii_w and ry < ry2 ≤ ii_h
+            // SAFETY (rect_sum_unchecked): rx < rx2 ≤ ii_w and ry < ry2 ≤ ii_h
             // follow from the documented contract of this method — rects map
             // inside the window, the window fits the image, and rw/rh ≥ 1.
             //
