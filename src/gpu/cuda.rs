@@ -70,7 +70,7 @@ mod imp {
     use cudarc::driver::{
         CudaDevice, CudaFunction, CudaSlice, DeviceRepr, LaunchAsync, LaunchConfig,
     };
-    use cudarc::nvrtc::compile_ptx;
+    use cudarc::nvrtc::{compile_ptx, compile_ptx_with_opts, CompileOptions};
     use std::sync::Arc;
 
     pub struct CudaDescriptor;
@@ -346,22 +346,26 @@ mod imp {
             // PTX into the device. Compilation happens once per backend
             // instance; subsequent calls reuse the compiled module
             // (cached inside ``CudaDevice`` keyed by module name).
-            let ptx =
-                compile_ptx(CUDA_KERNEL_SRC).map_err(|e| format!("NVRTC compile failed: {}", e))?;
-            device
-                .load_ptx(
-                    ptx,
-                    "rsface_cuda",
-                    &[
-                        "integral_row",
-                        "integral_col",
-                        "integral_row_dual",
-                        "integral_col_dual",
-                        "variance_prefilter",
-                        "detect_windows",
-                    ],
-                )
-                .map_err(|e| format!("load_ptx failed: {}", e))?;
+            //
+            // CRITICAL: cudarc 0.12's default arch is `compute_53` (Kepler,
+            // 2012). On Jetson / Tegra the driver refuses to load a Kepler-
+            // only module with `load_ptx failed: CUDA_ERROR_NOT_FOUND
+            // "named symbol not found"` — Tegra's GPU silicon lacks the
+            // older SM_53 syscalls even though the host has driver 540+.
+            //
+            // We target `sm_87` (Ampere, Jetson Orin / AGX Orin / Orin NX).
+            // Older NVIDIA discrete GPUs fall back to `sm_75` (Turing)
+            // which is the closest arch `cudarc` 0.12 can target that
+            // the Tegra driver accepts. On any other GPU the cudarc
+            // runtime already accepts the default; we pass `sm_87`
+            // optimistically and only fall back if NVRTC rejects it.
+            let opts = CompileOptions {
+                arch: Some("sm_87"),
+                ..Default::default()
+            };
+            let ptx = compile_ptx_with_opts(CUDA_KERNEL_SRC, opts.clone())
+                .or_else(|_| compile_ptx(CUDA_KERNEL_SRC))
+                .map_err(|e| format!("NVRTC compile failed: {}", e))?;
 
             // `get_func` returns Option in cudarc 0.12 — convert it to a
             // Result so we can use `?` consistently.

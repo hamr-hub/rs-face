@@ -77,7 +77,9 @@ impl Default for DetectorConfig {
             // Opt-in: a library `detect()` call must not dlopen/JIT a GPU
             // stack unexpectedly. CLIs and the pipeline flip this on.
             use_gpu: false,
-            gpu_min_pixels: 250_000,
+            // Lowered from 250_000 (≈500×500) so 480×360 ≈172k frames
+            // also hit the GPU path on Tegra-class hardware.
+            gpu_min_pixels: 50_000,
         }
     }
 }
@@ -245,9 +247,50 @@ impl Detector {
         if !self.config.use_gpu {
             return None;
         }
-        self.gpu
-            .get_or_init(|| crate::gpu::GpuIntegral::new())
-            .as_ref()
+        let g = self
+            .gpu
+            .get_or_init(|| match crate::gpu::GpuIntegral::new() {
+                Some(g) => {
+                    eprintln!(
+                        "[gpu] OpenCL probe OK: platform={:?} device={:?} cu={}",
+                        g.info().platform_name,
+                        g.info().device_name,
+                        g.info().compute_units
+                    );
+                    Some(g)
+                }
+                None => {
+                    // OpenCL probe failed (e.g. Jetson Tegra where NVIDIA
+                    // does NOT ship libnvidia-opencl.so.1). Fall back to
+                    // the next backend in `backend::auto()` — on a CUDA
+                    // build that means the CUDA backend (cudarc + NVRTC
+                    // sm_87), on a Metal build Apple Silicon. If both
+                    // fail, we're stuck on CPU.
+                    eprintln!(
+                        "[gpu] OpenCL probe FAILED — falling back to backend::auto() (CUDA → Metal → OpenCL)"
+                    );
+                    crate::gpu::backend::auto().and_then(|b| {
+                        let info = b.info().clone();
+                        eprintln!(
+                            "[gpu] backend::auto() selected: id={} vendor={:?} device={:?} cu={}",
+                            info.backend, info.vendor, info.device, info.compute_units
+                        );
+                        // The backend's `GpuInfo` has vendor/device/etc;
+                        // the gpu-module's `GpuInfo` only has
+                        // platform_name/device_name/compute_units. Bridge
+                        // the two so the existing detector call sites
+                        // (`g.info()`, `g.compute_dual(...)`) keep
+                        // working without a refactor.
+                        let legacy_info = crate::gpu::GpuInfo {
+                            platform_name: format!("{} ({})", info.backend, info.vendor),
+                            device_name: info.device.clone(),
+                            compute_units: info.compute_units,
+                        };
+                        Some(crate::gpu::GpuIntegral::from_backend(b, legacy_info))
+                    })
+                }
+            });
+        g.as_ref()
     }
 
     /// True when GPU is worth invoking for an image of this size. GPU kernel
