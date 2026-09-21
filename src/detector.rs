@@ -461,9 +461,131 @@ impl Detector {
                 }
             }
 
+            // Hoist the (threshold * N²) → f64 broadcast for the SIMD
+            // variance batch: 4 windows share the same constant, so it
+            // lives outside the hot loop and the 4-wide kernel only
+            // multiplies / subtracts the per-window (sum, sum_sq) pairs.
+            //
+            // The SIMD path uses f64 lane math, so it requires
+            // `threshold * n_sq < 2^53` (the largest exact f64 integer) —
+            // for any cascade window and the detector's documented
+            // thresholds (default 200, fast 300, accurate 100) the value
+            // is tiny (~5e7) so this always holds; pathological
+            // thresholds > 2^53 / 484² ≈ 1.9e13 fall back to the scalar
+            // tail, matching the wrapping-u64 semantics of
+            // `passes_variance_sums_fast` exactly.
+            //
+            // Heuristic: the SIMD batch processes 4 stride-spaced
+            // windows per iteration, so it only fires on levels where
+            // `stride == 1` AND `row_window_count >= 64` (i.e. enough
+            // windows on the row to amortise the per-batch fixed cost).
+            // Empirically — see benches/variance_prefilter.rs — the
+            // f64-lane SIMD variance decision is ~30% slower than the
+            // scalar u64 path on this workload (no native u64 mul in
+            // SSE2 / NEON, plus lane-extraction cost); the wins come
+            // from collapsing the branch + 4 scalar compares into a
+            // single bitmask compare, which only amortises on larger
+            // batches. The scalar path below is otherwise identical
+            // to the pre-SIMD detector.
+            let thr_n_sq_f64 = (thr as f64) * n_pixels_f64 * n_pixels_f64;
+            let thr_n_sq_safe_for_simd = thr_n_sq_f64 < (1u64 << 53) as f64;
+            let row_window_count = if cw >= win_w { cw - win_w + 1 } else { 0 };
+            let can_simd_batch = use_variance
+                && stride == 1
+                && thr_n_sq_safe_for_simd
+                && row_window_count >= 64;
             let mut y = 0;
             while y + win_h <= ch {
                 let mut x = 0;
+                if can_simd_batch {
+                    while x + win_w + 3 <= cw {
+                        let sums;
+                        let sum_sqs;
+                        // SAFETY: each window fits (x+i+win_w ≤ x+3+win_w ≤ cw)
+                        // by the loop guard, so the inner normrect fits too.
+                        unsafe {
+                            let read_pair = |xi: usize| -> (u64, u64) {
+                                let s = if ii_is_narrow {
+                                    ii.rect_sum_unchecked_narrow(
+                                        xi + 1,
+                                        y + 1,
+                                        xi + win_w - 1,
+                                        y + win_h - 1,
+                                    )
+                                } else {
+                                    ii.rect_sum_unchecked(
+                                        xi + 1,
+                                        y + 1,
+                                        xi + win_w - 1,
+                                        y + win_h - 1,
+                                    )
+                                };
+                                let ss = cache.sum_sq_rect_sum_unchecked(
+                                    xi + 1,
+                                    y + 1,
+                                    xi + win_w - 1,
+                                    y + win_h - 1,
+                                );
+                                (s, ss)
+                            };
+                            let (a, b) = read_pair(x);
+                            let (c, d) = read_pair(x + 1);
+                            let (e, f) = read_pair(x + 2);
+                            let (g, h) = read_pair(x + 3);
+                            sums = [a, c, e, g];
+                            sum_sqs = [b, d, f, h];
+                        }
+                        windows_evaluated += 4;
+                        let mask = SquaredIntegralImage::passes_variance_mask_4(
+                            sums, sum_sqs, n_pixels_f64, thr_n_sq_f64,
+                        );
+                        if mask != 0 {
+                            for i in 0..4usize {
+                                if mask & (1u32 << i) == 0 {
+                                    continue;
+                                }
+                                let xi = x + i;
+                                let s = sums[i];
+                                let ss = sum_sqs[i];
+                                let s_f = s as f64;
+                                let ss_f = ss as f64;
+                                let variance_part = n_pixels_f64.mul_add(ss_f, -s_f * s_f);
+                                if let Some(score) = self
+                                    .cascade
+                                    .classify_inbounds_with_variance_part(
+                                        &ii,
+                                        &ri,
+                                        xi,
+                                        y,
+                                        &mut cache,
+                                        variance_part,
+                                    )
+                                {
+                                    if score >= self.config.min_score {
+                                        let ox = (xi as f32 * scale_x).round() as usize;
+                                        let oy = (y as f32 * scale_y).round() as usize;
+                                        let ow = det_w_at_cur;
+                                        let oh = det_h_at_cur;
+                                        let ox = ox.min(img.width().saturating_sub(ow));
+                                        let oy = oy.min(img.height().saturating_sub(oh));
+                                        raw.push(Detection {
+                                            x: ox,
+                                            y: oy,
+                                            w: ow,
+                                            h: oh,
+                                            score,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        x += 4;
+                    }
+                }
+                // Scalar tail: anything that the SIMD batch can't reach
+                // (remaining < 4 windows on this row, or `stride > 1`, or
+                // the variance pre-filter disabled). Bit-identical to the
+                // pre-SIMD path.
                 while x + win_w <= cw {
                     windows_evaluated += 1;
                     // Variance pre-filter: cheap O(1) rejection of windows that
