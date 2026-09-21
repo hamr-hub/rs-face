@@ -253,7 +253,7 @@ metal = { version = "0.33", optional = true }
 # toolkit and NVIDIA driver at runtime; ``cudarc`` 0.12 wraps the driver
 # API + NVRTC just-in-time compiler. Off by default so the build stays
 # zero-dep on hosts without an NVIDIA stack.
-cudarc = { version = "0.12", optional = true }
+cudarc = { version = "0.12", optional = true, features = ["cuda-12060"] }
 
 # ---------------------------------------------------------------------------
 # ONNX inference backends (both optional; default build stays zero-dep).
