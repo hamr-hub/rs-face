@@ -238,6 +238,10 @@ required-features = ["detector-haar"]
 name = "video_id_e2e"
 required-features = ["video-id"]
 
+[[test]]
+name = "cross_algo_consistency"
+required-features = ["detector-haar", "detector-luminance"]
+
 [dependencies]
 
 # We intentionally keep ZERO runtime dependencies for the core library.
