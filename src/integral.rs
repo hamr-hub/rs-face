@@ -729,6 +729,61 @@ impl SquaredIntegralImage {
         let sum_part = sum * sum;
         sum_sq_part >= sum_part + variance_threshold * n_sq
     }
+
+    /// 4-wide SIMD batched variance pre-filter. Returns a 4-bit mask where
+    /// bit `i` is set iff window `i` passes the variance test — i.e.
+    /// `sum_sq_i * N - sum_i² >= variance_threshold * N²` — with the
+    /// exact same integer arithmetic as [`Self::passes_variance_sums_fast`]
+    /// (modulo f64↔u64 bit-equivalence for the intermediate products).
+    ///
+    /// `n_pixels_f64` and `thr_n_sq_f64` are precomputed by the caller once
+    /// per frame as `n_pixels as f64` and `(variance_threshold * n_sq) as f64`.
+    ///
+    /// # Float↔int equivalence
+    ///
+    /// The exact integer pre-filter test is `(sum_sq * N) − (sum²) ≥
+    /// threshold * N²`. Every intermediate product fits comfortably inside
+    /// 2⁵³ (the largest exact f64 integer): with `N ≤ 24² = 576` and
+    /// `sum_sq ≤ 22²·255² ≈ 3.15e7`, `sum_sq * N ≤ 1.82e10 < 2³⁴`. Same
+    /// for `sum² ≤ 1.5e10 < 2³⁴`. The constraint that matters is on
+    /// `thr_n_sq_f64`: it must be `< 2^53` for the comparison to be exact
+    /// in f64 lane math. The detector's default threshold (200) gives
+    /// `200 · 576² ≈ 6.6e7 < 2^26` — well inside the safe range. The
+    /// detector gates the SIMD path on this and falls back to the scalar
+    /// tail for pathological thresholds.
+    #[inline]
+    pub fn passes_variance_mask_4(
+        sum: [u64; 4],
+        sum_sq: [u64; 4],
+        n_pixels_f64: f64,
+        thr_n_sq_f64: f64,
+    ) -> u32 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: SSE2 baseline on x86_64; documented contract that the
+            // f64 ↔ u64 conversion is exact (see fn doc comment).
+            unsafe { variance_mask_4_x86_64(sum, sum_sq, n_pixels_f64, thr_n_sq_f64) }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            // SAFETY: NEON baseline on aarch64.
+            unsafe { variance_mask_4_aarch64(sum, sum_sq, n_pixels_f64, thr_n_sq_f64) }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            let _ = (sum, sum_sq, n_pixels_f64, thr_n_sq_f64);
+            // Scalar fallback — same accept/reject as the SIMD path.
+            let mut mask = 0u32;
+            for i in 0..4 {
+                if (sum_sq[i] as f64).mul_add(n_pixels_f64, -(sum[i] as f64).powi(2))
+                    >= thr_n_sq_f64
+                {
+                    mask |= 1 << i;
+                }
+            }
+            mask
+        }
+    }
 }
 
 impl Drop for SquaredIntegralImage {
@@ -1245,6 +1300,123 @@ fn add_assign_u64_dispatch(dst: &mut [u64], src: &[u64]) {
     }
 }
 
+// ---------------------------------------------------------------------------
+//   Variance pre-filter batch — 4×f64 lane math on SSE2 / NEON baseline
+// ---------------------------------------------------------------------------
+//
+// Computes the per-window Viola-Jones variance test
+//   `sum_sq * N - sum² >= threshold * N²`
+// for 4 windows in parallel, using f64 lane SIMD. The integer
+// intermediates (`sum_sq * N`, `sum²`, `threshold * N²`) all fit comfortably
+// in 2⁵³ (the largest exact f64 integer) — see the doc comment on
+// `SquaredIntegralImage::passes_variance_mask_4` — so the f64 arithmetic
+// produces the exact same accept/reject decision as the integer scalar
+// fallback.
+//
+// SSE2 / NEON are part of their respective baseline ABIs; the kernels
+// are pure `#[cfg(target_arch = "…")]` dispatch, no runtime detection.
+
+/// SSE2 implementation of [`SquaredIntegralImage::passes_variance_mask_4`].
+/// 4 f64 lanes packed as 2 × `__m128d`.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn variance_mask_4_x86_64(
+    sum: [u64; 4],
+    sum_sq: [u64; 4],
+    n_pixels_f64: f64,
+    thr_n_sq_f64: f64,
+) -> u32 {
+    use std::arch::x86_64::*;
+    // SAFETY: SSE2 baseline intrinsics; every intermediate is exact (see
+    // the fn doc on `passes_variance_mask_4`).
+    unsafe {
+        // Load 4 u64s as 2 lanes of 2 f64 each. Lane i holds `sum[i]`.
+        let s01 = _mm_castsi128_pd(_mm_set_epi64x(sum[1] as i64, sum[0] as i64));
+        let s23 = _mm_castsi128_pd(_mm_set_epi64x(sum[3] as i64, sum[2] as i64));
+        // Lane i holds `sum_sq[i]`.
+        let ss01 = _mm_castsi128_pd(_mm_set_epi64x(sum_sq[1] as i64, sum_sq[0] as i64));
+        let ss23 = _mm_castsi128_pd(_mm_set_epi64x(
+            sum_sq[3] as i64,
+            sum_sq[2] as i64,
+        ));
+        let n = _mm_set1_pd(n_pixels_f64);
+        let thr = _mm_set1_pd(thr_n_sq_f64);
+        // ss * N
+        let ss_n01 = _mm_mul_pd(ss01, n);
+        let ss_n23 = _mm_mul_pd(ss23, n);
+        // s²
+        let s_sq01 = _mm_mul_pd(s01, s01);
+        let s_sq23 = _mm_mul_pd(s23, s23);
+        // ss*N - s²
+        let var01 = _mm_sub_pd(ss_n01, s_sq01);
+        let var23 = _mm_sub_pd(ss_n23, s_sq23);
+        // >= thr*N² (NaN-safe via cmpge — NaN compares false, matching the
+        // scalar `>=` semantics on x86)
+        let cmp01 = _mm_cmpge_pd(var01, thr);
+        let cmp23 = _mm_cmpge_pd(var23, thr);
+        // _mm_movemask_pd packs each lane's sign bit into bits 0/1.
+        let lo = _mm_movemask_pd(cmp01) as u32;
+        let hi = _mm_movemask_pd(cmp23) as u32;
+        lo | (hi << 2)
+    }
+}
+
+/// NEON implementation of [`SquaredIntegralImage::passes_variance_mask_4`].
+/// 4 f64 lanes packed as 2 × `float64x2_t`. (NEON does not provide
+/// `vmulq_u64`, so the integer products are computed in f64 lane math —
+/// every intermediate is exact for the variance test's input range.)
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn variance_mask_4_aarch64(
+    sum: [u64; 4],
+    sum_sq: [u64; 4],
+    n_pixels_f64: f64,
+    thr_n_sq_f64: f64,
+) -> u32 {
+    use std::arch::aarch64::*;
+    // SAFETY: NEON baseline intrinsics; intermediates exact (see fn doc).
+    unsafe {
+        // Materialise the 4 u64s into 2 f64x2 vectors via a stack temp
+        // (NEON f64 vectors are not bit-castable from u64 vectors on all
+        // toolchains, so we go through f64 storage).
+        let mut s_buf = [
+            sum[0] as f64,
+            sum[1] as f64,
+            sum[2] as f64,
+            sum[3] as f64,
+        ];
+        let mut ss_buf = [
+            sum_sq[0] as f64,
+            sum_sq[1] as f64,
+            sum_sq[2] as f64,
+            sum_sq[3] as f64,
+        ];
+        let s01 = vld1q_f64(s_buf.as_ptr());
+        let s23 = vld1q_f64(s_buf.as_ptr().add(2));
+        let ss01 = vld1q_f64(ss_buf.as_ptr());
+        let ss23 = vld1q_f64(ss_buf.as_ptr().add(2));
+        let n = vdupq_n_f64(n_pixels_f64);
+        let thr = vdupq_n_f64(thr_n_sq_f64);
+        let ss_n01 = vmulq_f64(ss01, n);
+        let ss_n23 = vmulq_f64(ss23, n);
+        let s_sq01 = vmulq_f64(s01, s01);
+        let s_sq23 = vmulq_f64(s23, s23);
+        let var01 = vsubq_f64(ss_n01, s_sq01);
+        let var23 = vsubq_f64(ss_n23, s_sq23);
+        // `vcgeq_f64` returns a `uint64x2_t` mask where each lane is
+        // either `u64::MAX` (true) or `0` (false). The sign bit is the
+        // only distinguishing bit, so we can extract each lane's MSB
+        // directly: `vgetq_lane_u64` returns the u64, then mask with 1.
+        let cmp01 = vcgeq_f64(var01, thr);
+        let cmp23 = vcgeq_f64(var23, thr);
+        let b0 = (vgetq_lane_u64(cmp01, 0) & 1) as u32;
+        let b1 = (vgetq_lane_u64(cmp01, 1) & 1) as u32;
+        let b2 = (vgetq_lane_u64(cmp23, 0) & 1) as u32;
+        let b3 = (vgetq_lane_u64(cmp23, 1) & 1) as u32;
+        b0 | (b1 << 1) | (b2 << 2) | (b3 << 3)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1743,6 +1915,182 @@ mod tests {
                         "mismatch at ({x},{y}) thr={thr}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Bit-equivalence: the 4-wide SIMD variance pre-filter must agree
+    /// with the scalar `passes_variance_sums_fast` for every window in the
+    /// 640×480 sweep, across 5 deterministic patterns and a thorough
+    /// threshold sweep. A divergence here means the SIMD lane math is
+    /// taking a different branch than production; a near-miss (off-by-one
+    /// on a zero-variance window, say) would silently shift the cascade's
+    /// accept/reject set and break the demo cascade's detections.
+    #[test]
+    fn variance_prefilter_mask_4_matches_scalar() {
+        // 5 deterministic patterns: LCG + constant + alternating stripes +
+        // a centered-face-like bright blob + a uniform background with
+        // a single small perturbation. They span the spectrum of
+        // `sum`/`sum_sq` distributions the detector sees in practice.
+        let mut all_ok = true;
+        let mut run = |label: &str, img: GrayImage| {
+            let ii = IntegralImage::from_gray(&img);
+            let sq = SquaredIntegralImage::from_gray(&img);
+            let win_w = 24usize;
+            let win_h = 24usize;
+            let nw_norm = win_w - 2;
+            let nh_norm = win_h - 2;
+            let n_pixels = (nw_norm * nh_norm) as u64;
+            let n_pixels_sq = n_pixels * n_pixels;
+            // Thresholds across the spectrum: every-window-pass (0),
+            // every-window-fail (u64::MAX/4), and the production default (200).
+            for thr in [0u64, 200, 10_000] {
+                let n_f64 = n_pixels as f64;
+                let thr_n_sq_f64 = (thr as f64) * (n_pixels_sq as f64);
+                let mut windows_compared = 0usize;
+                let mut mismatches: Vec<(usize, usize, u32, u32)> = Vec::new();
+                let mut x = 0usize;
+                while x + win_w <= ii.width() {
+                    let mut y = 0usize;
+                    while y + win_h <= ii.height() {
+                        // Read 4 windows in x (stride = 1 for the test sweep
+                        // to maximise coverage of corner overlaps).
+                        let mut sums = [0u64; 4];
+                        let mut sum_sqs = [0u64; 4];
+                        for k in 0..4 {
+                            let xk = x + k;
+                            if xk + win_w <= ii.width() {
+                                sums[k] = ii.rect_sum(xk, y, xk + win_w, y + win_h);
+                                sum_sqs[k] = sq.rect_sum_sq(xk, y, xk + win_w, y + win_h);
+                            }
+                        }
+                        let mask_simd = SquaredIntegralImage::passes_variance_mask_4(
+                            sums, sum_sqs, n_f64, thr_n_sq_f64,
+                        );
+                        let mut mask_scalar = 0u32;
+                        for k in 0..4 {
+                            let s = sums[k];
+                            let ss = sum_sqs[k];
+                            let pass = SquaredIntegralImage::passes_variance_sums_fast(
+                                s, ss, n_pixels, n_pixels_sq, thr,
+                            );
+                            if pass {
+                                mask_scalar |= 1 << k;
+                            }
+                        }
+                        if mask_simd != mask_scalar {
+                            mismatches.push((x, y, mask_simd, mask_scalar));
+                        }
+                        windows_compared += 4;
+                        y += 1;
+                    }
+                    x += 1;
+                }
+                if !mismatches.is_empty() {
+                    eprintln!(
+                            "[{label} thr={thr}] {} mismatches out of {windows_compared} windows; first: {:?}",
+                            mismatches.len(),
+                            mismatches[0]
+                        );
+                    all_ok = false;
+                }
+                assert!(windows_compared > 0, "sweep produced zero windows");
+            }
+        };
+        run("lcg", lcg_image(640, 480));
+        let mut constant_img = GrayImage::new(640, 480);
+        constant_img.as_mut_slice().fill(128);
+        run("constant", constant_img);
+        let mut stripes_img = GrayImage::new(640, 480);
+        for y in 0..480 {
+            for x in 0..640 {
+                stripes_img[(x, y)] = if ((x / 4) + (y / 4)) & 1 == 0 { 20 } else { 230 };
+            }
+        }
+        run("stripes", stripes_img);
+        let mut blob_img = GrayImage::new(640, 480);
+        for y in 0..480 {
+            for x in 0..640 {
+                let d =
+                    ((x as f32 - 320.0).powi(2) + (y as f32 - 240.0).powi(2)).sqrt();
+                blob_img[(x, y)] = if d < 80.0 { 220 } else { 30 };
+            }
+        }
+        run("bright_blob", blob_img);
+        let mut near_const_img = GrayImage::new(640, 480);
+        near_const_img.as_mut_slice().fill(50);
+        for y in 200..240 {
+            for x in 280..360 {
+                near_const_img[(x, y)] = 250;
+            }
+        }
+        run("near_constant_with_blob", near_const_img);
+        assert!(all_ok, "variance mask disagreement — see eprintln above");
+    }
+
+    /// Random-input equivalence to guard against LCG-pattern-specific
+    /// coincidences. Runs 30 distinct LCG seeds × 4 thresholds on the
+    /// 640×480 sweep; any divergence fails the test.
+    #[test]
+    fn variance_prefilter_mask_4_random_patterns() {
+        let win_w = 24usize;
+        let win_h = 24usize;
+        let nw_norm = win_w - 2;
+        let nh_norm = win_h - 2;
+        let n_pixels = (nw_norm * nh_norm) as u64;
+        let n_pixels_sq = n_pixels * n_pixels;
+        for seed in 0u32..30 {
+            let mut img = GrayImage::new(640, 480);
+            let mut s = seed.wrapping_mul(0x9E37_79B9).wrapping_add(0x1234_5678);
+            for v in img.as_mut_slice().iter_mut() {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *v = (s >> 24) as u8;
+            }
+            let ii = IntegralImage::from_gray(&img);
+            let sq = SquaredIntegralImage::from_gray(&img);
+            for &thr in &[0u64, 200, 10_000] {
+                let n_f64 = n_pixels as f64;
+                let thr_n_sq_f64 = (thr as f64) * (n_pixels_sq as f64);
+                let mut bad = 0usize;
+                let mut x = 0usize;
+                while x + win_w <= ii.width() {
+                    let mut y = 0usize;
+                    while y + win_h <= ii.height() {
+                        let mut sums = [0u64; 4];
+                        let mut sum_sqs = [0u64; 4];
+                        for k in 0..4 {
+                            let xk = x + k;
+                            if xk + win_w <= ii.width() {
+                                sums[k] = ii.rect_sum(xk, y, xk + win_w, y + win_h);
+                                sum_sqs[k] = sq.rect_sum_sq(xk, y, xk + win_w, y + win_h);
+                            }
+                        }
+                        let mask_simd = SquaredIntegralImage::passes_variance_mask_4(
+                            sums, sum_sqs, n_f64, thr_n_sq_f64,
+                        );
+                        let mut mask_scalar = 0u32;
+                        for k in 0..4 {
+                            let s = sums[k];
+                            let ss = sum_sqs[k];
+                            let pass = SquaredIntegralImage::passes_variance_sums_fast(
+                                s, ss, n_pixels, n_pixels_sq, thr,
+                            );
+                            if pass {
+                                mask_scalar |= 1 << k;
+                            }
+                        }
+                        if mask_simd != mask_scalar {
+                            bad += 1;
+                        }
+                        y += 1;
+                    }
+                    x += 1;
+                }
+                assert_eq!(
+                    bad, 0,
+                    "seed={seed} thr={thr}: {bad} 4-tuples disagree (out of {} windows)",
+                    (ii.width() - win_w + 1) * (ii.height() - win_h + 1) / 4,
+                );
             }
         }
     }

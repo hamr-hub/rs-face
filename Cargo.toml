@@ -139,6 +139,12 @@ path = "benches/perf_simd.rs"
 harness = false
 required-features = ["detector-haar"]
 
+[[bench]]
+name = "variance_prefilter"
+path = "benches/variance_prefilter.rs"
+harness = false
+required-features = ["detector-haar"]
+
 [[bin]]
 name = "bench-accuracy"
 path = "benches/accuracy.rs"
