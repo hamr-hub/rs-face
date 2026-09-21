@@ -149,6 +149,7 @@ pub fn demo_face_cascade() -> Cascade {
     c.stages.push(Stage {
         stage_threshold: 0.5,
         effective_threshold: 0.5,
+        feature_indices: None,
         weak_features: vec![WeakFeature {
             feature_index: i_vc as u32,
             threshold: 0.0,
@@ -162,6 +163,7 @@ pub fn demo_face_cascade() -> Cascade {
     c.stages.push(Stage {
         stage_threshold: 0.5,
         effective_threshold: 0.5,
+        feature_indices: None,
         weak_features: vec![WeakFeature {
             feature_index: i_hc as u32,
             threshold: 0.0,
@@ -175,6 +177,7 @@ pub fn demo_face_cascade() -> Cascade {
     c.stages.push(Stage {
         stage_threshold: -1.0,
         effective_threshold: -1.0,
+        feature_indices: None,
         weak_features: vec![WeakFeature {
             feature_index: i_eye as u32,
             threshold: 0.0,
@@ -188,6 +191,7 @@ pub fn demo_face_cascade() -> Cascade {
     c.stages.push(Stage {
         stage_threshold: -1.0,
         effective_threshold: -1.0,
+        feature_indices: None,
         weak_features: vec![WeakFeature {
             feature_index: i_ve as u32,
             threshold: 0.0,
@@ -201,6 +205,7 @@ pub fn demo_face_cascade() -> Cascade {
     c.stages.push(Stage {
         stage_threshold: -1.0,
         effective_threshold: -1.0,
+        feature_indices: None,
         weak_features: vec![WeakFeature {
             feature_index: i_nose as u32,
             threshold: 0.0,
@@ -214,6 +219,7 @@ pub fn demo_face_cascade() -> Cascade {
     c.stages.push(Stage {
         stage_threshold: -1.0,
         effective_threshold: -1.0,
+        feature_indices: None,
         weak_features: vec![WeakFeature {
             feature_index: i_tb as u32,
             threshold: 0.0,
@@ -229,6 +235,7 @@ pub fn demo_face_cascade() -> Cascade {
     c.stages.push(Stage {
         stage_threshold: -1.0,
         effective_threshold: -1.0,
+        feature_indices: None,
         weak_features: vec![WeakFeature {
             feature_index: i_lr as u32,
             threshold: 0.01,
@@ -242,6 +249,7 @@ pub fn demo_face_cascade() -> Cascade {
     c.stages.push(Stage {
         stage_threshold: -0.5,
         effective_threshold: -0.5,
+        feature_indices: None,
         weak_features: vec![
             WeakFeature {
                 feature_index: i_ve as u32,
@@ -260,6 +268,11 @@ pub fn demo_face_cascade() -> Cascade {
         ],
     });
 
+    // Resolve weak feature indices to direct feature pointers so the
+    // cascade's inner loop can skip the Vec lookup per weak feature.
+    // `recompute_effective_thresholds` is called too, since the constructor
+    // builds stages with `effective_threshold = stage_threshold` already.
+    c.finalize();
     c
 }
 

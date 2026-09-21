@@ -837,6 +837,7 @@ mod tests {
         c.stages.push(crate::haar::Stage {
             stage_threshold: -10.0,
             effective_threshold: -10.0,
+            feature_indices: None,
             weak_features: vec![crate::haar::WeakFeature {
                 feature_index: idx,
                 threshold: 0.0,

@@ -30,6 +30,13 @@ pub struct WeakFeature {
 /// removes one f32 add per stage per window from the inner loop — at ~50k
 /// windows × 25 stages that's 1.25M saves/frame and is what the previous
 /// 130 → <80 ms sprint targeted.
+///
+/// `feature_indices` is a parallel array of `usize` indices into the
+/// owning cascade's `features` table, indexed by the corresponding entry
+/// in `weak_features`. Populated by [`Cascade::finalize`] (called by the
+/// load path); the cascade's inner loop walks it instead of doing
+/// `self.features[w.feature_index as usize]` per weak feature per window
+/// — eliminates one Vec indexing + bounds check from the hottest path.
 #[derive(Clone, Debug)]
 pub struct Stage {
     pub stage_threshold: f32,
@@ -38,6 +45,24 @@ pub struct Stage {
     /// loop uses this directly instead of recomputing the sum every window.
     pub effective_threshold: f32,
     pub weak_features: Vec<WeakFeature>,
+    /// Pre-resolved indices into `self.features`, parallel to
+    /// `weak_features` — `feature_refs[i]` equals
+    /// `weak_features[i].feature_index as usize`. Stored as `usize` rather
+    /// than `*const HaarFeature` so the Cascade stays `Send + Sync`
+    /// (raw pointers are neither, and Detectors are shipped across worker
+    /// threads in the pipeline). The inner loop reads the cached index
+    /// instead of loading it from `weak_features[i].feature_index` each
+    /// window, saving a `u32` field load + a `usize` cast per weak feature
+    /// per window — at ~50k windows × ~9 features/stage × 25 stages that
+    /// adds up.
+    ///
+    /// `None` until [`Cascade::finalize`] (or the load-time equivalent)
+    /// has run — the inner loop falls back to the indirect path while
+    /// constructing a cascade programmatically. Stored indices become
+    /// stale if `Cascade::features` is mutated after finalization; that
+    /// path is only used at construction time, so the invariant holds in
+    /// practice.
+    pub(crate) feature_indices: Option<Vec<usize>>,
 }
 
 /// The full classifier = flat feature table + ordered stages.
@@ -592,11 +617,33 @@ impl Cascade {
     ) -> Option<f32> {
         for stage in &self.stages {
             let mut stage_sum: f32 = 0.0;
-            for w in &stage.weak_features {
+            // Walk the per-stage pre-resolved feature-pointer array in
+            // parallel with `weak_features`. Each pointer is the cascade's
+            // own `&HaarFeature` for that index, populated once by
+            // `finalize`. The Vec lookup `self.features[w.feature_index]`
+            // is therefore paid once per weak feature at load time, not
+            // per weak feature per window.
+            //
+            // Fallback: if `feature_indices` is `None` (cascade still under
+            // construction), resolve through `self.features` directly.
+            let feature_indices = stage.feature_indices.as_deref();
+            for (i, w) in stage.weak_features.iter().enumerate() {
+                let f_idx: usize = match feature_indices {
+                    Some(idxs) => {
+                        // SAFETY: finalize() populated `idxs` for every
+                        // weak feature in this stage; `i` is in-bounds
+                        // by construction. The index is valid for
+                        // `self.features` (validated at parse / finalize
+                        // time).
+                        unsafe { *idxs.get_unchecked(i) }
+                    }
+                    None => w.feature_index as usize,
+                };
+                let f: &HaarFeature = &self.features[f_idx];
                 let raw = if inbounds {
                     cache.get_or_eval_inbounds(
-                        w.feature_index as usize,
-                        &self.features[w.feature_index as usize],
+                        f_idx,
+                        f,
                         ii,
                         ri,
                         x,
@@ -609,7 +656,7 @@ impl Cascade {
                 } else {
                     cache.get_or_eval(
                         w.feature_index as usize,
-                        &self.features[w.feature_index as usize],
+                        f,
                         ii,
                         ri,
                         x,
@@ -804,15 +851,56 @@ impl Cascade {
                 // it.
                 effective_threshold: stage_threshold,
                 weak_features,
+                // Populated for every stage by `finalize()` after all
+                // features + stages are loaded — the load loop itself is
+                // only walking bytes, so it's a cleaner separation to leave
+                // `None` here and finalize once.
+                feature_indices: None,
             });
         }
-        Ok(Self {
+        let _ = version;
+        let mut cascade = Self {
             window_w: ww,
             window_h: wh,
             features,
             stages,
             stage_bias: 0.0,
-        })
+        };
+        // Populate the per-stage feature pointer cache so the inner loop
+        // can skip `self.features[w.feature_index as usize]` per weak
+        // feature per window. Idempotent for a freshly-built cascade.
+        cascade.finalize();
+        Ok(cascade)
+    }
+}
+
+/// Cascade-wide maintenance helpers. Both [`Cascade::finalize`] and
+/// [`Cascade::recompute_effective_thresholds`] must be called after any
+/// construction or `stage_bias` change — the inner loop assumes both
+/// per-stage caches are current.
+impl Cascade {
+    /// Resolve each weak feature's `feature_index` to a cached `usize`
+    /// parallel to `weak_features`, then recompute `effective_threshold`
+    /// for every stage. Called once at the end of the load path and at the
+    /// end of programmatic construction (e.g. `demo_face_cascade`);
+    /// subsequent `stage_bias` changes only need
+    /// `recompute_effective_thresholds`.
+    pub fn finalize(&mut self) {
+        for stage in &mut self.stages {
+            // Build the parallel `Vec<usize>` of feature indices. Stored
+            // as `usize` (not raw pointers) so Cascade remains Send + Sync.
+            let mut idxs: Vec<usize> =
+                Vec::with_capacity(stage.weak_features.len());
+            for w in &stage.weak_features {
+                // feature_index was either loaded from a validated .rfcf
+                // stream (checked at parse time) or supplied by
+                // programmatic construction, where the same invariant
+                // holds: every weak feature's index is in bounds.
+                idxs.push(w.feature_index as usize);
+            }
+            stage.feature_indices = Some(idxs);
+        }
+        self.recompute_effective_thresholds();
     }
 }
 
