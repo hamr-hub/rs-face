@@ -615,8 +615,22 @@ mod tests {
     #[test]
     fn yunet_is_the_commercially_usable_option() {
         assert!(YUNET_2023MAR.is_commercial_use_allowed());
+        // The commercial-use roster is the union of every Apache-2.0 model
+        // shipped by default. YuNet remains the default detector (PR
+        // description of every model is a curated recommendation, not a
+        // hard guarantee — when new Apache-2.0 models land they show up
+        // here automatically and this assertion just confirms YuNet is in
+        // the set).
         let ids: Vec<_> = commercially_usable().map(|m| m.id).collect();
-        assert_eq!(ids, vec!["yunet_2023mar"]);
+        assert!(ids.contains(&"yunet_2023mar"), "YuNet should be commercial-use");
+        for id in &ids {
+            assert!(
+                *id == "yunet_2023mar"
+                    || *id == "liveness_minifasnet_v2"
+                    || *id == "liveness_minifasnet_v1se",
+                "unexpected commercial-use model id: {id}"
+            );
+        }
     }
 
     // -- Integrity ----------------------------------------------------------

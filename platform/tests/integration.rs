@@ -72,6 +72,7 @@ async fn boot_server() -> Option<(String, tokio::sync::oneshot::Sender<()>)> {
         started_at: std::time::Instant::now(),
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         gallery_cache: std::sync::Mutex::new(None),
+        gallery: std::sync::Arc::new(rsface_platform::gallery::GalleryState::empty_for_tests(42, Default::default())),
     });
     let caches = api::ResponseCaches {
         config_json: std::sync::Arc::new(TtlCache::new("cfg", Duration::from_secs(3600))),
@@ -445,6 +446,7 @@ async fn boot_registry_for_test() -> (
         started_at: std::time::Instant::now(),
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         gallery_cache: std::sync::Mutex::new(None),
+        gallery: std::sync::Arc::new(rsface_platform::gallery::GalleryState::empty_for_tests(42, Default::default())),
     });
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let shutdown_flag = reg.shutdown.clone();
