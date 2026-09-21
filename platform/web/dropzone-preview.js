@@ -5,6 +5,8 @@
  *    缩略图(仅图)+ 文件数 + 总大小 + 头几个文件名
  *  - "✕ 清空" 按钮重置文件 input 并隐藏预览
  *  - 不改变原有"选完即上传"的自动提交行为 — 预览只是给用户一个确认机会
+ *  - 新增(目录拖入):DataTransferItem.webkitGetAsEntry() 检测目录,
+ *    递归 walk 目录树,筛出图片文件,返回给调用者(enqueue 到 upload-queue)
  *
  * DOM 节点(在 index.html 里已就绪):
  *   #dz-image-preview         图片 dropzone 的预览行(带 .dz-preview-thumb)
@@ -18,6 +20,14 @@ const dropzonePreview = (() => {
   const els = { img: null, vid: null };
   let _initialized = false;
   let _lastImgDataUrl = null;
+
+  // ---- 图片白名单:扩展名 + MIME ----
+  const IMG_EXTS = /\.(jpe?g|png|pgm|ppm|bmp|webp|tiff?)$/i;
+  function isImageFile(file) {
+    if (!file) return false;
+    if (file.type && /^image\//.test(file.type)) return true;
+    return IMG_EXTS.test(file.name || '');
+  }
 
   function init() {
     if (_initialized) return;
@@ -143,7 +153,135 @@ const dropzonePreview = (() => {
     return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
   }
 
-  return { init, renderImage, renderVideo, clearAll };
+  // ===========================================================================
+  // 目录拖入支持(DataTransferItem.webkitGetAsEntry + 递归 walk)
+  // 设计目标:
+  //  - 单个文件:走老路径,files 列表给到调用者
+  //  - 目录:递归 walk,把里面的图片文件全部收集成 [{ file, path }]
+  //  - 跨浏览器:Chrome/Edge/Safari 都实现 webkitGetAsEntry;Firefox 通过
+  //    DataTransfer.files 也能拿到顶层文件(只是拿不到目录结构),这种情况
+  //    collectFromDataTransfer 退化为"扁平文件过滤"
+  // ===========================================================================
+
+  /**
+   * 递归 walk 一个 FileSystemEntry。
+   * @param {FileSystemEntry} entry
+   * @param {(file: File, path: string) => void} onFile
+   * @returns {Promise<void>}
+   */
+  function walkFolder(entry, onFile) {
+    return new Promise((resolve) => {
+      if (!entry) return resolve();
+      if (entry.isFile) {
+        entry.file(
+          (file) => {
+            try { onFile(file, entry.fullPath || file.name); } catch (e) {}
+            resolve();
+          },
+          () => resolve(), // 单个文件读失败,跳过
+        );
+        return;
+      }
+      if (!entry.isDirectory) return resolve();
+      // 目录:用 createReader 分批读 entries(createReader.readEntries 一次只能
+      // 拿到 ~100 项,需要循环直到空)
+      const reader = entry.createReader();
+      let pending = 1;
+      const finish = () => { if (--pending === 0) resolve(); };
+      const readBatch = () => {
+        reader.readEntries(
+          (entries) => {
+            if (!entries || !entries.length) { finish(); return; }
+            pending += entries.length;
+            for (const e of entries) {
+              walkFolder(e, onFile).then(finish, finish);
+            }
+            // 浏览器实现里 readEntries 在仍有更多项时会再次调用;这里保守地
+            // 再读一次直到空(浏览器会保证 readEntries 返回 [] 终止)。
+            if (entries.length > 0) readBatch();
+          },
+          () => finish(),
+        );
+      };
+      readBatch();
+    });
+  }
+
+  /**
+   * 从 DataTransfer 收集图片文件。
+   * - 顶层 items 中有目录 → 递归 walk,过滤出图片
+   * - 顶层 items 中只有文件 → 直接 getAsFile() + 过滤
+   * - 浏览器不支持 webkitGetAsEntry → 退回 DataTransfer.files(扁平)
+   * @param {DataTransfer} dt
+   * @param {{accept?: (file: File) => boolean, onProgress?: (done: number, total: number) => void}} [opts]
+   * @returns {Promise<{ file: File, path: string }[]>}
+   */
+  async function collectFromDataTransfer(dt, opts) {
+    const accept = (opts && opts.accept) || isImageFile;
+    const onProgress = (opts && opts.onProgress) || (() => {});
+    const items = (dt && dt.items) ? Array.from(dt.items) : [];
+    const files = [];
+    let walked = 0;
+    let walkedTotal = items.length || 0;
+
+    if (items.length && typeof items[0].webkitGetAsEntry === 'function') {
+      const promises = [];
+      for (const item of items) {
+        if (item.kind !== 'file') continue;
+        const entry = item.webkitGetAsEntry();
+        if (entry && entry.isDirectory) {
+          promises.push(walkFolder(entry, (file, path) => {
+            if (accept(file)) files.push({ file, path });
+            walked++;
+            onProgress(walked, walkedTotal);
+          }));
+        } else {
+          const file = item.getAsFile();
+          if (file) {
+            if (accept(file)) files.push({ file, path: file.name });
+            walked++;
+            onProgress(walked, walkedTotal);
+          }
+        }
+      }
+      await Promise.all(promises);
+      return files;
+    }
+
+    // Fallback:扁平 files(老浏览器或 Firefox)。DataTransfer.files 不包含
+    // 目录条目(浏览器自己会跳过),所以目录拖入在这种情况下等于"用户拖进来
+    // 一个看不见的容器,什么都拿不到"。这里至少处理顶层文件。
+    if (dt && dt.files) {
+      const arr = Array.from(dt.files);
+      for (let i = 0; i < arr.length; i++) {
+        const f = arr[i];
+        if (accept(f)) files.push({ file: f, path: f.name });
+        onProgress(i + 1, arr.length);
+      }
+    }
+    return files;
+  }
+
+  /** 暴露的便利函数:walk 一个 entry 并只保留图片。 */
+  async function walkImageFolder(entry) {
+    const out = [];
+    await walkFolder(entry, (file, path) => {
+      if (isImageFile(file)) out.push({ file, path });
+    });
+    return out;
+  }
+
+  return {
+    init,
+    renderImage,
+    renderVideo,
+    clearAll,
+    // 目录拖入 API(新增)
+    isImageFile,
+    walkFolder,
+    walkImageFolder,
+    collectFromDataTransfer,
+  };
 })();
 
 // DOMContentLoaded 后初始化;index.html 里 defer 保证 DOM 已就绪。
