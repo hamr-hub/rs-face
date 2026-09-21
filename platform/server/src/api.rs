@@ -789,7 +789,9 @@ async fn compare_algos(
     // 2) 拿到 job 对应的原始媒体字节(S3 优先,失败回退到 local media dir)。
     let job = match state.get(&id) {
         Some(j) => j,
-        None => return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None),
+        None => {
+            return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None)
+        }
     };
     let media_key = job
         .original_media_key
@@ -1198,7 +1200,12 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         if let Some(p) = staged_path {
             let _ = tokio::fs::remove_file(p).await;
         }
-        return error_response_with(StatusCode::BAD_REQUEST, "missing_field", "missing 'file' field", None);
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            "missing_field",
+            "missing 'file' field",
+            None,
+        );
     };
     let Some(staged) = staged_path else {
         return error_response(StatusCode::BAD_REQUEST, "empty upload");
@@ -2508,35 +2515,58 @@ async fn import_video_url(
 
     // 用 ffmpeg 拉视频:放到工作目录里(不立刻落 S3 — 让 run_job 落,失败时
     // 工作目录会被 finalize 清理)。这一步同步等,失败立即回 400,避免建空 job。
+    //
+    // 重试策略(2026-09-21 加):远端 fetch 可能因瞬时网络抖动 /
+    // CDN 边缘节点 5xx / ffmpeg 子进程偶发崩溃而失败。每次失败 sleep 1s/2s/4s
+    // 后重试,最多 3 次(`max_attempts`);最后一次仍失败才标 502。
+    // 临时文件 `input.mp4` 在重试之间清掉,防止上一次写到一半的残留下次被 ffmpeg
+    // 误读(它默认 -y 覆盖,但 0 字节文件 + EOF 有时会让 ffmpeg 立即退出)。
     let work_dir = state.cfg.tmp_dir.join(&id);
     if let Err(e) = std::fs::create_dir_all(&work_dir) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("tmp dir: {e}"));
     }
-    let (path, size) = match tokio::task::spawn_blocking({
-        let url = url.clone();
-        let work = work_dir.clone();
-        // 中 #4:把视频上限字节传给 ffmpeg `-fs`,防止无尽 HLS / 直播源
-        // 把 tmp 磁盘灌满 + 占死一个并发槽位。沿用上传大小限制做默认值。
+    const MAX_FETCH_ATTEMPTS: u32 = 3;
+    // 第一次失败等 1s,第二次 2s,第三次 4s(指数 backoff)。
+    const BACKOFFS_SECS: [u64; (MAX_FETCH_ATTEMPTS - 1) as usize] = [1, 2];
+    let mut attempt: u32 = 0;
+    let (path, size) = loop {
+        attempt += 1;
         let max_bytes = state.cfg.video_limit_bytes;
-        move || fetch_remote_video_to_local(&url, &work, max_bytes)
-    })
-    .await
-    {
-        Ok(Ok(p)) => p,
-        Ok(Err(e)) => {
-            // 创建了 job 但拉取失败,不进入 run_job:回退 queued 计数,并清理
-            // 可能残留了部分 input.mp4 的工作目录(此路径 run_job/finalize 不会执行)。
-            discard_created_job(&state, &id);
-            let _ = std::fs::remove_dir_all(&work_dir);
-            return error_response(StatusCode::BAD_GATEWAY, &format!("fetch remote video: {e}"));
-        }
-        Err(e) => {
-            discard_created_job(&state, &id);
-            let _ = std::fs::remove_dir_all(&work_dir);
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("fetch join: {e}"),
-            );
+        let fetch_result = tokio::task::spawn_blocking({
+            let url = url.clone();
+            let work = work_dir.clone();
+            move || fetch_remote_video_to_local(&url, &work, max_bytes)
+        })
+        .await;
+        match fetch_result {
+            Ok(Ok((p, s))) => break (p, s),
+            Ok(Err(e)) if attempt < MAX_FETCH_ATTEMPTS => {
+                // 清掉上次失败可能留下的 input.mp4(部分写入 / 0 字节)
+                let leftover = work_dir.join("input.mp4");
+                let _ = std::fs::remove_file(&leftover);
+                let wait_secs = BACKOFFS_SECS[(attempt - 1) as usize];
+                tracing::warn!(
+                    "[import] fetch attempt {attempt}/{MAX_FETCH_ATTEMPTS} failed: {e}; retrying in {wait_secs}s"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                continue;
+            }
+            Ok(Err(e)) => {
+                discard_created_job(&state, &id);
+                let _ = std::fs::remove_dir_all(&work_dir);
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("fetch remote video (after {attempt} attempts): {e}"),
+                );
+            }
+            Err(e) => {
+                discard_created_job(&state, &id);
+                let _ = std::fs::remove_dir_all(&work_dir);
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("fetch join: {e}"),
+                );
+            }
         }
     };
 
