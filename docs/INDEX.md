@@ -38,6 +38,9 @@ Recognition (zero-dep, no external weights):
 Detection (zero-dep):
 
 - [`docs/algorithms.md`](algorithms.md) — algorithm-by-algorithm breakdown of every detector the CLI accepts, weights requirements, and known limitations.
+- [`src/skin_face.rs`](../src/skin_face.rs) (module doc) — **skin-tone luminance band + morphology + connected-components** detector. Single-scale, no weights; the cheapest detector in the crate and orthogonal to every gradient-based one (foliage / brick walls score zero, soft-lit portraits still light up). Reachable via `--algo skin`.
+- [`src/lbp_face.rs`](../src/lbp_face.rs) (module doc) — **uniform-LBP 59-bin histogram + chi-squared face-prior** detector. Multi-scale sliding window, no weights; fires on local texture (eye-corner corners, mouth-line edges) that Haar can miss on flat-lit faces. Reachable via `--algo lbp`.
+- [`src/hog_face.rs`](../src/hog_face.rs) (module doc) — **Dalal-Triggs HOG + hand-built face template** detector. 8×8 cells, 2×2 blocks, 9 orientation bins; descriptor dot-product against a hand-coded face template. Multi-scale sliding window. Reachable via `--algo hog`.
 
 Detection (ONNX, opt-in via `ort-backend` or `tract-backend`):
 

@@ -49,6 +49,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   images, zero-width/zero-height images, and bit depths other than 8 now
   return descriptive errors instead of decoded garbage.
 
+### Added — three new zero-dep face detectors (`--algo skin|lbp|hog`)
+- **`src/skin_face.rs`** — skin-tone luminance band `[60, 195)`
+  thresholding + 3×3 morphological opening (erode then dilate) +
+  4-connectivity flood fill, filtered by component size, aspect
+  ratio, and density. Single-scale, no weights; the fastest
+  detector in the crate. Public helpers `skin_mask`, `opening`,
+  `components` for upstream reuse.
+- **`src/lbp_face.rs`** — uniform-LBP (Dalal-Ojala, 59 bins) per
+  24–128 px window, chi-squared distance from a hand-coded
+  face-prior histogram. Multi-scale sliding window with a 1.25×
+  pyramid.
+- **`src/hog_face.rs`** — Dalal-Triggs HOG with 8×8 cells, 2×2
+  blocks, 9 signed orientation bins, 0.2 block clip, and L2-norm
+  re-normalisation. Descriptor (1764 features for the canonical
+  64×64 window) is dot-producted against a hand-coded face
+  template.
+- **CLI**: `--algo skin|lbp|hog` routes each frame through the
+  shared `run_with_detector` driver so the multi-frame pipeline
+  shape (annotated PNGs + manifest.json) is identical to the
+  existing haar/cnn/luminance paths. `--list-algos` and
+  `print_help` advertise the new tags.
+- **Ensemble**: each new source plugs into `ensemble::fuse` with
+  the standard `TaggedDetection` interface. The fuser's
+  complementary-failure-modes doc now lists all six detectors
+  (haar, luminance, cnn, skin, lbp, hog).
+- **Tests**: 13 new lib tests across the three modules
+  (no_panic on empty / uniform / tiny inputs, descriptor-length
+  math, gradient magnitude on synthetic edges, face-prior
+  non-zero coverage, chi² score ordering, etc.). Plus 2 new
+  ensemble tests covering 4-way clustering of all new detectors
+  + source-weights override on the new tags.
+- `cargo test --lib`: **232 passed**, 1 ignored (was 230, +2
+  ensemble). Zero-dep build (`cargo build --no-default-features
+  --lib`) still passes unchanged.
 
 ### Added — multi-algorithm ensemble fuser
 - **`src/ensemble.rs`** — `TaggedDetection` + `fuse()` greedy cluster

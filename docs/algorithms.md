@@ -17,6 +17,7 @@ this document for the per-algorithm detail.
 | Frontal portrait, controlled lighting, no downloads | `haar` + OpenCV `.xml` converted to `.rfcf` | `--algo haar --cascade haarcascade.rfcf` |
 | Variable face sizes (drama / Reels / vertical video) | `haar` + coarser pyramid | `--algo haar --scale 1.4 --stride 3 --only-with-face` |
 | Zero-weight detector for an in-process test | `luminance` | `--algo luminance` |
+| Cheap recall floor, orthogonal to gradient detectors | `skin` / `lbp` / `hog` | `--algo skin` / `--algo lbp` / `--algo hog` |
 | Real accuracy on unconstrained faces | `scrfd` (ONNX) | `--features ort-backend --algo scrfd` |
 | Pure Rust industrial accuracy, no C++ runtime | `scrfd` via tract | `--features tract-backend --algo scrfd` |
 | Recognise identities with zero downloads | `lbph` / `eigenface` / `fisherface` | use `rsface::lbph::LbphRecognizer` / `rsface::eigenface::EigenfaceRecognizer` / `rsface::fisherface::FisherfaceRecognizer` |
@@ -29,6 +30,9 @@ this document for the per-algorithm detail.
 | `haar` | optional `.rfcf` cascade (zero-dep bundled demo) | Production | real-face drama clips (benchmarks) | ~4 KB cascade + libm | ✅ |
 | `luminance` | none | Production | synthetic + drama (benchmarks) | libm only | ✅ |
 | `cnn` | none external — starter weights built in, retrainable via `cargo run --bin cnn_train` | **Experimental** | n/a (hand-crafted starter weights; not independently benchmarked) | ~few KB | ✅ |
+| `skin` | none | **Experimental** | n/a (orthogonal recall floor; foliage / brick walls score zero) | libm only | ✅ |
+| `lbp` | none (hand-coded face-prior histogram) | **Experimental** | n/a (texture statistics on 8×8 windows) | libm only | ✅ |
+| `hog` | none (hand-coded face template) | **Experimental** | n/a (Dalal-Triggs on 8×8 cells / 2×2 blocks) | libm only | ✅ |
 | `scrfd` | ONNX via `tools/fetch_models.sh` | Production (gated) | WIDER FACE AP 0.95/0.94/0.83 (paper); measured locally | ~80 MB | ⛔ research only |
 
 > **Maturity labels** come from `rsface::face_detector::Maturity`, which now
