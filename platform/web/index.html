@@ -433,6 +433,11 @@
       <span id="lb-pos" class="lb-pos mono">— / —</span>
       <button id="lb-next" class="pv-btn" aria-label="下一帧">下一帧 →</button>
       <button id="lb-seek" class="pv-btn primary hidden" title="跳到视频对应时间点" aria-label="跳到视频">⏯ 跳到视频</button>
+      <!-- 框选编辑器(可选) -->
+      <span class="lb-edit-spacer"></span>
+      <button id="lb-edit-toggle" class="pv-btn ghost" aria-pressed="false" title="进入框选编辑模式" aria-label="编辑模式">✎ 编辑</button>
+      <button id="lb-edit-reset" class="pv-btn ghost hidden" title="恢复到原检测框" aria-label="恢复">↺ 恢复</button>
+      <button id="lb-edit-save" class="pv-btn primary hidden" title="保存到服务端(若 /api/frames/:id/correct 不可用则本地保留)" aria-label="保存修正">💾 保存修正</button>
     </footer>
   </div>
 </div>
