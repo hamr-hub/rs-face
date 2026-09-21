@@ -276,7 +276,7 @@ mod tests {
             max_retries: 3,
             initial_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(5),
-        }, move |attempt| {
+        }, move |_attempt| {
             let c = c2.clone();
             async move {
                 let n = c.fetch_add(1, Ordering::SeqCst);

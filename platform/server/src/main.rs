@@ -160,7 +160,11 @@ async fn main() {
         )),
     };
 
-    let app = api::router(state.clone(), caches);
+    let app = api::router(
+        state.clone(),
+        caches,
+        std::sync::Arc::new(rate_limit::RateLimiter::new()),
+    );
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)
         .await

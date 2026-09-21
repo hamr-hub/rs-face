@@ -57,13 +57,18 @@ pub struct ResponseCaches {
     pub jobs_stats_json: Arc<TtlCache>,
 }
 
-pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
+pub fn router(
+    state: Arc<JobRegistry>,
+    caches: ResponseCaches,
+    rate_limiter: Arc<crate::rate_limit::RateLimiter>,
+) -> Router {
     // 上传上限分层:图片(默认 50MB)/ 视频(默认 2GB)。
     // 全局不再用 1GB 统一限制;其它路由(JSON/SSE)走 axum 默认 2MB。
     let img_limit = state.cfg.upload_limit_image;
     let video_limit = state.cfg.upload_limit_video;
     let cors_origin = state.cfg.cors_allow_origin.clone();
     let caches_for_routes = caches.clone();
+    let rl_for_layer = rate_limiter.clone();
     Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
@@ -104,6 +109,9 @@ pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
         .route("/media/{*key}", get(media))
         .route("/{file}", get(static_file))
         .layer(axum::middleware::from_fn(move |req, next| {
+            rate_limit_middleware(req, next, rl_for_layer.clone())
+        }))
+        .layer(axum::middleware::from_fn(move |req, next| {
             cors_middleware(req, next, cors_origin.clone())
         }))
         // gzip 压缩层(>~1KB 自动启用,小响应直接走透传)。
@@ -115,6 +123,95 @@ pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
             HeaderValue::from_static("public, max-age=600, stale-while-revalidate=86400"),
         ))
         .with_state((state, caches_for_routes))
+}
+
+/// per-IP 限流中间件(2026-09-21 stability-hardening-2 加)。
+///
+/// 限流策略:
+/// - POST `/api/jobs*` (写):60 req/min per IP,容量 60,refill 1/s
+/// - GET  `/api/jobs*` (读):600 req/min per IP,容量 600,refill 10/s
+/// - 其它路由(`/api/health`、`/api/config`、`/api/metrics`、`/media/`、
+///   静态文件、SSE)不限流
+///
+/// 拒绝时返回 429 + Retry-After + JSON body `{"error_code":"rate_limited"}`。
+async fn rate_limit_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+    limiter: Arc<crate::rate_limit::RateLimiter>,
+) -> Response {
+    let path = req.uri().path();
+    let method = req.method().clone();
+    // 决定限流档位:
+    // - POST 写路径 60/min
+    // - GET  读路径 600/min
+    // - 其它放行
+    let (capacity, refill) = match (method.as_str(), classify_route(path)) {
+        ("POST", RouteKind::JobWrite) => (60u32, 1.0f64),
+        ("GET", RouteKind::JobRead) => (600u32, 10.0f64),
+        ("DELETE", RouteKind::JobWrite) => (60u32, 1.0f64),
+        _ => return next.run(req).await,
+    };
+    // 取 IP:ConnectInfo > X-Forwarded-For > unknown
+    let ip = crate::rate_limit::ip_from_request(
+        req.extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0),
+        req.headers(),
+    );
+    let decision = limiter.check(&ip, capacity, refill).await;
+    if !decision.allowed {
+        let mut resp = error_response_with(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            crate::error_codes::RATE_LIMITED,
+            &format!("rate limit exceeded for {ip}; try again in {}s", decision.retry_after_secs),
+            Some("slow down request rate or distribute across IPs"),
+        );
+        let _ = resp.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_str(&decision.retry_after_secs.to_string())
+                .unwrap_or(axum::http::HeaderValue::from_static("1")),
+        );
+        let _ = resp.headers_mut().insert(
+            axum::http::HeaderName::from_static("x-ratelimit-limit"),
+            axum::http::HeaderValue::from_str(&capacity.to_string()).unwrap(),
+        );
+        let _ = resp.headers_mut().insert(
+            axum::http::HeaderName::from_static("x-ratelimit-remaining"),
+            axum::http::HeaderValue::from_static("0"),
+        );
+        return resp;
+    }
+    let mut resp = next.run(req).await;
+    // 给放行的响应也加 x-ratelimit-* 头,前端可观测。
+    let _ = resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-ratelimit-limit"),
+        axum::http::HeaderValue::from_str(&capacity.to_string()).unwrap(),
+    );
+    let _ = resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-ratelimit-remaining"),
+        axum::http::HeaderValue::from_str(&decision.remaining.to_string()).unwrap(),
+    );
+    resp
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum RouteKind {
+    JobWrite,
+    JobRead,
+    Other,
+}
+
+/// 把 path 分类到限流档位。prefix 匹配即可,不需要 path 参数的精确判断。
+fn classify_route(path: &str) -> RouteKind {
+    // 排除 SSE(长连接,不限流)
+    if path.ends_with("/events") {
+        return RouteKind::Other;
+    }
+    // `/api/jobs*` 全部分类到 job 命名空间;具体写/读再按方法判断
+    if path.starts_with("/api/jobs") || path.starts_with("/api/import") {
+        return RouteKind::JobWrite; // 默认 write 档;read 档由 GET 切换
+    }
+    RouteKind::Other
 }
 
 /// 可选 CORS 中间件:`CORS_ALLOW_ORIGIN` 非空时启用(默认空 = 同源部署,
