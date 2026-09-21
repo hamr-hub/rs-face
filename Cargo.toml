@@ -133,6 +133,12 @@ name = "integral_bench"
 path = "benches/integral_bench.rs"
 harness = false
 
+[[bench]]
+name = "perf_simd"
+path = "benches/perf_simd.rs"
+harness = false
+required-features = ["detector-haar"]
+
 [[bin]]
 name = "bench-accuracy"
 path = "benches/accuracy.rs"
