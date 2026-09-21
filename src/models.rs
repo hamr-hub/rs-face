@@ -254,6 +254,8 @@ pub enum ModelKind {
     Detector,
     /// Outputs an identity embedding.
     Recognizer,
+    /// Outputs a real/spoof liveness decision.
+    Liveness,
 }
 
 /// A pinned, verifiable model artefact.
@@ -425,12 +427,48 @@ pub const ARCFACE_W600K_MBF: ModelSpec = ModelSpec {
     accuracy: "LFW 99.70 / CFP-FP 98.00 / AgeDB-30 96.58 / IJB-C TAR@1e-4 95.02",
 };
 
+/// MiniFASNetV2 silent-liveness model at the 2.7x crop scale.
+///
+/// ONNX conversion of the MiniVision Silent-Face-Anti-Spoofing project
+/// (Apache-2.0). Emits a 3-class softmax `[printed photo, real face, screen
+/// replay]` over an 80x80 RGB crop. Commercial use is allowed, unlike the
+/// InsightFace weights.
+pub const LIVENESS_MINIFASNET_V2: ModelSpec = ModelSpec {
+    id: "liveness_minifasnet_v2",
+    kind: ModelKind::Liveness,
+    url: "https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/onnx/2.7_80x80_MiniFASNetV2.onnx",
+    file_name: "2.7_80x80_MiniFASNetV2.onnx",
+    sha256: Some("0cbe5caec95c31de9d2ef845cb85407d76aecd1b6a2c0e343f7d35306bfbccb8"),
+    size_bytes: Some(1_744_126),
+    license: License::Permissive("Apache-2.0"),
+    input_size: 80,
+    accuracy: "Silent-Face print/replay detection; 3-class, ~9 ms CPU",
+};
+
+/// MiniFASNetV1SE silent-liveness model at the 4.0x crop scale.
+///
+/// Paired with [`LIVENESS_MINIFASNET_V2`]; the two softmax outputs are
+/// averaged before the real/spoof decision, the upstream-recommended setup.
+pub const LIVENESS_MINIFASNET_V1SE: ModelSpec = ModelSpec {
+    id: "liveness_minifasnet_v1se",
+    kind: ModelKind::Liveness,
+    url: "https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/onnx/4_0_0_80x80_MiniFASNetV1SE.onnx",
+    file_name: "4_0_0_80x80_MiniFASNetV1SE.onnx",
+    sha256: Some("a25886a85cdcfa2c4ea23edb71de35f250c17827b4cadd253a972b28c80fdf1e"),
+    size_bytes: Some(1_743_294),
+    license: License::Permissive("Apache-2.0"),
+    input_size: 80,
+    accuracy: "Silent-Face print/replay detection; 3-class, ~9 ms CPU",
+};
+
 /// Every model this crate knows how to consume.
 pub const REGISTRY: &[&ModelSpec] = &[
     &YUNET_2023MAR,
     &SCRFD_10G_KPS,
     &ARCFACE_W600K_R50,
     &ARCFACE_W600K_MBF,
+    &LIVENESS_MINIFASNET_V2,
+    &LIVENESS_MINIFASNET_V1SE,
 ];
 
 /// Look a model up by its stable id.

@@ -297,6 +297,10 @@ pub mod arcface;
 #[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
 pub mod arcface_recognizer;
 #[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
+pub mod liveness;
+#[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
+pub mod liveness_detector;
+#[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
 pub mod models;
 #[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
 pub mod onnx;

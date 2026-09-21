@@ -85,6 +85,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   analytic gradients against central differences (conv4 weight, fc bias,
   target and non-target classifier rows) and a 5-identity toy
   classification convergence run (≥ 90 % held-out accuracy).
+### Added — silent face liveness (MiniFASNet)
+- **`src/liveness.rs`** — runtime-free core of the MiniVision
+  Silent-Face-Anti-Spoofing integration (Apache-2.0): boundary-clamped
+  expanded crop (2.7x / 4.0x scales), raw `[0,255]` BGR/NCHW build,
+  numerically stable 3-class softmax, and the two-model averaging decision
+  with a configurable `min_real_score` gate. Classes are
+  `[printed photo, real face, screen replay]`.
+- **`src/liveness_detector.rs`** — `LivenessDetector` that loads the
+  MiniFASNetV2 (2.7x) + MiniFASNetV1SE (4.0x) ONNX graphs and runs a
+  real/spoof check per detected face; single-model loading is supported.
+- **`src/models.rs`** — two new pinned, commercially usable
+  `LIVENESS_MINIFASNET_V2` / `V1SE` specs (`ModelKind::Liveness`).
+- **`src/image/mod.rs`** — `RgbImage::crop` and
+  `RgbImage::resize_bilinear`.
+- **`tools/fetch_models.sh`** — fetches and verifies the two Apache-2.0
+  liveness models.
+- Tests: 10 unit tests plus a real-weight end-to-end check
+  (`tests/liveness_e2e.rs`) which classifies the Lena face as real with
+  `real_score = 0.997`.
 
 ### Added — multi-algorithm ensemble fuser
 - **`src/ensemble.rs`** — `TaggedDetection` + `fuse()` greedy cluster

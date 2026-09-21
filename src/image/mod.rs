@@ -407,6 +407,64 @@ impl RgbImage {
         out
     }
 
+    /// Copy the axis-aligned sub-rectangle `[x, x+w) x [y, y+h)`.
+    ///
+    /// The rectangle is clipped to the image bounds; an out-of-range or
+    /// empty rectangle yields an empty image rather than panicking.
+    pub fn crop(&self, x: usize, y: usize, w: usize, h: usize) -> RgbImage {
+        let x1 = x.min(self.width);
+        let y1 = y.min(self.height);
+        let x2 = (x + w).min(self.width);
+        let y2 = (y + h).min(self.height);
+        if x2 <= x1 || y2 <= y1 {
+            return RgbImage::new(0, 0);
+        }
+        let (cw, ch) = (x2 - x1, y2 - y1);
+        let mut out = RgbImage::new(cw, ch);
+        for yy in 0..ch {
+            let src_off = ((y1 + yy) * self.width + x1) * 3;
+            let dst_off = yy * cw * 3;
+            out.data[dst_off..dst_off + cw * 3]
+                .copy_from_slice(&self.data[src_off..src_off + cw * 3]);
+        }
+        out
+    }
+
+    /// Resize to `new_w x new_h` using bilinear interpolation,
+    /// half-pixel aligned. Degenerate sizes return an empty image.
+    pub fn resize_bilinear(&self, new_w: usize, new_h: usize) -> RgbImage {
+        if new_w == 0 || new_h == 0 || self.width == 0 || self.height == 0 {
+            return RgbImage::new(new_w, new_h);
+        }
+        let mut out = RgbImage::new(new_w, new_h);
+        let sx = self.width as f32 / new_w as f32;
+        let sy = self.height as f32 / new_h as f32;
+        for yy in 0..new_h {
+            let fy = (yy as f32 + 0.5) * sy - 0.5;
+            let y0 = fy.floor().max(0.0) as usize;
+            let y1 = (y0 + 1).min(self.height - 1);
+            let dy = (fy - y0 as f32).clamp(0.0, 1.0);
+            for xx in 0..new_w {
+                let fx = (xx as f32 + 0.5) * sx - 0.5;
+                let x0 = fx.floor().max(0.0) as usize;
+                let x1 = (x0 + 1).min(self.width - 1);
+                let dx = (fx - x0 as f32).clamp(0.0, 1.0);
+                let dst = (yy * new_w + xx) * 3;
+                for c in 0..3 {
+                    let p00 = self.data[(y0 * self.width + x0) * 3 + c] as f32;
+                    let p01 = self.data[(y0 * self.width + x1) * 3 + c] as f32;
+                    let p10 = self.data[(y1 * self.width + x0) * 3 + c] as f32;
+                    let p11 = self.data[(y1 * self.width + x1) * 3 + c] as f32;
+                    let top = p00 * (1.0 - dx) + p01 * dx;
+                    let bot = p10 * (1.0 - dx) + p11 * dx;
+                    let v = top * (1.0 - dy) + bot * dy;
+                    out.data[dst + c] = v.round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        out
+    }
+
     /// Draw a 1-pixel-thick rectangle outline in the given RGB color.
     pub fn draw_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: (u8, u8, u8)) {
         let (cr, cg, cb) = color;

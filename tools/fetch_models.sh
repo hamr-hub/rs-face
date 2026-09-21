@@ -132,6 +132,20 @@ if [[ "$VERIFY_ONLY" == "0" ]]; then
 fi
 verify "$MODEL_DIR/$YUNET_FILE" "$YUNET_FILE" || FAILED=1
 
+echo "==> MiniFASNet silent-liveness models (Apache-2.0, commercial use OK)"
+
+LIVENESS_V2_URL="https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/onnx/2.7_80x80_MiniFASNetV2.onnx"
+LIVENESS_V2_FILE="2.7_80x80_MiniFASNetV2.onnx"
+LIVENESS_V1SE_URL="https://github.com/QingHeYang/Silent-Face-Anti-Spoofing-onnx/raw/main/onnx/4_0_0_80x80_MiniFASNetV1SE.onnx"
+LIVENESS_V1SE_FILE="4_0_0_80x80_MiniFASNetV1SE.onnx"
+
+if [[ "$VERIFY_ONLY" == "0" ]]; then
+  download "$LIVENESS_V2_URL" "$MODEL_DIR/$LIVENESS_V2_FILE"
+  download "$LIVENESS_V1SE_URL" "$MODEL_DIR/$LIVENESS_V1SE_FILE"
+fi
+verify "$MODEL_DIR/$LIVENESS_V2_FILE" "$LIVENESS_V2_FILE" || FAILED=1
+verify "$MODEL_DIR/$LIVENESS_V1SE_FILE" "$LIVENESS_V1SE_FILE" || FAILED=1
+
 # --- research-only models ---------------------------------------------------
 
 if [[ "$FETCH_RESEARCH" == "1" ]]; then
