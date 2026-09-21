@@ -1566,11 +1566,11 @@ const upload = (() => {
       if (typeof dropzonePreview !== 'undefined') dropzonePreview.renderImage(files);
       if (files.length > 1) for (const f of files) submitImage(f); else submitImage(files[0]);
       closeAllModals();
-    });
+    }, { accept: f => dropzonePreview.isImageFile(f), label: '图片' });
     setupDropzone('#dz-video', '#file-video', files => {
       if (typeof dropzonePreview !== 'undefined') dropzonePreview.renderVideo(files);
       submitVideo(files[0]); closeAllModals();
-    });
+    }, { accept: f => (f.type && f.type.startsWith('video/')) || /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(f.name || ''), label: '视频' });
     utils.$('#video-url-go').addEventListener('click', () => {
       const url = utils.$('#video-url').value.trim();
       if (!url) return toast.warn('请输入视频 URL');
@@ -1688,20 +1688,30 @@ const upload = (() => {
       }
     } else { setVal('#set-mode', 'n/a (404)'); setVal('#set-cnn', 'n/a'); setVal('#set-cascade', 'n/a'); }
   }
-  function setupDropzone(zoneSel, inputSel, handler) {
+  function setupDropzone(zoneSel, inputSel, handler, opts) {
     const zone = utils.$(zoneSel), input = utils.$(inputSel); if (!zone || !input) return;
+    const accept = (opts && opts.accept) || (() => true);
+    const label  = (opts && opts.label) || '文件';
     zone.addEventListener('click', e => { if (!e.target.closest('input')) input.click(); });
     input.addEventListener('change', () => { if (input.files.length) handler(Array.from(input.files)); input.value = ''; });
     zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
     zone.addEventListener('dragleave', e => { if (!zone.contains(e.relatedTarget)) zone.classList.remove('dragover'); });
     // 修复(历史 bug):drop 到 modal 内 dropzone 也要真正上传(原来只 preventDefault)
-    zone.addEventListener('drop', e => {
+    // + 目录拖入支持:用 dropzonePreview.collectFromDataTransfer 递归 walk。
+    zone.addEventListener('drop', async e => {
       e.preventDefault();
       e.stopPropagation();
       zone.classList.remove('dragover');
-      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
-        handler(Array.from(e.dataTransfer.files));
+      if (!e.dataTransfer) return;
+      const collected = await dropzonePreview.collectFromDataTransfer(e.dataTransfer, { accept });
+      if (!collected.length) {
+        toast.warn(`未识别到${label},请重试`);
+        return;
       }
+      if (collected.length > 1) {
+        toast.info(`目录共 ${collected.length} 个${label},将作为单独任务依次提交`);
+      }
+      handler(collected.map(c => c.file));
     });
   }
   /** 全屏拖放:dragenter 显示遮罩(#dropzone-overlay),drop 时按类型分发。 */
@@ -1739,14 +1749,29 @@ const upload = (() => {
       e.preventDefault();
       dragDepth = 0;
       hideOverlay();
-      if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
-      const files = Array.from(e.dataTransfer.files);
+      if (!e.dataTransfer) return;
       // modal 内的 dropzone 自己处理(z-index 更高,事件先到 modal)
       if (!utils.$('#modal-new').classList.contains('hidden')) return;
-      const t = files[0].type || '';
-      if (t.startsWith('image/')) submitImageFiles(files);
-      else if (t.startsWith('video/')) submitVideoFiles(files.length > 1 ? [files[0]] : files);
-      else toast.warn('不支持的文件类型: ' + (t || '未知'));
+      // 目录拖入支持:先 walk 出文件清单,按扩展名/MIME 分发到图片/视频队列
+      const collected = await dropzonePreview.collectFromDataTransfer(e.dataTransfer);
+      const VIDEO_EXTS = /\.(mp4|mov|mkv|webm|avi|m4v)$/i;
+      const images = collected.filter(c => c.file.type ? c.file.type.startsWith('image/') : /\.(jpe?g|png|pgm|ppm|bmp|webp|tiff?)$/i.test(c.file.name));
+      const videos = collected.filter(c => c.file.type ? c.file.type.startsWith('video/') : VIDEO_EXTS.test(c.file.name));
+      const others = collected.length - images.length - videos.length;
+      if (images.length) {
+        submitImageFiles(images.map(c => c.file));
+        if (images.length > 1) toast.info(`目录中 ${images.length} 张图片将作为单独任务依次提交`);
+      }
+      if (videos.length) {
+        // 视频走单任务路径,只取第一个
+        submitVideoFiles([videos[0].file]);
+        if (videos.length > 1) toast.warn(`目录共 ${videos.length} 个视频,仅取第一个`);
+      }
+      if (!images.length && !videos.length) {
+        toast.warn('目录中没有可识别的图片或视频');
+      } else if (others > 0) {
+        toast.warn(`已忽略 ${others} 个不支持的文件`);
+      }
     });
   }
   /** 全局粘贴:图片文件 → 图片任务;http(s)/rtsp URL 文本 → 流任务。 */
