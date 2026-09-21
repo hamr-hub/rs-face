@@ -1,24 +1,47 @@
-# rs-face Platform 一键部署(GPU 版):rustfs(S3) + postgres + rsface-server(GPU)
+# rs-face Platform 一键部署(GPU 版, bind mount 风格,跟 CPU compose 对齐数据布局):
+# rustfs(S3) + postgres + rsface-server(GPU, CUDA backend)。
+#
 # 用法(在仓库根执行):
 #   docker compose -f platform/docker-compose.gpu.yml up -d --build
 #
+# 与 CPU compose (`platform/docker-compose.yml`) 的差别:
+#   - server 用 `runtime: nvidia` + `RSFACE_USE_GPU=1` (Jetson / Tegra 必须走
+#     cuda-backend,driver 540 不发 OpenCL ICD)
+#   - server 不能用 host 网络(避开 NVIDIA runtime hook 冲突)
+#   - 数据全部 bind mount 到仓库根 data/{rustfs,pg/pgdata,media}/,跟
+#     CLAUDE.md 「数据用 bind mount, 不用 named volume」对齐 → 跟 CPU compose
+#     共享同一份 on-disk 数据,可随意切换栈
+#   - server image 用 platform/Dockerfile.gpu (`--features rsface/cuda-backend`)
+#
 # Web 平台:    http://localhost:20080/
-# S3 控制台:   http://localhost:19000/
-# PostgreSQL:  localhost:15432 (rsface/rsface)
+# S3 控制台:   http://localhost:19000/  (127.0.0.1 only)
+# PostgreSQL:  localhost:15432          (127.0.0.1 only)
+#
+# 数据位置(都在项目根 data/ 下,跟随代码可见,便于备份):
+#   data/rustfs/         - rustfs S3 对象存储(250GB corp drama)
+#   data/pg/pgdata/      - postgres 集群(已有 initdb, 含 2026-09-18 corp 数据)
+#   data/media/          - 上传媒体 + 检测结果(7.1GB)
+# 首次启动如果 data/pg/pgdata/ 是空目录,postgres 会自动 initdb,然后用
+# `docker exec -i rsface-postgres pg_restore ... < data/pg/rsface_dump.sqlc`
+# 还原 dump(参考 platform/DOCKER.md 「备份/恢复」)。
 
 services:
   rustfs:
-    image: rustfs/rustfs:latest
+    # 固定到具体版本,不跟 latest:升级是显式动作,避免重建时意外换版本。
+    image: rustfs/rustfs:1.0.0
     container_name: rsface-rustfs
+    user: "1000:1000"
     environment:
       RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rsface}
       RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rsface-secret}
       RUSTFS_VOLUMES: /data
     ports:
-      - "19000:9000"
-      - "19001:9001"
+      # 控制台 / API 仅本机访问,不向 LAN 暴露。
+      - "127.0.0.1:19000:9000"
+      - "127.0.0.1:19001:9001"
     volumes:
-      - rustfs-data:/data
+      # bind mount 到 data/rustfs/(项目内,跟随代码,可见可备份)。
+      - ../data/rustfs:/data
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
       interval: 5s
@@ -28,16 +51,20 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:16-alpine
+    # 固定 minor 版本(16.15),只跟安全补丁的升级走显式改标签。
+    image: postgres:16.15-alpine
     container_name: rsface-postgres
+    user: "1000:1000"
     environment:
       POSTGRES_DB: rsface
       POSTGRES_USER: rsface
-      POSTGRES_PASSWORD: rsface-pass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rsface-pass}
     ports:
-      - "15432:5432"
+      - "127.0.0.1:15432:5432"
     volumes:
-      - pg-data:/var/lib/postgresql/data
+      # bind mount 到 data/pg/pgdata/(项目内,跟随代码)。
+      # 已 initdb → 容器直接接管,数据落 host。
+      - ../data/pg/pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rsface -d rsface"]
       interval: 5s
@@ -52,16 +79,23 @@ services:
       dockerfile: platform/Dockerfile.gpu
     image: rsface-server:gpu
     container_name: rsface-server-gpu
+    # 覆盖 Dockerfile.gpu 内部的 rsface(uid 10001)→ 1000:1000,跟 host hyx
+    # 对齐,这样 bind mount 的 data/media/ /var/rsface-media 容器内可直接写。
+    # (2026-09-21 之前 orphan 容器就是这个 uid 不匹配导致
+    # "[storage] local write failed ... returning inline://")
+    user: "1000:1000"
+    # nvidia runtime 注入 GPU + /dev/nvidia* + NVIDIA_VISIBLE_DEVICES env。
+    # 不能叠 network_mode: host(runtime hook 冲突),所以走默认 bridge + 端口映射。
+    runtime: nvidia
     depends_on:
       rustfs:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    # NVIDIA runtime:容器启动时 host 端的 nvidia-container-cli 自动
-    # 挂 GPU + 注入 /dev/nvidia* 设备 + NVIDIA_VISIBLE_DEVICES env。
-    runtime: nvidia
     environment:
+      # server 绑容器内 8080,通过 ports 映射到 host 20080。
       BIND_ADDR: 0.0.0.0:8080
+      # bridge 网络里走 compose 内置 DNS 找 rustfs / postgres。
       S3_ENDPOINT: http://rustfs:9000
       S3_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rsface}
       S3_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rsface-secret}
@@ -72,11 +106,15 @@ services:
       MAX_FRAMES_VIDEO: ${MAX_FRAMES_VIDEO:-3600}
       MAX_FACE_CROPS: ${MAX_FACE_CROPS:-2000}
       MIN_FACE_SIZE: ${MIN_FACE_SIZE:-24}
-      DATABASE_URL: postgres://rsface:rsface-pass@postgres:5432/rsface
+      # compose 默认 bridge 网络,直接走容器名解析。
+      DATABASE_URL: postgres://rsface:${POSTGRES_PASSWORD:-rsface-pass}@postgres:5432/rsface
+      # 容器里这个路径 bind-mount 到 host 的 data/media/,跟 CPU compose 同源。
       LOCAL_MEDIA_DIR: /var/rsface-media
+      # 走 cuda-backend(cudarc + NVRTC),不走 OpenCL(Jetson 驱动不发 OpenCL ICD)。
       RSFACE_USE_GPU: ${RSFACE_USE_GPU:-1}
+      # 4 并发(Orin 默认显存 / 算力可支撑),对齐老 GPU compose 设。
       MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-4}
-      # 背压 + 超时(与 CPU 版对齐)
+      # 背压 + 超时(与 CPU 版对齐)。
       MAX_QUEUE_DEPTH: ${MAX_QUEUE_DEPTH:-64}
       JOB_TIMEOUT_SECS: ${JOB_TIMEOUT_SECS:-600}
       JOB_TIMEOUT_VIDEO_SECS: ${JOB_TIMEOUT_VIDEO_SECS:-3600}
@@ -85,7 +123,10 @@ services:
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-}
     deploy:
       resources:
-        # 资源限制:GPU 容器跑 4 并发,给 4G;OOM 重启而非拖垮宿主。
+        # GPU 容器跑 4 并发给 4G;OOM 重启而非拖垮宿主。
+        # 注:`deploy.resources.reservations.devices` 在 plain `docker compose up`
+        # 下被忽略(只对 `docker stack deploy` 生效),GPU 实际注入来自
+        # `runtime: nvidia`。这里保留是为将来切 Swarm 时直接可用。
         limits:
           memory: ${SERVER_MEM_LIMIT:-4g}
         reservations:
@@ -101,12 +142,10 @@ services:
       start_period: 15s
     stop_grace_period: ${SERVER_STOP_GRACE:-2m30s}
     ports:
+      # server 容器内 listen 8080 → host 20080。
       - "20080:8080"
     volumes:
-      - rsface-media:/var/rsface-media
+      # bind mount 到 data/media/(项目内,跟随代码)。容器内 uid=10001(rsface)
+      # 通过 host 上 hyx(uid 1000)的目录 permission 写入 — 与 CPU compose 同源。
+      - ../data/media:/var/rsface-media
     restart: unless-stopped
-
-volumes:
-  rustfs-data:
-  pg-data:
-  rsface-media:
