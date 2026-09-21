@@ -1126,6 +1126,92 @@ body {
 
 .dash-section { margin-top: 16px; }
 .dash-section h3 { margin: 0 0 8px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: .5px; }
+.dash-section-meta {
+  margin-left: 6px; padding: 1px 8px; border-radius: 99px;
+  font-size: 10.5px; letter-spacing: .3px;
+  background: var(--bg-3); color: var(--fg-dim);
+  font-weight: 400; text-transform: none;
+}
+
+/* ============ 运行统计(stats.js) ============ */
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.stats-table thead th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-3);
+}
+.stats-table tbody td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.stats-table tbody tr:hover td { background: var(--bg-3); }
+.stats-algo-dot {
+  display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%;
+  margin-right: 6px; vertical-align: middle;
+  box-shadow: 0 0 4px currentColor;
+}
+.stats-slow-list { display: flex; flex-direction: column; gap: 4px; }
+.stats-slow-row {
+  display: grid;
+  grid-template-columns: 180px 110px 1fr 80px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-3);
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+.stats-slow-row:hover { background: var(--bg-4); }
+.stats-slow-open {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stats-slow-open:hover { color: var(--accent); }
+.stats-slow-algo {
+  font-family: ui-monospace, monospace;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.stats-slow-bar {
+  background: var(--bg-4);
+  border-radius: 99px;
+  height: 6px;
+  overflow: hidden;
+}
+.stats-slow-bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  opacity: .9;
+}
+.stats-slow-val {
+  text-align: right;
+  font-size: 11px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 540px) {
+  .stats-slow-row { grid-template-columns: 1fr 1fr; row-gap: 4px; }
+  .stats-slow-bar  { grid-column: span 2; }
+  .stats-slow-val  { grid-column: span 2; text-align: left; }
+}
 .dash-bars { display: flex; flex-direction: column; gap: 6px; }
 .dash-bar-row { display: flex; align-items: center; gap: 10px; font-size: 11px; }
 .dash-bar-label { width: 80px; color: var(--fg-dim); font-family: ui-monospace, monospace; }

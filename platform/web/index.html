@@ -9,6 +9,7 @@
     <span class="tb-logo" aria-hidden="true">◐</span>
     <div class="tb-titles"><h1 class="tb-title">rs-face</h1><span class="tb-sub">Platform</span></div>
     <button id="tb-dashboard" class="tb-mini-btn" title="统计仪表板" aria-label="打开统计仪表板">◔</button>
+    <button id="tb-stats" class="tb-mini-btn" title="运行统计" aria-label="打开运行统计">Σ</button>
   </div>
   <div class="tb-search" role="search">
     <span class="tb-search-icon" aria-hidden="true">⌕</span>
@@ -399,6 +400,33 @@
       <div id="dash-telemetry" class="dash-bars" role="region" aria-label="埋点事件计数"></div>
     </div>
     <p class="hint" id="dash-meta">数据源:内存中的 /api/jobs + 服务端 /api/telemetry/summary</p>
+  </div>
+</div>
+
+<!-- 运行统计 modal(Σ):工程视角 — 算法拆分 / 耗时 / Top-5 最慢任务 / 时间线 -->
+<div class="modal hidden" id="modal-stats" role="dialog" aria-modal="true" aria-labelledby="modal-stats-title">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card modal-wide">
+    <header class="modal-head"><h2 id="modal-stats-title">运行统计</h2><button class="pv-btn ghost modal-x" data-close aria-label="关闭">✕</button></header>
+    <div class="dash-grid" id="stats-tiles" role="region" aria-label="总览数字"></div>
+    <div class="dash-section">
+      <h3>按算法拆分 <span class="dash-section-meta" id="stats-server-meta" hidden></span></h3>
+      <table class="stats-table" role="table" aria-label="算法聚合表">
+        <thead>
+          <tr><th>算法</th><th>任务数</th><th>人脸数</th><th>帧数</th><th>累计耗时</th><th>平均 ms/帧</th></tr>
+        </thead>
+        <tbody id="stats-algo-tbody"><tr><td colspan="6" class="hint">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="dash-section">
+      <h3>Top-5 最慢任务 <span class="dash-section-meta">(按平均 ms/帧)</span></h3>
+      <div id="stats-slowest" class="stats-slow-list" role="region" aria-label="最慢任务"></div>
+    </div>
+    <div class="dash-section">
+      <h3>最近 24 小时任务流(每小时)</h3>
+      <div id="stats-timeline" role="img" aria-label="最近 24 小时任务时间线"></div>
+    </div>
+    <p class="hint" id="stats-meta">数据源 /api/jobs + /api/jobs/stats</p>
   </div>
 </div>
 
