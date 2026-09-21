@@ -73,7 +73,24 @@ web-dist/
 .vite/
 
 # ---- Local model weights (fetch via tools/fetch_models.sh) ----
-models/
+# Ignore the model binaries; keep README.md and .gitkeep so the directory
+# ships with documentation. Each entry matches a path that catches both the
+# top-level and any nested layout the fetch script might create.
+models/*.bin
+models/*.onnx
+models/*.pb
+models/*.weights
+models/*.t7
+models/*.param
+models/*.pt
+models/*.h5
+models/*.caffemodel
+models/*.prototxt
+models/*.cfg
+models/*.names
+models/scrap*
+models/checkpoints*
+models/inspect*
 
 # ---- Local tooling / OS junk ----
 .meta.yaml
