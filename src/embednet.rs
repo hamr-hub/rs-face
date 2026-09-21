@@ -42,6 +42,14 @@
 //! on a folder-of-folders (`root/<label>/*.{pgm,ppm,png}`) and writes the
 //! `.rsen` weight file consumed by [`EmbedNet::load`].
 //!
+//! The same backbone can instead be trained with the **ArcFace additive
+//! angular margin** softmax loss (Deng–Guo–Xue–Zafeiriou, CVPR 2019) via
+//! [`ArcFaceTrainer`]. Each identity owns one L2-normalised weight row and
+//! the target logit is `s·cos(θ + m)` (default `s = 32`, `m = 0.5`), so
+//! ordinary labelled samples — not balanced pairs — drive training and the
+//! decision boundary is separated by an angular gap. The classifier head is
+//! training-only; inference still produces the same 128-d embeddings.
+//!
 //! ## Honesty about accuracy
 //!
 //! What is verified here: the forward numerics, the **analytic gradients
@@ -924,6 +932,310 @@ fn backward_branch(net: &EmbedNet, c: &ForwardCache, d_emb_raw: &[f32], g: &mut 
     }
 }
 
+// ---- ArcFace angular-margin classifier trainer ----------------------------
+
+/// ArcFace feature scale `s` (logits are cosines multiplied by this).
+pub const ARCFACE_SCALE: f32 = 32.0;
+/// ArcFace additive angular margin `m` in radians (0.5 ≈ 28.6°).
+pub const ARCFACE_MARGIN: f32 = 0.5;
+
+/// Trains an [`EmbedNet`] with the **ArcFace additive angular margin**
+/// softmax loss (Deng–Guo–Xue–Zafeiriou, CVPR 2019).
+///
+/// Where [`ContrastiveTrainer`] needs balanced same/different pairs,
+/// ArcFace trains on ordinary labelled samples: each class owns one
+/// L2-normalised weight row, and the target class logit is
+///
+/// ```text
+/// logit_y = s · cos(θ_y + m),   logit_k = s · cos θ_k  (k ≠ y)
+/// ```
+///
+/// so the decision boundary is pushed by an angular gap `m` on the unit
+/// sphere. Cross-entropy over the scaled cosine logits gives stronger
+/// inter-class separation than the pair hinge on the same network. The
+/// classifier head is training-only; inference keeps producing the same
+/// 128-d embeddings consumed by [`crate::embedding::Gallery`].
+pub struct ArcFaceTrainer {
+    net: EmbedNet,
+    classes: usize,
+    /// Classifier weight rows `[classes][EMBED_DIM]`; rows are
+    /// L2-normalised at the start of every step.
+    classifier: Vec<f32>,
+    d_classifier: Vec<f32>,
+    weight_adam: Adam,
+    grads: Grads,
+    conv_w_adam: [Adam; 4],
+    conv_b_adam: [Adam; 4],
+    fc_w_adam: Adam,
+    fc_b_adam: Adam,
+    cache: ForwardCache,
+    /// Learning rate.
+    pub lr: f32,
+    /// Feature scale `s`.
+    pub scale: f32,
+    /// Additive angular margin `m`.
+    pub margin: f32,
+}
+
+impl ArcFaceTrainer {
+    pub fn new(seed: u64, classes: usize) -> Self {
+        Self::with_hyperparams(seed, classes, DEFAULT_LR, ARCFACE_SCALE, ARCFACE_MARGIN)
+    }
+
+    pub fn with_hyperparams(seed: u64, classes: usize, lr: f32, scale: f32, margin: f32) -> Self {
+        assert!(classes >= 2, "ArcFace needs at least 2 classes");
+        assert!(
+            margin > 0.0 && margin < std::f32::consts::PI / 2.0,
+            "margin out of range"
+        );
+        let net = EmbedNet::new(seed);
+        let mut rng = Rng::new(seed.wrapping_add(0xAFCFACE));
+        let xavier = (2.0 / (EMBED_DIM + classes) as f32).sqrt();
+        let classifier: Vec<f32> = (0..classes * EMBED_DIM)
+            .map(|_| rng.gaussian() * xavier)
+            .collect();
+        let grads = Grads::zero_like(&net);
+        Self {
+            conv_w_adam: [
+                Adam::new(net.conv_w[0].len()),
+                Adam::new(net.conv_w[1].len()),
+                Adam::new(net.conv_w[2].len()),
+                Adam::new(net.conv_w[3].len()),
+            ],
+            conv_b_adam: [
+                Adam::new(net.conv_b[0].len()),
+                Adam::new(net.conv_b[1].len()),
+                Adam::new(net.conv_b[2].len()),
+                Adam::new(net.conv_b[3].len()),
+            ],
+            fc_w_adam: Adam::new(net.fc_w.len()),
+            fc_b_adam: Adam::new(net.fc_b.len()),
+            weight_adam: Adam::new(classifier.len()),
+            net,
+            classes,
+            classifier,
+            d_classifier: vec![0.0; classes * EMBED_DIM],
+            grads,
+            cache: ForwardCache::new(),
+            lr,
+            scale,
+            margin,
+        }
+    }
+
+    pub fn net(&self) -> &EmbedNet {
+        &self.net
+    }
+
+    /// Current network by value (cloned); keeps the trainer usable for
+    /// periodic validation snapshots.
+    pub fn snapshot(&self) -> EmbedNet {
+        self.net.clone()
+    }
+
+    pub fn into_net(self) -> EmbedNet {
+        self.net
+    }
+
+    /// Number of classes the head was built for.
+    pub fn num_classes(&self) -> usize {
+        self.classes
+    }
+
+    /// One forward/backward/update on a labelled standardised patch.
+    /// Returns the cross-entropy loss for logging.
+    pub fn train_step(&mut self, x: &[f32], label: usize) -> f32 {
+        debug_assert_eq!(x.len(), INPUT * INPUT);
+        debug_assert!(label < self.classes);
+        self.net.forward_cached(x, &mut self.cache);
+        self.grads.zero();
+        self.d_classifier.fill(0.0);
+        let loss = arcface_backward(
+            &self.net,
+            &self.cache,
+            label,
+            self.scale,
+            self.margin,
+            &self.classifier,
+            &mut self.grads,
+            &mut self.d_classifier,
+        );
+
+        for s in 0..4 {
+            self.conv_w_adam[s].step(&mut self.net.conv_w[s], &self.grads.conv_w[s], self.lr);
+            self.conv_b_adam[s].step(&mut self.net.conv_b[s], &self.grads.conv_b[s], self.lr);
+        }
+        self.fc_w_adam
+            .step(&mut self.net.fc_w, &self.grads.fc_w, self.lr);
+        self.fc_b_adam
+            .step(&mut self.net.fc_b, &self.grads.fc_b, self.lr);
+        self.weight_adam
+            .step(&mut self.classifier, &self.d_classifier, self.lr);
+        loss
+    }
+
+    /// Predict a class for a patch by plain cosine similarity (no margin,
+    /// scale-independent). Returns `None` when the embedding collapses.
+    pub fn classify(&self, x: &[f32]) -> Option<usize> {
+        let (emb, norm) = normalize(&self.net.forward_raw(x));
+        if norm < 1e-8 {
+            return None;
+        }
+        let mut best = 0usize;
+        let mut best_score = f32::NEG_INFINITY;
+        for k in 0..self.classes {
+            let row_start = k * EMBED_DIM;
+            let raw = &self.classifier[row_start..row_start + EMBED_DIM];
+            let rnorm: f32 = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let row: Vec<f32> = if rnorm < 1e-8 {
+                raw.to_vec()
+            } else {
+                raw.iter().map(|v| v / rnorm).collect()
+            };
+            let score: f32 = emb.iter().zip(row).map(|(e, w)| e * w).sum();
+            if score > best_score {
+                best_score = score;
+                best = k;
+            }
+        }
+        Some(best)
+    }
+}
+
+/// L2-normalise each of `rows` contiguous rows in place-like fashion,
+/// returning a fresh buffer. Collapsed rows are copied through.
+fn normalize_rows(weight: &[f32], rows: usize) -> Vec<f32> {
+    debug_assert_eq!(weight.len(), rows * EMBED_DIM);
+    let mut out = vec![0.0f32; weight.len()];
+    for k in 0..rows {
+        let base = k * EMBED_DIM;
+        let row = &weight[base..base + EMBED_DIM];
+        let norm: f32 = row.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if norm < 1e-8 {
+            out[base..base + EMBED_DIM].copy_from_slice(row);
+        } else {
+            for j in 0..EMBED_DIM {
+                out[base + j] = row[j] / norm;
+            }
+        }
+    }
+    out
+}
+
+/// ArcFace forward loss + backward into both the network [`Grads`] and
+/// the raw classifier weights (each row is L2-normalised inside).
+fn arcface_backward(
+    net: &EmbedNet,
+    cache: &ForwardCache,
+    target: usize,
+    scale: f32,
+    margin: f32,
+    classifier: &[f32],
+    grads: &mut Grads,
+    d_classifier: &mut [f32],
+) -> f32 {
+    let classes = classifier.len() / EMBED_DIM;
+    debug_assert!(target < classes);
+
+    let weights = normalize_rows(classifier, classes);
+    let row_norms: Vec<f32> = (0..classes)
+        .map(|k| {
+            let base = k * EMBED_DIM;
+            classifier[base..base + EMBED_DIM]
+                .iter()
+                .map(|v| v * v)
+                .sum::<f32>()
+                .sqrt()
+        })
+        .collect();
+
+    let (emb, emb_norm) = normalize(&cache.fc_out);
+
+    // Cosine similarities (clipped away from ±1 for stable acos).
+    let mut cos = vec![0.0f32; classes];
+    for k in 0..classes {
+        let row = &weights[k * EMBED_DIM..(k + 1) * EMBED_DIM];
+        let c: f32 = emb.iter().zip(row).map(|(e, w)| e * w).sum();
+        cos[k] = c.clamp(-1.0 + 1e-7, 1.0 - 1e-7);
+    }
+
+    // Target transform cos θ → cos(θ + m), with the canonical
+    // cos(π − m) gate: outside the feasible cone the plain cosine is
+    // kept (hard samples are not penalised by an impossible margin).
+    let cos_y = cos[target];
+    let sin_y = (1.0 - cos_y * cos_y).sqrt().max(1e-6);
+    let cos_m = margin.cos();
+    let sin_m = margin.sin();
+    let gate = (std::f32::consts::PI - margin).cos();
+    let mut logits = cos.clone();
+    let mut target_factor = 1.0f32; // (1/s) · d logit_y / d cos_y
+    if cos_y >= gate {
+        logits[target] = cos_y * cos_m - sin_y * sin_m;
+        let sin_tm = sin_y * cos_m + cos_y * sin_m;
+        target_factor = sin_tm / sin_y;
+    }
+    for l in logits.iter_mut() {
+        *l *= scale;
+    }
+
+    // Softmax cross-entropy.
+    let lmax = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut probs = vec![0.0f32; classes];
+    let mut sum = 0.0f32;
+    for k in 0..classes {
+        let e = (logits[k] - lmax).exp();
+        probs[k] = e;
+        sum += e;
+    }
+    for p in probs.iter_mut() {
+        *p /= sum;
+    }
+    let loss = -logits[target] + lmax + sum.ln();
+
+    // dL/d cos_k through the scaled (and margin-transformed for target)
+    // logits.
+    let mut d_cos = vec![0.0f32; classes];
+    for k in 0..classes {
+        let indicator = if k == target { 1.0 } else { 0.0 };
+        let factor = if k == target { target_factor } else { 1.0 };
+        d_cos[k] = scale * (probs[k] - indicator) * factor;
+    }
+
+    // cos_k = emb · w_k: split into classifier and embedding grads.
+    let mut d_emb = vec![0.0f32; EMBED_DIM];
+    let mut d_unit_rows = vec![0.0f32; classes * EMBED_DIM];
+    for k in 0..classes {
+        let dc = d_cos[k];
+        let base = k * EMBED_DIM;
+        for j in 0..EMBED_DIM {
+            d_unit_rows[base + j] += dc * emb[j];
+            d_emb[j] += dc * weights[base + j];
+        }
+    }
+
+    // Through per-row L2 normalisation: d_raw = (d_unit − (d_unit·w̃)·w̃)/‖w‖.
+    d_classifier.fill(0.0);
+    for k in 0..classes {
+        let base = k * EMBED_DIM;
+        let norm = row_norms[k];
+        if norm < 1e-8 {
+            continue;
+        }
+        let row = &weights[base..base + EMBED_DIM];
+        let d_unit = &d_unit_rows[base..base + EMBED_DIM];
+        let dot: f32 = d_unit.iter().zip(row).map(|(g, u)| g * u).sum();
+        for j in 0..EMBED_DIM {
+            d_classifier[base + j] += (d_unit[j] - dot * row[j]) / norm;
+        }
+    }
+
+    // Through L2 normalisation and the shared backbone.
+    let mut d_raw = vec![0.0f32; EMBED_DIM];
+    denormalize_grad(&emb, emb_norm, &d_emb, &mut d_raw);
+    backward_branch(net, cache, &d_raw, grads);
+    loss
+}
+
 // ---- FaceRecognizer adapter ------------------------------------------------
 
 /// Accept policy for [`EmbedNetRecognizer`], expressed in **Euclidean
@@ -1510,5 +1822,135 @@ mod tests {
         assert!(rec.remove("p3"));
         assert!(rec.is_empty());
         assert!(!rec.remove("p3"));
+    }
+
+    /// Recompute the ArcFace scalar loss for finite differencing.
+    fn arcface_scalar_loss(net: &EmbedNet, classifier: &[f32], x: &[f32], label: usize) -> f32 {
+        let mut cache = ForwardCache::new();
+        net.forward_cached(x, &mut cache);
+        let mut g = Grads::zero_like(net);
+        let mut d = vec![0.0f32; classifier.len()];
+        arcface_backward(
+            net,
+            &cache,
+            label,
+            ARCFACE_SCALE,
+            ARCFACE_MARGIN,
+            classifier,
+            &mut g,
+            &mut d,
+        )
+    }
+
+    #[test]
+    fn arcface_gradcheck_matches_finite_differences() {
+        let classes = 4;
+        let label = 2usize;
+        let trainer =
+            ArcFaceTrainer::with_hyperparams(321, classes, 1e-3, ARCFACE_SCALE, ARCFACE_MARGIN);
+        let mut rng = Rng::new(999);
+        let x: Vec<f32> = (0..INPUT * INPUT).map(|_| rng.range(-1.5, 1.5)).collect();
+
+        let net0 = trainer.net.clone();
+        let mut cache = ForwardCache::new();
+        net0.forward_cached(&x, &mut cache);
+        let mut grads = Grads::zero_like(&net0);
+        let mut d_cls = vec![0.0f32; trainer.classifier.len()];
+        let loss0 = arcface_backward(
+            &net0,
+            &cache,
+            label,
+            ARCFACE_SCALE,
+            ARCFACE_MARGIN,
+            &trainer.classifier,
+            &mut grads,
+            &mut d_cls,
+        );
+        assert!(loss0.is_finite());
+
+        let eps = 1e-2f32;
+        let mut check_net = |name: &str,
+                             get: &dyn Fn(&EmbedNet) -> f32,
+                             set: &dyn Fn(&mut EmbedNet, f32),
+                             analytic: f32| {
+            let mut np = net0.clone();
+            set(&mut np, get(&net0) + eps);
+            let lp = arcface_scalar_loss(&np, &trainer.classifier, &x, label);
+            let mut nm = net0.clone();
+            set(&mut nm, get(&net0) - eps);
+            let lm = arcface_scalar_loss(&nm, &trainer.classifier, &x, label);
+            let numeric = (lp - lm) / (2.0 * eps);
+            let tol = 2e-2 * numeric.abs().max(analytic.abs()) + 2e-3;
+            assert!(
+                (numeric - analytic).abs() <= tol,
+                "{name}: analytic={analytic:.6} numeric={numeric:.6} tol={tol:.6}"
+            );
+        };
+
+        let idx = 2 * 576 + 500;
+        check_net(
+            "arcface_conv4_w",
+            &|n| n.conv_w[3][idx],
+            &|n, v| n.conv_w[3][idx] = v,
+            grads.conv_w[3][idx],
+        );
+        check_net(
+            "arcface_fc_b",
+            &|n| n.fc_b[64],
+            &|n, v| n.fc_b[64] = v,
+            grads.fc_b[64],
+        );
+
+        // Classifier weights: one element of the target row and one of a
+        // non-target row, perturbing the raw parameter (grad passes
+        // through the row L2-normalisation).
+        for (name, cidx) in [
+            ("cls_target", label),
+            ("cls_non_target", (label + 1) % classes),
+        ] {
+            let flat = cidx * EMBED_DIM + 17;
+            let analytic = d_cls[flat];
+            let mut cp = trainer.classifier.clone();
+            cp[flat] += eps;
+            let lp = arcface_scalar_loss(&net0, &cp, &x, label);
+            let mut cm = trainer.classifier.clone();
+            cm[flat] -= eps;
+            let lm = arcface_scalar_loss(&net0, &cm, &x, label);
+            let numeric = (lp - lm) / (2.0 * eps);
+            let tol = 2e-2 * numeric.abs().max(analytic.abs()) + 2e-3;
+            assert!(
+                (numeric - analytic).abs() <= tol,
+                "{name}: analytic={analytic:.6} numeric={numeric:.6} tol={tol:.6}"
+            );
+        }
+    }
+
+    #[test]
+    fn arcface_training_classifies_toy_identities() {
+        const IDENTITIES: u64 = 5;
+        const STEPS: usize = 800;
+        let ids: Vec<ToyIdentity> = (0..IDENTITIES).map(identity).collect();
+        let mut trainer = ArcFaceTrainer::new(2026, IDENTITIES as usize);
+        let mut rng = Rng::new(777);
+
+        for step in 0..STEPS {
+            let i = step % IDENTITIES as usize;
+            let sample = ids[i].sample(&mut rng);
+            trainer.train_step(&sample, i);
+        }
+
+        let mut eval_rng = Rng::new(0xBEEF);
+        let (mut correct, mut total) = (0u32, 0u32);
+        for i in 0..IDENTITIES as usize {
+            for _ in 0..4 {
+                let sample = ids[i].sample(&mut eval_rng);
+                if trainer.classify(&sample) == Some(i) {
+                    correct += 1;
+                }
+                total += 1;
+            }
+        }
+        let acc = correct as f32 / total as f32;
+        assert!(acc >= 0.9, "ArcFace toy classification acc {acc:.3} < 0.90");
     }
 }

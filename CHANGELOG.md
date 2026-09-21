@@ -50,6 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   return descriptive errors instead of decoded garbage.
 
 
+### Added — ArcFace angular-margin trainer for EmbedNet
+- **`src/embednet.rs`** — new `ArcFaceTrainer` that trains the existing
+  zero-dependency EmbedNet backbone with the ArcFace additive angular
+  margin softmax loss (Deng–Guo–Xue–Zafeiriou, CVPR 2019): per-identity
+  L2-normalised classifier rows, target logit `s·cos(θ + m)` with
+  `s = 32` / `m = 0.5` defaults, the canonical `cos(π − m)` easy/
+  hard-sample gate, and a training-only `classify()` cosine probe. Unlike
+  `ContrastiveTrainer`, it trains on ordinary labelled samples rather
+  than balanced same/different pairs, giving stronger inter-class angular
+  separation on the same 128-d embedding space. Zero deps; the head is
+  training-only and inference is unchanged. Two tests prove correctness:
+  analytic gradients against central differences (conv4 weight, fc bias,
+  target and non-target classifier rows) and a 5-identity toy
+  classification convergence run (≥ 90 % held-out accuracy).
+
 ### Added — multi-algorithm ensemble fuser
 - **`src/ensemble.rs`** — `TaggedDetection` + `fuse()` greedy cluster
   over per-algorithm detection sets. Groups boxes whose pairwise IoU
