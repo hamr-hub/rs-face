@@ -8,6 +8,7 @@
 //! - PNG decode — supports filter types 0..=4 (None, Sub, Up, Average, Paeth).
 
 pub mod codec;
+pub mod jpeg;
 pub mod png;
 
 use std::ops::{Index, IndexMut};
