@@ -287,6 +287,12 @@ body {
   position: relative;
 }
 .sb-thumb img { width: 100%; height: 100%; object-fit: cover; }
+/* 实时 bbox 叠加 canvas:absolute 铺满 thumb;pointer-events:none 让 click 透到 sidebar item */
+.sb-thumb canvas.sb-thumb-overlay {
+  position: absolute; top: 0; left: 0;
+  pointer-events: none;
+  z-index: 1;
+}
 .sb-info { flex: 1; min-width: 0; }
 .sb-name {
   font-size: 13px; font-weight: 500;

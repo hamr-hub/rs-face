@@ -833,6 +833,8 @@ const preview = (() => {
     try {
       const job = await api.getJob(jobId);
       state.currentJob = job; render(job);
+      // 实时 bbox overlay:打开任务时立即画一遍缩略图盒子
+      if (typeof overlay !== 'undefined' && overlay) overlay.refresh(job);
       if (job.status === 'running' || job.status === 'queued') sse.attach(jobId);
     } catch (e) { toast.error('加载任务失败: ' + e.message); }
   }
@@ -1865,6 +1867,8 @@ const sse = (() => {
     try {
       const job = await api.getJob(state.currentJobId);
       state.currentJob = job; preview.render(job); sidebar.upsertJob(job);
+      // 实时 bbox overlay:每次帧事件 / 进度刷新后,重画缩略图上的盒子
+      if (typeof overlay !== 'undefined' && overlay) overlay.refresh(job);
     } catch {}
   });
 
@@ -2369,6 +2373,11 @@ async function init() {
   if (typeof preview.initDivider === 'function') preview.initDivider();
   if (typeof preview.initFaceFilters === 'function') preview.initFaceFilters();
   if (typeof lightbox.init === 'function') lightbox.init();
+  // 实时 bbox overlay 在缩略图上叠加(算法色);box-editor / params-panel / stats 都是惰性挂载
+  if (typeof overlay !== 'undefined' && overlay && typeof overlay.init === 'function') overlay.init();
+  if (typeof boxEditor !== 'undefined' && boxEditor && typeof boxEditor.init === 'function') boxEditor.init();
+  if (typeof paramsPanel !== 'undefined' && paramsPanel && typeof paramsPanel.init === 'function') paramsPanel.init();
+  if (typeof statsPanel !== 'undefined' && statsPanel && typeof statsPanel.init === 'function') statsPanel.init();
   // 顶栏主题快切按钮(在 theme.init() 之后,确保按钮已存在)
   const tbTheme = utils.$('#tb-theme');
   if (tbTheme) tbTheme.addEventListener('click', theme.cycle);
@@ -2477,4 +2486,8 @@ window.__rsface = {
   kpi, visibilityCtl, modalKit, ctxMenu, confirmModal,
   uploadQueue: (typeof uploadQueue !== 'undefined') ? uploadQueue : null,
   dropzonePreview: (typeof dropzonePreview !== 'undefined') ? dropzonePreview : null,
+  overlay: (typeof overlay !== 'undefined') ? overlay : null,
+  boxEditor: (typeof boxEditor !== 'undefined') ? boxEditor : null,
+  paramsPanel: (typeof paramsPanel !== 'undefined') ? paramsPanel : null,
+  statsPanel: (typeof statsPanel !== 'undefined') ? statsPanel : null,
 };
