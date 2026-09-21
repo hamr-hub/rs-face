@@ -133,6 +133,12 @@ name = "integral_bench"
 path = "benches/integral_bench.rs"
 harness = false
 
+[[bench]]
+name = "variance_prefilter"
+path = "benches/variance_prefilter.rs"
+harness = false
+required-features = ["detector-haar"]
+
 [[bin]]
 name = "bench-accuracy"
 path = "benches/accuracy.rs"
