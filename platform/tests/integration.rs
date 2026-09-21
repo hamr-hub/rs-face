@@ -71,6 +71,7 @@ async fn boot_server() -> Option<(String, tokio::sync::oneshot::Sender<()>)> {
         queued_jobs: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        gallery_cache: std::sync::Mutex::new(None),
     });
     let caches = api::ResponseCaches {
         config_json: std::sync::Arc::new(TtlCache::new("cfg", Duration::from_secs(3600))),
@@ -443,6 +444,7 @@ async fn boot_registry_for_test() -> (
         queued_jobs: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        gallery_cache: std::sync::Mutex::new(None),
     });
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let shutdown_flag = reg.shutdown.clone();

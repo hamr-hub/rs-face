@@ -12,6 +12,12 @@ pub struct Config {
     pub s3_access_key: String,
     pub s3_secret_key: String,
     pub s3_bucket: String,
+    /// S3 瞬态失败重试次数(含首次)。0 = 不重试。默认 4。
+    pub s3_max_retries: u32,
+    /// S3 重试基础间隔(毫秒)。默认 100,指数退避到 max_delay 封顶。
+    pub s3_retry_base_ms: u64,
+    /// S3 重试退避上限(毫秒)。默认 2000。
+    pub s3_retry_max_ms: u64,
     /// Haar 级联文件(.rfcf)路径。
     pub cascade_path: PathBuf,
     /// CNN 权重文件(.cnn.bin)路径。None 时 platform 走 Haar 级联路径;
@@ -41,6 +47,9 @@ pub struct Config {
     pub local_media_dir: PathBuf,
     /// PostgreSQL DSN,空字符串则纯内存。
     pub database_url: String,
+    /// PG 连接池最大连接数(默认 16)。被 `DATABASE_POOL_SIZE` 覆盖;
+    /// 0 = 用默认。运行时给 main.rs 用,cfg 本身只读。
+    pub database_pool_size: u32,
     /// 同时跑的最大任务数(超过排队)。默认 2(单核机器)。
     pub max_concurrent_jobs: usize,
     /// 任务超时(秒)。0 = 不超时(由 cancel 控)。
@@ -73,6 +82,9 @@ pub struct Config {
     /// 优雅停机等待运行中任务排空的超时(秒)。默认 180(3 分钟);
     /// 超时后强制退出。0 = 不等待(立即退出)。
     pub shutdown_grace_secs: u64,
+    /// 注册人脸画廊目录(每个子目录一个身份,内含该人的 pgm/ppm/png)。
+    /// 存在时 /recognize 接口用它构建多个识别器并输出共识身份。
+    pub gallery_dir: PathBuf,
 }
 
 impl Config {
@@ -91,6 +103,16 @@ impl Config {
             s3_access_key: env_or("S3_ACCESS_KEY", "rsface"),
             s3_secret_key: env_or("S3_SECRET_KEY", "rsface-secret"),
             s3_bucket: env_or("S3_BUCKET", "rsface"),
+            s3_max_retries: env_or("S3_MAX_RETRIES", "4")
+                .parse::<u32>()
+                .unwrap_or(4)
+                .max(1),
+            s3_retry_base_ms: env_or("S3_RETRY_BASE_MS", "100")
+                .parse::<u64>()
+                .unwrap_or(100),
+            s3_retry_max_ms: env_or("S3_RETRY_MAX_MS", "2000")
+                .parse::<u64>()
+                .unwrap_or(2000),
             cascade_path: PathBuf::from(env_or("RSFACE_CASCADE", "cascade.rfcf")),
             cnn_weights: optional_path("RSFACE_CNN_WEIGHTS"),
             use_cnn: env_or("RSFACE_USE_CNN", "0") == "1",
@@ -110,6 +132,11 @@ impl Config {
                 .unwrap_or(2_147_483_648),
             local_media_dir: PathBuf::from(env_or("LOCAL_MEDIA_DIR", "/tmp/rsface-media")),
             database_url: env_or("DATABASE_URL", ""),
+            database_pool_size: env_or("DATABASE_POOL_SIZE", "16")
+                .parse::<u32>()
+                .unwrap_or(16)
+                // 防止误设 0 把池子建空
+                .max(1),
             max_concurrent_jobs: env_or("MAX_CONCURRENT_JOBS", "2")
                 .parse()
                 .unwrap_or(2)
@@ -143,6 +170,7 @@ impl Config {
                 pool_hint
             },
             available_parallelism: ap,
+            gallery_dir: PathBuf::from(env_or("RSFACE_GALLERY_DIR", "gallery")),
         }
     }
 }

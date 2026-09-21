@@ -40,6 +40,7 @@
 //! [`EnsembleConfig::source_weights`].
 
 use crate::face::{iou, Detection};
+use crate::recognizer::Recognition;
 
 /// A single detection tagged with the algorithm that produced it.
 ///
@@ -289,6 +290,208 @@ pub fn fuse_detections(inputs: Vec<TaggedDetection>, config: &EnsembleConfig) ->
         .collect()
 }
 
+// ---- Recognition-result fusion ---------------------------------------------
+
+/// A single recogniser outcome tagged with its source and accept threshold.
+///
+/// Distances are not comparable across recognisers (LBPH emits a chi-square
+/// distance over histograms, eigenfaces/Fisherfaces emit a coefficient-space
+/// Euclidean distance), so each tagged result carries that recogniser's own
+/// accept `threshold`: it maps the raw winner distance onto a normalised
+/// confidence in `[0, 1]` so votes from different algorithms can be
+/// weighted against each other.
+#[derive(Clone, Debug)]
+pub struct TaggedRecognition {
+    pub recognition: Recognition,
+    /// Recogniser id (e.g. `"lbph"`, `"fisherface"`), the value returned
+    /// by [`crate::recognizer::FaceRecognizer::name`].
+    pub source: &'static str,
+    /// Per-recogniser reliability weight in `[0, 1]`.
+    pub source_weight: f32,
+    /// This recogniser's configured accept distance threshold.
+    pub threshold: f32,
+}
+
+impl TaggedRecognition {
+    pub fn new(
+        recognition: Recognition,
+        source: &'static str,
+        source_weight: f32,
+        threshold: f32,
+    ) -> Self {
+        Self {
+            recognition,
+            source,
+            source_weight: source_weight.max(0.0),
+            threshold,
+        }
+    }
+
+    /// Positive vote `(label, normalised confidence)` for an accepted
+    /// [`Recognition::Match`], or `None` for every abstaining outcome.
+    fn vote(&self) -> Option<(String, f32)> {
+        match &self.recognition {
+            Recognition::Match {
+                label, distance, ..
+            } => Some((
+                label.clone(),
+                recognition_confidence(*distance, self.threshold),
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// Map a winner distance onto a normalised confidence using the
+/// recogniser accept threshold: `1` at distance 0, `0` at the threshold.
+fn recognition_confidence(distance: f32, threshold: f32) -> f32 {
+    if threshold <= 0.0 || !distance.is_finite() {
+        return 0.0;
+    }
+    (1.0 - distance / threshold).clamp(0.0, 1.0)
+}
+
+/// Tunable knobs for recognition-result fusion.
+#[derive(Clone, Debug)]
+pub struct RecognitionFusionConfig {
+    /// Minimum recogniser count voting for one label to emit it.
+    pub min_votes: usize,
+    /// Fraction of the cast vote weight a label must hold strictly
+    /// above this value (0.5 = strict majority; a 50/50 split is
+    /// disagreement and emits nothing).
+    pub min_consensus: f32,
+    /// Per-source weight overrides; key is the recogniser name. A missing
+    /// entry defaults to `1.0`; `0.0` silences a recogniser.
+    pub source_weights: std::collections::HashMap<&'static str, f32>,
+}
+
+impl Default for RecognitionFusionConfig {
+    fn default() -> Self {
+        Self {
+            min_votes: 1,
+            min_consensus: 0.5,
+            source_weights: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl RecognitionFusionConfig {
+    /// Look up the source weight with the default fallback.
+    pub fn weight(&self, source: &'static str) -> f32 {
+        self.source_weights
+            .get(source)
+            .copied()
+            .unwrap_or(1.0)
+            .max(0.0)
+    }
+}
+
+/// One fused identity: the label, its vote weight, and the recognisers
+/// that agreed on it.
+#[derive(Clone, Debug)]
+pub struct FusedRecognition {
+    pub label: String,
+    /// Number of recognisers that cast a positive vote for this label.
+    pub votes: usize,
+    /// Weighted-average normalised confidence in `[0, 1]`.
+    pub confidence: f32,
+    /// Fraction of the total cast vote weight this label holds.
+    pub consensus: f32,
+    /// Recogniser names that voted for this label, joined with `+`.
+    pub sources: String,
+}
+
+#[derive(Default)]
+struct VoteGroup {
+    votes: usize,
+    /// Sum of source weights (raw vote weight).
+    weight: f32,
+    /// Sum of source_weight times normalised confidence.
+    weighted_conf: f32,
+    sources: Vec<&'static str>,
+}
+
+/// Fuse N recogniser outcomes into a consensus identity ranking.
+///
+/// The pass:
+/// 1. Every accepted [`Recognition::Match`] casts one weighted vote for
+///    its label; non-match outcomes abstain.
+/// 2. Votes are grouped by label and the groups ranked by vote weight.
+/// 3. A group is emitted iff `votes >= min_votes` and its share of the
+///    cast weight is strictly greater than `min_consensus`, so an even
+///    split between recognisers is returned as no consensus rather
+///    than a coin-flip identity.
+///
+/// Returns the agreed identities strongest-first. With unanimous
+/// agreement the first entry is the fused identity; inspect its
+/// `sources`/`votes` for the consensus breakdown.
+pub fn fuse_recognitions(
+    inputs: Vec<TaggedRecognition>,
+    config: &RecognitionFusionConfig,
+) -> Vec<FusedRecognition> {
+    // Preserve first-encounter label order for deterministic output.
+    let mut labels: Vec<String> = Vec::new();
+    let mut groups: std::collections::HashMap<String, VoteGroup> = std::collections::HashMap::new();
+    let mut total_weight = 0.0f32;
+
+    for mut tagged in inputs {
+        let override_w = config.weight(tagged.source);
+        tagged.source_weight = tagged.source_weight.min(override_w);
+        if tagged.source_weight <= 0.0 {
+            continue;
+        }
+        let Some((label, confidence)) = tagged.vote() else {
+            continue;
+        };
+        total_weight += tagged.source_weight;
+        if !groups.contains_key(&label) {
+            labels.push(label.clone());
+        }
+        let group = groups.entry(label).or_default();
+        group.votes += 1;
+        group.weight += tagged.source_weight;
+        group.weighted_conf += tagged.source_weight * confidence;
+        group.sources.push(tagged.source);
+    }
+
+    if total_weight <= 0.0 {
+        return Vec::new();
+    }
+
+    let mut ranked: Vec<(String, VoteGroup)> = labels
+        .into_iter()
+        .map(|label| {
+            let group = groups.remove(&label).unwrap_or_default();
+            (label, group)
+        })
+        .collect();
+    ranked.sort_unstable_by(|a, b| {
+        b.1.weight
+            .total_cmp(&a.1.weight)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+
+    ranked
+        .into_iter()
+        .filter_map(|(label, group)| {
+            let consensus = group.weight / total_weight;
+            if group.votes < config.min_votes || consensus <= config.min_consensus {
+                return None;
+            }
+            let mut sources = group.sources;
+            sources.sort_unstable();
+            sources.dedup();
+            Some(FusedRecognition {
+                label,
+                votes: group.votes,
+                confidence: group.weighted_conf / group.weight,
+                consensus,
+                sources: sources.join("+"),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +612,152 @@ mod tests {
         let b = TaggedDetection::new(det(50, 50, 50, 0, 0.9), "luminance", 1.0);
         let out = fuse(vec![a, b], &EnsembleConfig::default());
         assert!(out.is_empty(), "zero-area boxes must not cluster");
+    }
+
+    // ---- Recognition fusion tests ----
+
+    fn matched(label: &str, distance: f32) -> Recognition {
+        Recognition::Match {
+            label: label.to_string(),
+            distance,
+            margin: 0.5,
+        }
+    }
+
+    fn tag(
+        recognition: Recognition,
+        source: &'static str,
+        weight: f32,
+        threshold: f32,
+    ) -> TaggedRecognition {
+        TaggedRecognition::new(recognition, source, weight, threshold)
+    }
+
+    #[test]
+    fn fuse_recognitions_empty_is_empty() {
+        assert!(fuse_recognitions(Vec::new(), &RecognitionFusionConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn fuse_recognitions_all_abstaining_is_empty() {
+        let inputs = vec![
+            tag(Recognition::NoCandidates, "lbph", 1.0, 10.0),
+            tag(
+                Recognition::BelowThreshold { best: None },
+                "fisherface",
+                1.0,
+                5.0,
+            ),
+            tag(
+                Recognition::Ambiguous {
+                    first: "a".to_string(),
+                    second: "b".to_string(),
+                    margin: 0.1,
+                },
+                "eigenface",
+                1.0,
+                5.0,
+            ),
+        ];
+        assert!(fuse_recognitions(inputs, &RecognitionFusionConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn fuse_recognitions_single_vote_emits_one() {
+        let inputs = vec![tag(matched("alice", 4.0), "lbph", 1.0, 10.0)];
+        let out = fuse_recognitions(inputs, &RecognitionFusionConfig::default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].label, "alice");
+        assert_eq!(out[0].votes, 1);
+        assert_eq!(out[0].sources, "lbph");
+        assert!(
+            (out[0].confidence - 0.6).abs() < 1e-6,
+            "conf={}",
+            out[0].confidence
+        );
+        assert!((out[0].consensus - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fuse_recognitions_unanimous_agreement_emits_one() {
+        // Different distance scales/thresholds but same label: LBPH
+        // chi-square 5 with threshold 10; Fisherface Euclidean 1.5 with
+        // threshold 3. Both normalise to confidence 0.5.
+        let inputs = vec![
+            tag(matched("alice", 5.0), "lbph", 1.0, 10.0),
+            tag(matched("alice", 1.5), "fisherface", 1.0, 3.0),
+        ];
+        let out = fuse_recognitions(inputs, &RecognitionFusionConfig::default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].label, "alice");
+        assert_eq!(out[0].votes, 2);
+        assert_eq!(out[0].sources, "fisherface+lbph");
+        assert!((out[0].confidence - 0.5).abs() < 1e-6);
+        assert!((out[0].consensus - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fuse_recognitions_even_split_emits_nothing() {
+        // Two equally weighted recognisers, different labels: 50/50 is
+        // disagreement, not a consensus.
+        let inputs = vec![
+            tag(matched("alice", 2.0), "lbph", 1.0, 10.0),
+            tag(matched("bob", 2.0), "fisherface", 1.0, 10.0),
+        ];
+        assert!(fuse_recognitions(inputs, &RecognitionFusionConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn fuse_recognitions_weighted_majority_wins() {
+        // Two votes alice (weight 1 each) vs one bob (weight 1): alice
+        // holds 2/3 > 0.5 and is emitted.
+        let inputs = vec![
+            tag(matched("alice", 2.0), "lbph", 1.0, 10.0),
+            tag(matched("alice", 2.0), "fisherface", 1.0, 10.0),
+            tag(matched("bob", 2.0), "eigenface", 1.0, 10.0),
+        ];
+        let out = fuse_recognitions(inputs, &RecognitionFusionConfig::default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].label, "alice");
+        assert_eq!(out[0].votes, 2);
+        assert!((out[0].consensus - (2.0 / 3.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fuse_recognitions_min_votes_blocks_weak_consensus() {
+        let cfg = RecognitionFusionConfig {
+            min_votes: 2,
+            ..RecognitionFusionConfig::default()
+        };
+        // One heavy vote for alice vs two silenced-weight votes; with
+        // min_votes 2 a single recogniser cannot win even at full weight.
+        let inputs = vec![tag(matched("alice", 2.0), "lbph", 1.0, 10.0)];
+        assert!(fuse_recognitions(inputs, &cfg).is_empty());
+    }
+
+    #[test]
+    fn fuse_recognitions_source_weight_override_silences_recogniser() {
+        let mut cfg = RecognitionFusionConfig::default();
+        cfg.source_weights.insert("lbph", 0.0);
+        // lbph says alice but is silenced; fisherface says bob and wins.
+        let inputs = vec![
+            tag(matched("alice", 2.0), "lbph", 1.0, 10.0),
+            tag(matched("bob", 2.0), "fisherface", 1.0, 10.0),
+        ];
+        let out = fuse_recognitions(inputs, &cfg);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].label, "bob");
+        assert_eq!(out[0].sources, "fisherface");
+    }
+
+    #[test]
+    fn fuse_recognitions_zero_weight_input_is_ignored() {
+        let inputs = vec![
+            tag(matched("alice", 2.0), "lbph", 0.0, 10.0),
+            tag(matched("bob", 2.0), "fisherface", 1.0, 10.0),
+        ];
+        let out = fuse_recognitions(inputs, &RecognitionFusionConfig::default());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].label, "bob");
     }
 }

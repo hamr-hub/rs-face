@@ -102,7 +102,10 @@ services:
       S3_BUCKET: rsface
       RSFACE_CASCADE: /app/cascade.rfcf
       WEB_DIR: /app/web
-      TMP_DIR: /tmp/rsface-jobs
+      # 用 /tmp 作为 tmp_dir(1777 world-writable,UID 1000 可写),
+      # 而不是 Dockerfile.gpu 写死的 /tmp/rsface-jobs(uid 10001 owned,
+      # uid 1000 在 0755 perm 下不可写)。
+      TMP_DIR: /tmp/rsface-jobs-staging
       MAX_FRAMES_VIDEO: ${MAX_FRAMES_VIDEO:-3600}
       MAX_FACE_CROPS: ${MAX_FACE_CROPS:-2000}
       MIN_FACE_SIZE: ${MIN_FACE_SIZE:-24}
@@ -145,7 +148,7 @@ services:
       # server 容器内 listen 8080 → host 20080。
       - "20080:8080"
     volumes:
-      # bind mount 到 data/media/(项目内,跟随代码)。容器内 uid=10001(rsface)
-      # 通过 host 上 hyx(uid 1000)的目录 permission 写入 — 与 CPU compose 同源。
+      # bind mount 到 data/media/(项目内,跟随代码)。容器内 uid=1000
+      # 对应 host hyx(uid 1000),bind mount 后目录天然是 1000:1000 可写。
       - ../data/media:/var/rsface-media
     restart: unless-stopped

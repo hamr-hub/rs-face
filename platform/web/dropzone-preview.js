@@ -145,13 +145,8 @@ const dropzonePreview = (() => {
     const fv = utils.$('#file-video'); if (fv) fv.value = '';
   }
 
-  function humanSize(n) {
-    if (n == null || isNaN(n)) return '0 B';
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
-    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
-  }
+  // humanSize 已上移到 utils(避免与 upload-queue.js 重复)
+  function humanSize(n) { return utils.humanSize(n); }
 
   // ===========================================================================
   // 目录拖入支持(DataTransferItem.webkitGetAsEntry + 递归 walk)

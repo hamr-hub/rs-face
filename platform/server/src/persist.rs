@@ -29,15 +29,32 @@ pub struct Db {
 }
 
 impl Db {
-    pub async fn connect(url: &str) -> Self {
+    /// 用指定的最大连接数建池。默认 16:`MAX_CONCURRENT_JOBS=2` 跑检测时,
+    /// 还要给 `/api/jobs` 列表轮询 + `/api/health/deep` 的 SELECT 1 + SSE
+    /// 任务的 telemetry 写入 + heartbeat(jobs.rs 每 5s 一次) 留余量。
+    /// 上限 100,再高会被 PG `max_connections` 默认 100 顶回,连接错误
+    /// 而不是排队。
+    pub async fn connect_with(url: &str, max_connections: u32) -> Self {
         match PgPoolOptions::new()
-            .max_connections(8)
+            .max_connections(max_connections)
+            // 保持至少 2 条预热连接,避免每次冷启动第一次查询都要 TCP+TLS 握手
+            // (rustls 通道),普通 5xx ms 抖动也会触发瞬时断连。
+            .min_connections(2.min(max_connections))
+            // 5s 获取超时:超过说明 PG 满了或网卡堵了,直接让上层拿到错误
+            // 并降级(我们已经是尽力而为)。
             .acquire_timeout(std::time::Duration::from_secs(5))
+            // 连接空闲 10min 关闭 — docker 内 keepalive 已被 NAT 屏蔽,
+            // 让 sqlx 自己回收,避免 stale 连接被 PG 服务端悄悄断掉后下次
+            // 使用拿 ERR_CONNECTION_RESET。
+            .idle_timeout(std::time::Duration::from_secs(600))
+            // 连接最大存活 30min:PG 端 wal/连接池偶尔会回收老连接,
+            // 这里主动放弃比被动拿错好。
+            .max_lifetime(std::time::Duration::from_secs(1800))
             .connect(url)
             .await
         {
             Ok(pool) => {
-                tracing::warn!("[persist] connected to PostgreSQL");
+                tracing::warn!("[persist] connected to PostgreSQL (max={max_connections})");
                 Self { pool: Some(pool) }
             }
             Err(e) => {
@@ -45,6 +62,12 @@ impl Db {
                 Self { pool: None }
             }
         }
+    }
+
+    /// 默认 16 连接,平台默认行为。
+    #[allow(dead_code)] // 保留为 rsface_platform library API;bin 走 connect_with
+    pub async fn connect(url: &str) -> Self {
+        Self::connect_with(url, 16).await
     }
 
     /// 按文件名升序 apply 尚未记录的迁移,返回本次新应用的文件数。

@@ -93,7 +93,11 @@ fn main() {
             let mut sink: u64 = 0;
             for i in 0..len {
                 let pass = SquaredIntegralImage::passes_variance_sums_fast(
-                    sums[i], sum_sqs[i], n_pixels, n_pixels_sq, thr,
+                    sums[i],
+                    sum_sqs[i],
+                    n_pixels,
+                    n_pixels_sq,
+                    thr,
                 );
                 if pass {
                     sink = sink.wrapping_add(1);
@@ -124,7 +128,11 @@ fn main() {
             // Tail
             for i in (chunks * 4)..len {
                 let pass = SquaredIntegralImage::passes_variance_sums_fast(
-                    sums[i], sum_sqs[i], n_pixels, n_pixels_sq, thr,
+                    sums[i],
+                    sum_sqs[i],
+                    n_pixels,
+                    n_pixels_sq,
+                    thr,
                 );
                 if pass {
                     sink = sink.wrapping_add(1);

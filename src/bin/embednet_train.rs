@@ -274,12 +274,18 @@ fn main() {
         );
         std::process::exit(2);
     };
-    let steps: usize = positionals.get(1).and_then(|s| s.parse().ok()).unwrap_or(4000);
+    let steps: usize = positionals
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4000);
     let out = positionals
         .get(2)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("embednet.rsen"));
-    let seed: u64 = positionals.get(3).and_then(|s| s.parse().ok()).unwrap_or(20260920);
+    let seed: u64 = positionals
+        .get(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20260920);
 
     let ids = match load_dataset(Path::new(dir)) {
         Ok(ids) => ids,
@@ -402,9 +408,7 @@ fn run_arcface(
         let loss = trainer.train_step(&sample, label);
         if step % 200 == 0 || step == 1 {
             let acc = validate_arcface(&trainer, ids);
-            println!(
-                "[embednet_train] step={step:>5} loss={loss:.4} val_cls_acc={acc:.3}"
-            );
+            println!("[embednet_train] step={step:>5} loss={loss:.4} val_cls_acc={acc:.3}");
             if acc > best_acc {
                 best_acc = acc;
                 best = trainer.snapshot();

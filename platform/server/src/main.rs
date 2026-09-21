@@ -8,6 +8,7 @@ mod config;
 mod jobs;
 mod metrics;
 mod persist;
+mod recognition;
 mod s3;
 mod zip;
 
@@ -67,12 +68,17 @@ async fn main() {
         if cfg.cors_allow_origin.is_empty() { "(off)".to_string() } else { cfg.cors_allow_origin.clone() },
         cfg.shutdown_grace_secs);
 
-    let s3 = Arc::new(s3::S3Client::new(
+    let s3 = Arc::new(s3::S3Client::with_retry(
         cfg.s3_endpoint.clone(),
         cfg.s3_region.clone(),
         cfg.s3_access_key.clone(),
         cfg.s3_secret_key.clone(),
         cfg.s3_bucket.clone(),
+        s3::RetryPolicy::from_env_counts(
+            cfg.s3_max_retries,
+            cfg.s3_retry_base_ms,
+            cfg.s3_retry_max_ms,
+        ),
     ));
 
     if let Err(e) = s3.ensure_bucket() {
@@ -94,7 +100,7 @@ async fn main() {
         // 低 #13:DATABASE_URL 设置 → connect 失败也 fail-fast,与 migrate
         // 失败一致:对着一个连不上的 PG 跑内存模式,会静默丢全部持久化,
         // 比启动失败更危险。空字符串则保留原"纯内存"降级路径。
-        let db = match persist::Db::connect(&cfg.database_url).await {
+        let db = match persist::Db::connect_with(&cfg.database_url, cfg.database_pool_size).await {
             d if d.pool.is_none() => {
                 tracing::warn!(
                     "[rsface-platform] FATAL: DATABASE_URL set but PG connect failed (set empty DATABASE_URL to run memory-only)"
@@ -141,6 +147,7 @@ async fn main() {
         queued_jobs: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
         shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        gallery_cache: Mutex::new(None),
     });
 
     // 响应缓存层(无外部依赖)。四份 TTL cache:

@@ -8,5 +8,6 @@ pub mod config;
 pub mod jobs;
 pub mod metrics;
 pub mod persist;
+pub mod recognition;
 pub mod s3;
 pub mod zip;

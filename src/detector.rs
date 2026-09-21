@@ -434,7 +434,8 @@ impl Detector {
                     // Same u32-overflow guard as the integral-build path:
                     // the GPU kernel's table cannot represent wide images.
                     if self.gpu_worthwhile(cw, ch) && crate::integral::prefix_sums_fit_u32(cw, ch) {
-                        let max_dets = ((cw - win_w + 1) * (ch - win_h + 1)).min(8192);
+                        let max_dets =
+                            ((cw - win_w + 1) * (ch - win_h + 1)).min(GPU_DETECT_MAX_HITS);
                         let gpu_dets = g.detect_windows(&self.cascade, current, max_dets);
                         for d in gpu_dets {
                             if d.score < self.config.min_score {
@@ -493,7 +494,7 @@ impl Detector {
             let can_simd_batch = use_variance
                 && stride == 1
                 && thr_n_sq_safe_for_simd
-                && row_window_count >= 64;
+                && row_window_count >= SIMD_BATCH_MIN_ROW_WINDOWS;
             let mut y = 0;
             while y + win_h <= ch {
                 let mut x = 0;
@@ -537,7 +538,10 @@ impl Detector {
                         }
                         windows_evaluated += 4;
                         let mask = SquaredIntegralImage::passes_variance_mask_4(
-                            sums, sum_sqs, n_pixels_f64, thr_n_sq_f64,
+                            sums,
+                            sum_sqs,
+                            n_pixels_f64,
+                            thr_n_sq_f64,
                         );
                         if mask != 0 {
                             for i in 0..4usize {
@@ -550,9 +554,8 @@ impl Detector {
                                 let s_f = s as f64;
                                 let ss_f = ss as f64;
                                 let variance_part = n_pixels_f64.mul_add(ss_f, -s_f * s_f);
-                                if let Some(score) = self
-                                    .cascade
-                                    .classify_inbounds_with_variance_part(
+                                if let Some(score) =
+                                    self.cascade.classify_inbounds_with_variance_part(
                                         &ii,
                                         &ri,
                                         xi,
@@ -758,6 +761,18 @@ fn next_pyramid_level(
     let sy = img.height() as f32 / level.height() as f32;
     Some((level, sx, sy))
 }
+
+/// Upper bound on raw sliding-window hits the GPU cascade kernel reports
+/// in a single call. Tuned so the returned `Vec<GpuDetection>` stays in L1
+/// (8192 entries × 16 B ≈ 128 KiB on aarch64) and never blows up a
+/// `Vec::with_capacity` over a noisy 4K frame.
+const GPU_DETECT_MAX_HITS: usize = 8192;
+
+/// Minimum row window count that amortises the 4-wide SIMD variance batch
+/// setup cost (one `(sum, sum_sq)` table read per lane, one bitmask
+/// compare). Below this the scalar tail wins on every measurement; the
+/// constant guards the `can_simd_batch` gate.
+const SIMD_BATCH_MIN_ROW_WINDOWS: usize = 64;
 
 /// Relative position/size tolerance for two raw hits to count as the same
 /// face. Matches OpenCV's `groupRectangles(..., eps=0.2)`.

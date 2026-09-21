@@ -9,6 +9,11 @@
 //! - `POST /api/jobs/image`       上传图片检测(multipart: file,≤ UPLOAD_LIMIT_IMAGE_MB)
 //! - `POST /api/jobs/video`       上传视频检测(multipart: file,≤ UPLOAD_LIMIT_VIDEO_GB)
 //! - `POST /api/jobs/stream`      直播流检测(JSON: {url})
+//! - `POST /api/import/video`     视频导入(multipart,等价 `/api/jobs/video`,
+//!   但响应额外带 S3 LAN URL 让浏览器直接 <video> 播放)
+//! - `POST /api/import/video-url` 视频 URL 导入(JSON `{url, algo?}`,服务端 ffmpeg 拉取,
+//!   带 60s 内同 URL 去重 + 3 次指数退避重试)
+//! - `GET  /api/import/{id}/urls`  导入任务 S3 LAN URL 轮询端点(轻量,只查内存)
 //! - `GET  /api/jobs`             任务列表(summary;?limit=&offset= 分页)
 //! - `GET  /api/jobs/stats`       按算法聚合成功/失败/平均耗时
 //! - `GET  /api/jobs/{id}`        任务详情(帧 + 人脸)
@@ -87,6 +92,7 @@ pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
         .route("/api/jobs/{id}/cancel", post(cancel_job))
         .route("/api/jobs/{id}/events", get(job_events))
         .route("/api/jobs/{id}/compare", post(compare_algos))
+        .route("/api/jobs/{id}/recognize", post(recognize_job))
         .route("/api/jobs/{id}/download.zip", get(download_zip))
         .route("/api/jobs/{id}/retry", post(retry_job))
         // 导入端点 — 语义上"导入"一次性任务(视频文件 / 视频 URL),
@@ -449,12 +455,36 @@ async fn list_jobs(
             return cached_json_response_with_etag(bytes, &etag);
         }
     }
-    let all = state.list();
+    // 合并:内存中的 live jobs + 持久化的历史 jobs。
+    // - in-memory 优先(它有 frames[]、实时 status、SSE 通道)
+    // - 持久化行作为历史兜底(重启后内存丢的 700+ jobs 通过这条路径透出)
+    // 合并后按 created_ms DESC 排序。
+    let mem = state.list();
+    let persisted: Vec<serde_json::Value> = if state.db.is_enabled() {
+        state.db.list_jobs().await
+    } else {
+        Vec::new()
+    };
+    let mut by_id: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::with_capacity(mem.len() + persisted.len());
+    for v in persisted {
+        if let Some(id) = v.get("id").and_then(|i| i.as_str()) {
+            by_id.insert(id.to_string(), v);
+        }
+    }
+    for j in &mem {
+        by_id.insert(j.id.clone(), j.summary());
+    }
+    let mut all: Vec<serde_json::Value> = by_id.into_values().collect();
+    all.sort_by(|a, b| {
+        let av = a.get("created_ms").and_then(|v| v.as_i64()).unwrap_or(0);
+        let bv = b.get("created_ms").and_then(|v| v.as_i64()).unwrap_or(0);
+        bv.cmp(&av)
+    });
     let total = all.len();
     // 无 limit/offset:保持旧版响应 shape(只有 jobs 数组,向后兼容)。
     let body = if cacheable {
-        let jobs: Vec<serde_json::Value> = all.iter().map(|j| j.summary()).collect();
-        serde_json::json!({"jobs": jobs})
+        serde_json::json!({"jobs": all})
     } else {
         let offset = q.offset.unwrap_or(0).min(total);
         let limit = q.limit.unwrap_or(total.saturating_sub(offset));
@@ -462,7 +492,7 @@ async fn list_jobs(
             .iter()
             .skip(offset)
             .take(limit)
-            .map(|j| j.summary())
+            .cloned()
             .collect();
         serde_json::json!({
             "jobs": jobs,
@@ -955,6 +985,259 @@ async fn compare_algos(
 /// 必须有上限,超时即 kill。
 const FFMPEG_IMAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// `POST /api/jobs/{id}/recognize?detector=haar`
+/// 对图片任务的每张人脸用多个识别器(LBPH/Eigenface/Fisherface)识别,
+/// 返回每个检测人脸的共识身份与各识别器投票明细。画廊来自配置的
+/// `RSFACE_GALLERY_DIR`(每个子目录一个身份)。前端在算法对比视图旁
+/// 渲染共识标签。
+async fn recognize_job(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+    Path(id): Path<String>,
+    Query(q): Query<CompareQuery>,
+) -> Response {
+    const RECOGNIZE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+    let detector_name = match &q.algos {
+        Some(s) if !s.is_empty() => s.split(',').next().unwrap_or("haar").trim().to_ascii_lowercase(),
+        _ => "haar".to_string(),
+    };
+    if !crate::jobs::available_algos().contains(&detector_name.as_str()) {
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            "bad_detector",
+            &format!("unsupported detector '{detector_name}'"),
+            Some("use one of: haar, cnn, luminance"),
+        );
+    }
+
+    let Some(job) = state.get(&id) else {
+        return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None);
+    };
+    let Some(media_key) = job
+        .original_media_key
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone() else {
+        return error_response_with(
+            StatusCode::NOT_FOUND,
+            "no_media",
+            "job has no original media (stream jobs not supported)",
+            Some("re-upload the image and retry"),
+        );
+    };
+    if job.kind != crate::jobs::JobKind::Image {
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            "not_image_job",
+            "recognition only supports image jobs",
+            Some("use compare_algos for video jobs (per-frame detection)"),
+        );
+    }
+
+    let ext = std::path::Path::new(
+        media_key.rsplit_once('/').map(|(_, name)| name).unwrap_or(&media_key),
+    )
+    .extension()
+    .and_then(|e| e.to_str())
+    .unwrap_or("")
+    .to_ascii_lowercase();
+    if !matches!(
+        ext.as_str(),
+        "png" | "pgm" | "ppm" | "jpg" | "jpeg" | "bmp" | "webp"
+    ) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "recognize only supports image jobs (videos / streams require a separate endpoint)",
+        );
+    }
+
+    let bytes = {
+        if let Some(rest) = media_key.strip_prefix("local://") {
+            let path = state.cfg.local_media_dir.join(rest);
+            match tokio::fs::metadata(&path).await {
+                Ok(m) if m.len() > RECOGNIZE_MAX_BYTES => {
+                    return error_response(StatusCode::PAYLOAD_TOO_LARGE, "original media too large")
+                }
+                Err(e) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("stat local media: {e}"),
+                    );
+                }
+                _ => {}
+            }
+            match tokio::fs::read(&path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("read local media: {e}"),
+                    );
+                }
+            }
+        } else if let Some(rest) = media_key.strip_prefix("s3://") {
+            let s3 = state.s3.clone();
+            let owned = rest.to_string();
+            let res = tokio::task::spawn_blocking(move || {
+                s3.get_object_range(&owned, 0, Some(RECOGNIZE_MAX_BYTES))
+            })
+            .await;
+            match res {
+                Ok(Ok((b, _total))) => b,
+                _ => return error_response(StatusCode::NOT_FOUND, "S3 object not found"),
+            }
+        } else {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "media key has no scheme");
+        }
+    };
+
+    let gray = match decode_to_gray(&bytes, &state.cfg.tmp_dir, &id).await {
+        Ok(g) => g,
+        Err(e) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("decode: {e}"))
+        }
+    };
+
+    let gallery = match load_or_get_gallery(&state) {
+        Some(g) => g,
+        None => {
+            let dir = &state.cfg.gallery_dir;
+            return error_response_with(
+                StatusCode::FAILED_DEPENDENCY,
+                "no_gallery",
+                "no registered face gallery configured",
+                Some(&format!(
+                    "set RSFACE_GALLERY_DIR to a folder of identity folders (missing or empty: {})",
+                    dir.display()
+                )),
+            );
+        }
+    };
+    let identities = gallery.identities;
+    let gallery_crops = gallery.crops;
+    if gallery.recognizers.is_empty() {
+        return error_response_with(
+            StatusCode::FAILED_DEPENDENCY,
+            "no_gallery",
+            "gallery present but no recogniser could be trained (need ≥1 identity and ≥2 crops for eigenface/fisherface; LBPH trains on 1)",
+            Some("add more identity folders or crops, then call this endpoint again (gallery is loaded once at startup)"),
+        );
+    }
+
+    // per-job 缓存命中 → 直接返回(0 次检测、0 次识别)。
+    let cache_key = format!("{}|{}|{}", id, detector_name, media_key);
+    {
+        let cache = job
+            .recognize_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = cache.as_ref() {
+            if hit.cache_key == cache_key {
+                return Json(hit.body.clone()).into_response();
+            }
+        }
+    }
+
+    let (width, height) = (gray.width(), gray.height());
+    let detector_name_for_task = detector_name.clone();
+    let gallery_for_task = gallery.clone();
+    let recognized = tokio::task::spawn_blocking(move || {
+        let detector = crate::jobs::build_detector_by_name(&detector_name_for_task)?;
+        let faces = crate::recognition::recognize_faces(&detector, &gallery_for_task, &gray);
+        std::io::Result::Ok(faces)
+    })
+    .await;
+    let faces = match recognized {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            return error_response_with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &format!("recognize failed: {e}"),
+                None,
+            );
+        }
+        Err(e) => {
+            return error_response_with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                &format!("recognize join: {e}"),
+                None,
+            );
+        }
+    };
+
+    let body = serde_json::json!({
+        "job_id": id,
+        "detector": detector_name,
+        "width": width,
+        "height": height,
+        "gallery_identities": identities,
+        "gallery_crops": gallery_crops,
+        "face_count": faces.len(),
+        "faces": faces,
+    });
+    // 写 per-job 缓存(下一次相同 (job_id, detector, media_key) 直接 hit)。
+    {
+        let body_for_cache = body.clone();
+        let mut cache = job
+            .recognize_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *cache = Some(crate::jobs::RecognizeCache {
+            cache_key,
+            body: body_for_cache,
+        });
+    }
+    Json(body).into_response()
+}
+
+/// 从 `state.gallery_cache` 取画廊。缓存命中:Arc clone 返回;未命中:
+/// 同步加载 `GalleryBundle::load`,把结果(画廊路径 + Arc)写回缓存。
+///
+/// 画廊加载开销:LBPH 增量注册 O(N crops),Eigenface PCA O(N²),
+/// Fisherface LDA O(N²·K) — 一次加载 ~100ms 级(50 身份 / 500 crops),
+/// 不能让每个 `/recognize` 请求都重跑。
+///
+/// 失败语义:目录不存在 / 加载 IO 失败 → `None` → API 返 `no_gallery`
+/// (合法部署模式)。warn 日志保留以帮助运维定位权限 / 损坏文件问题。
+fn load_or_get_gallery(
+    state: &Arc<JobRegistry>,
+) -> Option<std::sync::Arc<crate::recognition::GalleryBundle>> {
+    let dir = state.cfg.gallery_dir.clone();
+    // canonicalize 失败回退原路径(目录不存在时 canonicalize 报错,
+    // GalleryBundle::load 自己再报具体 IO 错)。
+    let dir_abs = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+
+    // 快速路径:已缓存且路径一致。
+    {
+        let cache = state.gallery_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_dir, _ts, bundle)) = cache.as_ref() {
+            if *cached_dir == dir_abs {
+                return Some(std::sync::Arc::clone(bundle));
+            }
+        }
+    }
+
+    // 缺失 / 路径变化:同步加载(最多 ~100ms),把结果写回缓存。
+    let bundle = match crate::recognition::GalleryBundle::load(&dir_abs) {
+        Ok(b) => std::sync::Arc::new(b),
+        Err(e) => {
+            if dir_abs.is_dir() {
+                tracing::warn!(
+                    "[recognize] gallery load failed for {}: {e}",
+                    dir_abs.display()
+                );
+            }
+            return None;
+        }
+    };
+    let ts = std::time::SystemTime::now();
+    let mut cache = state.gallery_cache.lock().unwrap_or_else(|e| e.into_inner());
+    *cache = Some((dir_abs, ts, std::sync::Arc::clone(&bundle)));
+    Some(bundle)
+}
+
 /// 同步版 ffmpeg 调用的超时包装:在 spawn_blocking 里用 std::thread 启
 /// ffmpeg,在超时窗口内等 join;超时则 std::process::exit(2) 暴力杀进程
 /// (子进程继承 stdio 句柄,fork 杀子进程足够;若有 shell 包装再补一层
@@ -996,7 +1279,7 @@ fn run_ffmpeg_with_timeout_blocking(
 /// Decode arbitrary image bytes (PNG/PGM/PPM/JPG via ffmpeg) into a GrayImage.
 /// Falls back to ffmpeg-based PGM conversion for JPG/WebP inputs that the
 /// core codec doesn't recognise.
-async fn decode_to_gray(
+pub(crate) async fn decode_to_gray(
     bytes: &[u8],
     tmp_dir: &std::path::Path,
     job_id: &str,
@@ -1547,17 +1830,26 @@ async fn job_events(
     // 起始 event id = 客户端上次收到的;没传则从 0 开始。
     let start_after = q.last_event_id.unwrap_or(0);
     // 把 job 现有的帧当作历史回放,跳过 start_after 之前的。
+    //
+    // 性能:长视频 job(数千帧)上回放可能大到几 MB,把所有帧一次性 backfill
+    // 既吃 broadcast 缓冲又把 SSE 任务堵在 tx.send 上等客户端消费。
+    // 截到最近 `REPLAY_MAX_FRAMES` 帧,既保证新连接的客户端立刻看到最新进度,
+    // 也让老旧帧在重新加载页面时自然从 /api/jobs/{id} 走列表端点补齐。
+    const REPLAY_MAX_FRAMES: usize = 500;
     let mut seq: u64 = 0;
     let replay: Vec<(u64, String)> = {
         let frames = job.frames.lock().unwrap_or_else(|e| e.into_inner());
-        frames
+        let total = frames.len();
+        let start_idx = total.saturating_sub(REPLAY_MAX_FRAMES);
+        frames[start_idx..]
             .iter()
             .enumerate()
-            .map(|(i, _fr)| {
+            .map(|(off, _fr)| {
                 seq += 1;
+                let idx = start_idx + off;
                 let payload = serde_json::json!({
                     "type": "replay",
-                    "index": i,
+                    "index": idx,
                 })
                 .to_string();
                 (seq, payload)
@@ -1821,6 +2113,36 @@ async fn media(
             Ok(m) => m.len(),
             Err(_) => 0,
         };
+        // ETag/304:local media 的弱 ETag 用 (size, mtime_nanos) 算。
+        // 这样浏览器 / <img>/<video> 元素重新挂载同一个 media URL 时,
+        // 命中 304 后 0 字节 body,显著省 LAN 出口带宽 — 一个 job 详情页
+        // 切到下一个再切回来,所有 <img> 都会走 304,只有首次有真实 body。
+        let mtime_ns = tokio::fs::metadata(&local_path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let local_etag = format!("W/\"{}-{}\"", total, mtime_ns);
+        if total > 0 {
+            if let Some(if_none_match) = headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok())
+            {
+                if etag_eq(&local_etag, if_none_match) {
+                    return (
+                        StatusCode::NOT_MODIFIED,
+                        [
+                            (header::ETAG, HeaderValue::from_str(&local_etag).unwrap_or_else(|_| HeaderValue::from_static("W/\"-\""))),
+                            (header::CACHE_CONTROL, HeaderValue::from_static(cache)),
+                            (header::ACCEPT_RANGES, HeaderValue::from_static("bytes")),
+                        ],
+                    )
+                        .into_response();
+                }
+            }
+        }
         if let (Some(rh), true) = (&range_hdr, total > 0) {
             match parse_range_header(rh, total) {
                 Some((u64::MAX, _)) => {
@@ -1837,7 +2159,7 @@ async fn media(
                     match read_local_range_stream(&local_path, start, end).await {
                         Ok((async_reader, total)) => {
                             let last = end.unwrap_or(total - 1);
-                            return stream_range_response(
+                            let mut resp = stream_range_response(
                                 StatusCode::PARTIAL_CONTENT,
                                 ct,
                                 cache,
@@ -1845,6 +2167,12 @@ async fn media(
                                 async_reader,
                                 total,
                             );
+                            // Range 响应也带 ETag — 浏览器拖动到尽头会再发
+                            // Range 请求,带 If-Range(由弱 ETag 充当),命中走 206。
+                            if let Ok(hv) = HeaderValue::from_str(&local_etag) {
+                                resp.headers_mut().insert(header::ETAG, hv);
+                            }
+                            return resp;
                         }
                         Err(_) => {
                             // 切片失败(文件刚好被删/截断):降级 200 全量重读。
@@ -1855,15 +2183,26 @@ async fn media(
             }
         }
         return match tokio::fs::read(&local_path).await {
-            Ok(bytes) => (
-                [
-                    (header::CONTENT_TYPE, ct),
-                    (header::CACHE_CONTROL, cache),
-                    (header::ACCEPT_RANGES, "bytes"),
-                ],
-                bytes,
-            )
-                .into_response(),
+            Ok(bytes) => {
+                // 显式把所有元素都套成 HeaderValue,避免 `ct`/`cache` 都是 `&str`
+                // 时编译器把数组元素类型推断成 `&str`,然后 ETag 处的 HeaderValue
+                // 表达式不匹配。`from_str` 失败兜底 `W/"-"`,再失败兜底空值。
+                let etag: HeaderValue = HeaderValue::from_str(&local_etag)
+                    .unwrap_or_else(|_| {
+                        HeaderValue::from_str("W/\"-\"")
+                            .unwrap_or_else(|_| HeaderValue::from_static(""))
+                    });
+                (
+                    [
+                        (header::CONTENT_TYPE, HeaderValue::from_static(ct)),
+                        (header::CACHE_CONTROL, HeaderValue::from_static(cache)),
+                        (header::ACCEPT_RANGES, HeaderValue::from_static("bytes")),
+                        (header::ETAG, etag),
+                    ],
+                    bytes,
+                )
+                    .into_response()
+            }
             Err(_) => error_response(StatusCode::NOT_FOUND, "local object not found"),
         };
     }
@@ -2452,6 +2791,66 @@ async fn import_video(
     import_response(&id, JobKind::Video, key.as_deref(), None, job.status())
 }
 
+/// URL 去重(单节点):同一个 URL 在 `URL_DEDUP_TTL_MS` 毫秒内再次
+/// 提交,直接返回第一次的 job_id。避免用户双击 / 前端重试 / 网络抖动
+/// 客户端自动重传导致的"同一资源拉 N 次"。
+///
+/// 多节点部署时,这个 map 只对本地实例内的请求生效,跨节点不会命中 —
+/// 这是已知限制,需要在多节点模式下升级到 Redis/DB 层的 dedup。当前
+/// 项目按 CLAUDE.md 是单节点 docker compose,够用。
+///
+/// 清理策略:懒清理,get_or_insert 时扫一遍过期项,避免长期运行膨胀。
+const URL_DEDUP_TTL_MS: u64 = 60_000;
+type UrlDedupMap = std::sync::Mutex<std::collections::HashMap<u64, (String, u64)>>;
+static URL_DEDUP: std::sync::OnceLock<UrlDedupMap> = std::sync::OnceLock::new();
+
+fn url_dedup_map() -> &'static UrlDedupMap {
+    URL_DEDUP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 简单稳定的 64-bit URL hash(FNV-1a)。不要求密码学强度,只要求
+/// 同 URL 同 hash 即可。trim 掉尾随空白避免前端"复制时带空格"绕过。
+fn fnv1a_64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// 在 dedup 表里查 URL 是否在 TTL 内已被处理过;命中且对应 job
+/// 仍处于 queued/running,返回 Some(job_id);否则登记新条目返回 None。
+/// `now_ms` 由调用方传入以便于测试。
+///
+/// `state_lookup` 用于确认历史 job 仍存活(防止 60s 内 job 已被用户
+/// 取消 / 自然失败,又把同一个 URL 顶回去)。闭包取 `&str -> Option<JobStatus>`。
+fn url_dedup_check_and_record<F: Fn(&str) -> Option<JobStatus>>(
+    url: &str,
+    job_id: &str,
+    now_ms: u64,
+    state_lookup: F,
+) -> Option<String> {
+    let h = fnv1a_64(url.trim());
+    let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
+    // 懒清理:扫描过期项。容量稳定后扫描成本 O(n),n 取决于请求并发,
+    // 60s TTL 下每秒 ~数十次调用,值保持在 KB 量级,可控。
+    if map.len() > 64 {
+        map.retain(|_, (_, t)| now_ms.saturating_sub(*t) < URL_DEDUP_TTL_MS);
+    }
+    if let Some((existing_id, t)) = map.get(&h).cloned() {
+        if now_ms.saturating_sub(t) < URL_DEDUP_TTL_MS {
+            if let Some(st) = state_lookup(existing_id.as_str()) {
+                if matches!(st, JobStatus::Queued | JobStatus::Running) {
+                    return Some(existing_id);
+                }
+            }
+        }
+    }
+    map.insert(h, (job_id.to_string(), now_ms));
+    None
+}
+
 /// `POST /api/import/video-url` — JSON body `{url, algo?}`。
 /// 服务端用 ffmpeg 把远程视频拉下来,当作一次性视频任务处理。
 async fn import_video_url(
@@ -2511,6 +2910,41 @@ async fn import_video_url(
     state.set_original_input(&id, url.clone());
     if let Some(a) = req.algo {
         state.set_algo_override(&id, a);
+    }
+
+    // URL 去重(单节点):同一 URL 在 60s 内重复提交 → 直接复用历史
+    // job_id,不再重复 ffmpeg 拉取。注意:仅命中 queued/running 的活
+    // 任务,terminal 状态的任务视为过期,允许重新提交。
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if let Some(existing_id) =
+        url_dedup_check_and_record(&url, &id, now_ms, |jid| state.get(jid).map(|j| j.status()))
+    {
+        if existing_id != id {
+            // 命中已有 job:回滚刚建的空 job,返回已有任务的响应。
+            discard_created_job(&state, &id);
+            tracing::warn!(
+                "[import] dedup hit on {url}: returning existing job {existing_id} instead of new {id}"
+            );
+            let job = match state.get(&existing_id) {
+                Some(j) => j,
+                None => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "dedup job vanished"),
+            };
+            let key = job
+                .original_media_key
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            return import_response(
+                &existing_id,
+                JobKind::Video,
+                key.as_deref(),
+                None,
+                job.status(),
+            );
+        }
     }
 
     // 用 ffmpeg 拉视频:放到工作目录里(不立刻落 S3 — 让 run_job 落,失败时
@@ -3229,5 +3663,94 @@ mod tests {
         reader2.read_to_end(&mut buf2).await.unwrap();
         assert_eq!(buf2, &data[250..]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// URL 去重测试:直接打 helper(不用 axum),覆盖命中/未命中/TTL 过期/
+    /// 终端状态不算 dedup 这 4 条路径。
+    #[test]
+    fn url_dedup_first_seen_returns_none_and_records() {
+        let url = "https://example.com/v1.mp4?t=abc";
+        let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.clear();
+        drop(map);
+        // 第一次出现 → None(没命中)
+        let lookup = |_: &str| Some(JobStatus::Queued);
+        let now = 1_000_000;
+        let hit = url_dedup_check_and_record(url, "job-A", now, lookup);
+        assert_eq!(hit, None);
+        // 第二次立刻出现 → 命中 A
+        let hit2 = url_dedup_check_and_record(url, "job-B", now + 100, lookup);
+        assert_eq!(hit2.as_deref(), Some("job-A"));
+    }
+
+    #[test]
+    fn url_dedup_trims_whitespace_before_hash() {
+        // 防止前端复制带空格绕过
+        let lookup = |_: &str| Some(JobStatus::Queued);
+        let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.clear();
+        drop(map);
+        let now = 2_000_000;
+        let _ = url_dedup_check_and_record("  https://x.com/v.mp4 ", "job-X", now, lookup);
+        let hit = url_dedup_check_and_record("https://x.com/v.mp4", "job-Y", now + 10, lookup);
+        assert_eq!(hit.as_deref(), Some("job-X"));
+    }
+
+    #[test]
+    fn url_dedup_terminal_status_does_not_block_resubmit() {
+        let lookup_done = |_: &str| Some(JobStatus::Done);
+        let lookup_queued = |_: &str| Some(JobStatus::Queued);
+        let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.clear();
+        drop(map);
+        let now = 3_000_000;
+        // 第一次:A 入队,记入表
+        let _ = url_dedup_check_and_record("https://y.com/a.mp4", "job-A", now, lookup_queued);
+        // 同 URL,A 已 done:不命中,登记新条目 B
+        let hit = url_dedup_check_and_record("https://y.com/a.mp4", "job-B", now + 50, lookup_done);
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn url_dedup_missing_job_does_not_block_resubmit() {
+        let lookup_missing = |_: &str| None;
+        let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.clear();
+        drop(map);
+        let now = 4_000_000;
+        let _ = url_dedup_check_and_record("https://z.com/v.mp4", "job-A", now, lookup_missing);
+        // job 已从内存索引移除(冷启动 / janitor 回收):允许新条目
+        let hit = url_dedup_check_and_record("https://z.com/v.mp4", "job-B", now + 100, lookup_missing);
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn url_dedup_ttl_expiry_allows_resubmit() {
+        // URL_DEDUP_TTL_MS = 60_000;超过后视为新提交
+        let lookup = |_: &str| Some(JobStatus::Running);
+        let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.clear();
+        drop(map);
+        let now = 5_000_000;
+        let _ = url_dedup_check_and_record("https://w.com/v.mp4", "job-A", now, lookup);
+        // TTL+1 ms:过期,允许新条目
+        let hit = url_dedup_check_and_record(
+            "https://w.com/v.mp4",
+            "job-B",
+            now + URL_DEDUP_TTL_MS + 1,
+            lookup,
+        );
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn fnv1a_is_stable() {
+        // 同一字符串两次调用结果相同(防回归:谁改了 hash 函数会爆这个测试)
+        let a = fnv1a_64("https://example.com/test.mp4");
+        let b = fnv1a_64("https://example.com/test.mp4");
+        assert_eq!(a, b);
+        // 不同字符串一般不撞(不是密码学要求,但碰撞率应极低)
+        let c = fnv1a_64("https://example.com/different.mp4");
+        assert_ne!(a, c);
     }
 }

@@ -98,6 +98,10 @@ services:
       S3_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rsface}
       S3_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rsface-secret}
       S3_BUCKET: rsface
+      # S3 瞬态失败重试:4 次尝试(1 + 3 retry),指数退避 100ms → 2s 上限。
+      S3_MAX_RETRIES: ${S3_MAX_RETRIES:-4}
+      S3_RETRY_BASE_MS: ${S3_RETRY_BASE_MS:-100}
+      S3_RETRY_MAX_MS: ${S3_RETRY_MAX_MS:-2000}
       RSFACE_CASCADE: /app/cascade.rfcf
       WEB_DIR: /app/web
       TMP_DIR: /tmp/rsface-jobs
@@ -114,12 +118,18 @@ services:
       # 需配 stop_grace_period 一起调大)。
       SHUTDOWN_GRACE_SECS: ${SHUTDOWN_GRACE_SECS:-120}
       DATABASE_URL: postgres://rsface:${POSTGRES_PASSWORD:-rsface-pass}@127.0.0.1:15432/rsface
+      # PG 连接池大小:默认 16,留余量给 SSE telemetry + janitor 心跳。
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-16}
       LOCAL_MEDIA_DIR: /var/rsface-media
       # 跨域前端(留空 = 同源部署,不开 CORS)
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-}
+      RSFACE_GALLERY_DIR: /var/rsface-gallery
     volumes:
       # bind mount 到 data/media/ (项目内,跟随代码可见)。
       - ../data/media:/var/rsface-media
+      # 注册人脸画廊(每个子目录一个身份)。目录可为空:为空时
+      # /recognize 返回 no_gallery,不影响检测类接口。
+      - ../data/gallery:/var/rsface-gallery
     healthcheck:
       # host 网络模式下容器内 wget 打自己端口(alpine 镜像没装 curl)。
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:20080/api/health >/dev/null 2>&1 || exit 1"]
