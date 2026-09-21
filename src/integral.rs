@@ -77,6 +77,129 @@ pub(crate) fn prefix_sums_fit_u32(w: usize, h: usize) -> bool {
     (w as u128) * (h as u128) * 255 <= u32::MAX as u128
 }
 
+/// Free-function SIMD rect-sum helper. Caller guarantees the rectangle is
+/// in-bounds and the integral image is narrow (u32).
+///
+/// SSE2 path packs 4 u32 corner reads into one `__m128i`, then computes
+/// `(TL + BR) − (TR + BL)` as packed u32 (`vaddq_u32` + `vrev64q_u32` +
+/// `vsubq_u32` on aarch64 / equivalent intrinsics on x86_64). The
+/// arithmetic replaces the 3 dependent scalar `add`/`sub` µops of the
+/// baseline with a handful of independent vector ops, giving the cascade
+/// hot loop a couple of cycles back per rect.
+#[inline]
+#[cfg(target_arch = "x86_64")]
+pub(crate) unsafe fn rect_sum_unchecked_narrow_simd(
+    v: *const u32,
+    stride: usize,
+    x1: usize,
+    y1: usize,
+    x2: usize,
+    y2: usize,
+) -> u64 {
+    use std::arch::x86_64::*;
+    debug_assert!(x1 < x2 && y1 < y2);
+    // SAFETY: caller guarantees in-bounds.
+    let idx_tl = y1 * stride + x1;
+    let idx_tr = y1 * stride + x2;
+    let idx_bl = y2 * stride + x1;
+    let idx_br = y2 * stride + x2;
+    // SAFETY: in-bounds by the contract.
+    let tl = unsafe { *v.add(idx_tl) };
+    let tr = unsafe { *v.add(idx_tr) };
+    let bl = unsafe { *v.add(idx_bl) };
+    let br = unsafe { *v.add(idx_br) };
+    // SAFETY: SSE2 baseline.
+    unsafe {
+        // Pack corners into lanes [TL, TR, BL, BR]. `_mm_set_epi32(e3,e2,e1,e0)`
+        // → lane k = e_k. So (br, bl, tr, tl) → lane 0=tl, 1=tr, 2=bl, 3=br.
+        let v32 = _mm_set_epi32(br as i32, bl as i32, tr as i32, tl as i32);
+        // Reverse all four lanes: [BR, BL, TR, TL].
+        // `_MM_SHUFFLE(z, y, x, w)` puts source[w] into result[0], source[x]
+        // into result[1], etc. We want result = [src3, src2, src1, src0] =
+        // [BR, BL, TR, TL], so w=3, x=2, y=1, z=0.
+        let v_rev = _mm_shuffle_epi32(v32, _MM_SHUFFLE(0, 1, 2, 3) as i32);
+        // sum_pairs = [TL+BR, TR+BL, BL+TR, BR+TL].
+        let sum_pairs = _mm_add_epi32(v32, v_rev);
+        // Swap lanes 0 and 1 of sum_pairs so lane 0 = TR+BL, lane 1 = TL+BR.
+        let sum_swap = _mm_shuffle_epi32(sum_pairs, _MM_SHUFFLE(0, 0, 0, 1) as i32);
+        // result[0] = (TL+BR) - (TR+BL) = TL - TR - BL + BR.
+        let result = _mm_sub_epi32(sum_pairs, sum_swap);
+        _mm_cvtsi128_si32(result) as u32 as u64
+    }
+}
+
+/// NEON counterpart — same SIMD inclusion-exclusion path on aarch64.
+#[inline]
+#[cfg(target_arch = "aarch64")]
+pub(crate) unsafe fn rect_sum_unchecked_narrow_simd(
+    v: *const u32,
+    stride: usize,
+    x1: usize,
+    y1: usize,
+    x2: usize,
+    y2: usize,
+) -> u64 {
+    use std::arch::aarch64::*;
+    debug_assert!(x1 < x2 && y1 < y2);
+    // SAFETY: in-bounds by the contract.
+    let idx_tl = y1 * stride + x1;
+    let idx_tr = y1 * stride + x2;
+    let idx_bl = y2 * stride + x1;
+    let idx_br = y2 * stride + x2;
+    let tl = unsafe { *v.add(idx_tl) };
+    let tr = unsafe { *v.add(idx_tr) };
+    let bl = unsafe { *v.add(idx_bl) };
+    let br = unsafe { *v.add(idx_br) };
+    // SAFETY: NEON baseline.
+    unsafe {
+        // lanes 0..3 = [TL, TR, BL, BR] (aarch64 is little-endian so the
+        // u32x4 register lanes map to the [u32; 4] array layout directly).
+        let v32: uint32x4_t = core::mem::transmute([tl, tr, bl, br]);
+        // Full 4-lane reverse → [BR, BL, TR, TL]. Built with explicit
+        // `vcreate_u32`/`vcombine_u32` because `vrev64q_u32` reverses per
+        // 64-bit half, which would put [TR, TL, BR, BL] — wrong shape.
+        // `vcreate_u32(a)` materialises a uint32x2_t with lane 0 = low
+        // 32 bits of `a`, lane 1 = high 32 bits of `a`.
+        let v_rev: uint32x4_t = vcombine_u32(
+            vcreate_u32((bl as u64) << 32 | br as u64), // lane0=BR, lane1=BL
+            vcreate_u32((tl as u64) << 32 | tr as u64), // lane0=TR, lane1=TL
+        );
+        // sum_pairs = [TL+BR, TR+BL, BL+TR, BR+TL].
+        let sum_pairs = vaddq_u32(v32, v_rev);
+        // Swap the low 64-bit half of sum_pairs so lane 0 = TR+BL, lane 1 = TL+BR.
+        let sum_swap = vrev64q_u32(sum_pairs);
+        // result[0] = (TL+BR) - (TR+BL) = TL - TR - BL + BR.
+        let result = vsubq_u32(sum_pairs, sum_swap);
+        vgetq_lane_u32(result, 0) as u64
+    }
+}
+
+/// Scalar fallback used when SIMD is unavailable (no x86_64 / aarch64).
+/// Bit-identical to the SIMD versions.
+#[inline]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub(crate) unsafe fn rect_sum_unchecked_narrow_simd(
+    v: *const u32,
+    stride: usize,
+    x1: usize,
+    y1: usize,
+    x2: usize,
+    y2: usize,
+) -> u64 {
+    debug_assert!(x1 < x2 && y1 < y2);
+    let idx_tl = y1 * stride + x1;
+    let idx_tr = y1 * stride + x2;
+    let idx_bl = y2 * stride + x1;
+    let idx_br = y2 * stride + x2;
+    let tl = unsafe { *v.add(idx_tl) };
+    let tr = unsafe { *v.add(idx_tr) };
+    let bl = unsafe { *v.add(idx_bl) };
+    let br = unsafe { *v.add(idx_br) };
+    let r = br.wrapping_add(tl);
+    let s = tr.wrapping_add(bl);
+    r.wrapping_sub(s) as u64
+}
+
 impl IntegralImage {
     /// Construct from a precomputed `(W+1) × (H+1)` u32 buffer (as returned by
     /// the GPU kernel). The buffer layout must be row-major with stride = W+1.
@@ -135,6 +258,12 @@ impl IntegralImage {
     }
 
     /// Pooled u32 fused single-pass build (the common, fast path).
+    /// Row prefix dispatches to the SSE2/NEON helper
+    /// (`row_prefix_u32_dispatch`); vertical add stays in the SIMD
+    /// helper (`add_assign_u32_dispatch`). The pair shares the fused
+    /// 1-loop formulation (row prefix + vertical fold merged into one
+    /// per-row pass), so the produced table is bit-identical to the
+    /// scalar-prefix version.
     fn build_narrow(img: &GrayImage, w: usize, h: usize, stride: usize) -> Vec<u32> {
         let mut data = crate::pool::acquire_integral(w, h);
         debug_assert_eq!(data.len(), stride * (h + 1));
@@ -146,12 +275,7 @@ impl IntegralImage {
             let prev = &head[y * stride..];
             let cur = &mut tail[..stride];
             cur[0] = 0;
-            let mut acc: u32 = 0;
-            let body = &mut cur[1..];
-            for (s, d) in img.row(y).iter().zip(body.iter_mut()) {
-                acc = acc.wrapping_add(*s as u32);
-                *d = acc;
-            }
+            row_prefix_u32_dispatch(img.row(y), &mut cur[1..]);
             add_assign_u32_dispatch(cur, prev);
         }
         data
@@ -375,6 +499,30 @@ impl IntegralImage {
         assert_eq!(src.len(), dst.len(), "row_sums_sq: src/dst length mismatch");
         row_prefix_sq_u64_dispatch(src, dst);
     }
+
+    /// SIMD inclusion–exclusion dispatch used by the cascade hot loop.
+    /// Falls back to the scalar generic path on non-x86_64 /
+    /// non-aarch64 targets. Caller guarantees the rectangle is
+    /// in-bounds and the table is narrow.
+    ///
+    /// # Safety contract (caller must uphold)
+    /// Same as [`Self::rect_sum_unchecked_narrow`].
+    #[inline]
+    pub(crate) unsafe fn rect_sum_unchecked_narrow_simd_method(
+        &self,
+        x1: usize,
+        y1: usize,
+        x2: usize,
+        y2: usize,
+    ) -> u64 {
+        debug_assert!(x1 < x2 && x2 <= self.width && y1 < y2 && y2 <= self.height);
+        debug_assert!(!self.is_wide());
+        let stride = self.stride;
+        let IntegralTable::Narrow(v) = &self.data else {
+            std::hint::unreachable_unchecked()
+        };
+        rect_sum_unchecked_narrow_simd(v.as_ptr(), stride, x1, y1, x2, y2)
+    }
 }
 
 impl Drop for IntegralImage {
@@ -440,13 +588,11 @@ impl SquaredIntegralImage {
             let prev = &head[y * stride..];
             let cur = &mut tail[..stride];
             cur[0] = 0;
-            let mut acc: u64 = 0;
-            let body = &mut cur[1..];
-            for (s, d) in img.row(y).iter().zip(body.iter_mut()) {
-                let v = *s as u64;
-                acc += v * v;
-                *d = acc;
-            }
+            // SIMD row prefix of squares — same SSE2/NEON helper used by
+            // the unsquared IntegralImage build. Replaces the previous
+            // scalar prefix loop in this fused-1-loop formulation; the
+            // produced table is bit-identical.
+            row_prefix_sq_u64_dispatch(img.row(y), &mut cur[1..]);
             add_assign_u64_dispatch(cur, prev);
         }
         Self {
@@ -773,6 +919,7 @@ fn row_prefix_u32_scalar(src: &[u8], dst: &mut [u32], carry: u32) {
         *d = acc;
     }
 }
+
 
 /// Dispatch to the best row-prefix kernel for the current target.
 fn row_prefix_u32_dispatch(src: &[u8], dst: &mut [u32]) {
@@ -1243,6 +1390,37 @@ mod tests {
         add_assign_u64_scalar(&mut e1, &u64b);
         add_assign_u64_dispatch(&mut e2, &u64b);
         assert_eq!(e1, e2);
+    }
+
+    /// SIMD `rect_sum_unchecked_narrow_simd` must be bit-equivalent to the
+    /// scalar generic `rect_sum_unchecked_narrow` path. Covers all the
+    /// cascading-u32 wraparound edge cases we exercise at runtime.
+    #[test]
+    fn rect_sum_simd_matches_scalar() {
+        // Build a few different integral tables; for each, exhaustively
+        // call both paths on every sub-rectangle the table could host.
+        for &(w, h) in &[(8usize, 6usize), (16, 12), (32, 24), (49, 33), (64, 64), (129, 65)] {
+            let img = lcg_image(w, h);
+            let ii = IntegralImage::from_gray(&img);
+            for ry in 0..=h {
+                for rx in 0..=w {
+                    for ry2 in (ry + 1)..=h {
+                        for rx2 in (rx + 1)..=w {
+                            let scalar = unsafe {
+                                ii.rect_sum_unchecked_narrow(rx, ry, rx2, ry2)
+                            };
+                            let simd = unsafe {
+                                ii.rect_sum_unchecked_narrow_simd_method(rx, ry, rx2, ry2)
+                            };
+                            assert_eq!(
+                                scalar, simd,
+                                "rect_sum SIMD mismatch at ({rx},{ry})..({rx2},{ry2}) on {w}x{h}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Naive O(W·H) rectangle-sum reference for `IntegralImage`.
