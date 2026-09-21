@@ -246,6 +246,10 @@ required-features = ["detector-haar", "detector-luminance"]
 name = "video_chunking"
 required-features = ["detector-haar"]
 
+[[test]]
+name = "property_face"
+required-features = ["detector-haar", "detector-luminance"]
+
 [dependencies]
 
 # We intentionally keep ZERO runtime dependencies for the core library.
