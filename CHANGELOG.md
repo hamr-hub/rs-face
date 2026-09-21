@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed — docs honesty & rustdoc gate
+<<<<### Changed — docs honesty & rustdoc gate
 - **`cargo doc` is now warning-free for both crates and enforced in CI**:
   crate-level docs linked feature-gated ONNX modules (`scrfd`, `arcface`,
   `onnx`, `align`, `models`) with intra-doc links that break on the default
@@ -49,6 +49,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   images, zero-width/zero-height images, and bit depths other than 8 now
   return descriptive errors instead of decoded garbage.
 
+### Added — web UX completeness (real-time overlay, box editor, params panel, stats dashboard)
+- **`platform/web/overlay.js`** (new) — bounding boxes drawn directly on
+  sidebar `.sb-thumb` thumbnails as frames stream in via SSE. Colour-coded
+  by algorithm (`HAAR`=blue, `LUMINANCE`=green, `CNN`=red, `ENSEMBLE`=gold)
+  matching the palette already used by lightbox overlay; >12 boxes per
+  thumbnail collapse to outline-only so 40×40 thumbs stay readable. Hooks
+  `sidebar.upsertJob`/`setJobs` to auto-redraw on data changes; called
+  from `sse.scheduleRefresh` and `preview.open` directly.
+- **`platform/web/box-editor.js`** (new) — interactive bbox editor in the
+  lightbox. Toggling "✎ Edit" turns every face in the active frame into
+  a draggable / resizable box with 8 handles (4 corners + 4 edge
+  midpoints); Shift+arrow = 10px nudge, arrow = 1px, `[` / `]` = ±width,
+  `-` / `=` = ±height. Saving writes corrections back into
+  `state.currentJob.frames[i].faces[j]` (so sidebar overlay, lightbox
+  overlay, face grid all reflect immediately), then POSTs to
+  `/api/frames/:id/correct` with `{corrections:[{face,x,y,w,h}]}`. On
+  non-2xx or network failure the local copy is the source of truth;
+  `// TODO: server endpoint` comment flags the contract.
+- **`platform/web/params-panel.js`** (new) — collapsible "Advanced
+  params" block in the new-task modal: `scaleFactor` (1.05–2.0, default
+  1.10), `minNeighbors` (0–10, default 3), `minSize` / `maxSize` (px,
+  blank = no limit). Persists to `localStorage.rsface.params.v1`;
+  native-title tooltips on every input; pill in summary title shows
+  custom values (e.g. `SF=1.15 · k=5`) in `--accent` when non-default.
+  Wraps `api.postStream` and `api.importVideoUrl` to inject params
+  into the JSON body (only when non-default — empty values fall back
+  to server env). For multipart uploads the params persist locally;
+  client-only feature pending server endpoint.
+- **`platform/web/stats.js`** (new) — new `Σ` topbar button opens
+  `#modal-stats`: overview tiles (total / running / done / err /
+  cumulative faces / runtime / frames / avg ms-per-frame), per-algo
+  table (jobs / faces / frames / total elapsed / avg ms-per-frame),
+  Top-5 slowest jobs bar chart (clickable → `preview.open`), and a
+  24-hour hourly bucket timeline. Combines `/api/jobs` with the existing
+  `/api/jobs/stats` so client-side and server-side aggregates can be
+  cross-checked in one place.
+- **`platform/web/index.html`** — load order for the 4 new modules
+  before `app.js`; new `<details>` block in the new-task modal; new
+  lightbox footer buttons (✎ Edit / ↺ Reset / 💾 Save); new
+  `#modal-stats` modal; Σ topbar button.
+- **`platform/web/app.js`** — `init()` calls `overlay.init` /
+  `boxEditor.init` / `paramsPanel.init` / `statsPanel.init`;
+  `sse.scheduleRefresh` and `preview.open` invoke `overlay.refresh`;
+  all four modules exposed on `window.__rsface` for debugging.
+- **`platform/web/style.css`** — `.sb-thumb canvas.sb-thumb-overlay`
+  absolute positioning with `pointer-events:none` (clicks still go to
+  the sidebar item); `.lb-edit-overlay` / `.lb-rail-item.lb-edit-pick`
+  / `.fc-corrected-mark` for the editor; `.params-panel` collapse UI
+  with rotating triangle and SF=... pill; `.stats-table` and
+  `.stats-slow-row` grid + matching palette dots.
 
 ### Added — multi-algorithm ensemble fuser
 - **`src/ensemble.rs`** — `TaggedDetection` + `fuse()` greedy cluster

@@ -140,3 +140,59 @@ function clusterFaces(raw) {
 - `GET /api/jobs/{id}` -> `frames[].timestamp_ms` / `frames[].faces[].{x,y,w,h,score,key}` / `frames[].annotated_key` / `frames[].original_key` / `original_key`
 - `GET /media/{key}` -> 拿图(`s3://` / `local://` 前缀由 server 解析)
 - `GET /api/jobs/{id}/events` -> SSE 实时事件,直播流模式触发增量重渲染
+
+## v0.4+ Web UX 完整性:实时叠加 / 框选编辑 / 参数面板 / 统计仪表板
+
+4 个新模块,共 ~800 行,只新增 `platform/web/*.js` + `index.html` / `style.css`
+patch,server / Dockerfile / Cargo 都未触碰。
+
+### 1. 实时检测叠加 `overlay.js`
+
+在侧栏 40×40 缩略图上直接画 bounding boxes,每个算法独立配色:
+
+| 算法       | 颜色      |
+|----------|---------|
+| `haar`     | `#4fc3f7` (sky-400)  |
+| `luminance`| `#34d399` (green-400) |
+| `cnn`      | `#f87171` (red-400)   |
+| `ensemble` | `#f0c674` (gold)      |
+
+- `overlay.refresh(job)` 是单一入口,SSE 帧事件 / 心跳都会触发
+- 当前任务 + 任何 running/queued 任务都画;已结束的不再重画(保留最后一帧)
+- > 12 个 box 时仅描边,不画分数标签,避免糊成一片
+
+### 2. 框选编辑器 `box-editor.js`
+
+lightbox 内的"✎ Edit"模式:
+
+- 选中后激活 8 个 handle(角 / 边中点),拖动 = move / resize
+- 键盘:`←/→/↑/↓` 1px,`Shift+方向键` 10px,`[`/`]` 宽度,`-`/`=` 高度
+- "💾 保存修正" 写回 `state.currentJob.frames[i].faces[j]` 然后 POST 到
+  `/api/frames/:id/correct { corrections:[{face,x,y,w,h}] }`
+  - 2xx → 成功 toast;非 2xx / 网络失败 → 保留本地副本并 warn
+  - `// TODO: server endpoint` 标注 server 端契约
+
+### 3. 检测参数面板 `params-panel.js`
+
+新建任务 modal 的 "Advanced params" 折叠块:
+
+| 参数          | 范围       | 默认     |
+|-------------|----------|--------|
+| `scaleFactor`  | 1.05–2.0 | 1.10   |
+| `minNeighbors` | 0–10     | 3      |
+| `minSize` / `maxSize` | px,空 = 不限 | 40 / 0 |
+
+- 持久化到 `localStorage.rsface.params.v1`
+- 自定义值时 summary pill 显示 `SF=1.15 · k=5`
+- 包装 `api.postStream` / `api.importVideoUrl` 把 params 注入 JSON body
+- multipart upload 的 params 暂不注入,等 server endpoint 落地
+
+### 4. 运行统计 `stats.js`
+
+顶栏 `Σ` 按钮 → `#modal-stats` modal:
+
+- 总览 8 tile(任务 / 状态 / 累计人脸 / 运行时 / 帧数 / 平均 ms/帧)
+- 按算法表(jobs / faces / frames / 累计耗时 / 平均 ms-per-frame)
+- Top-5 最慢任务 bar(可点击 → 打开任务)
+- 24h 每小时时间线
+- 数据源:`/api/jobs` + `/api/jobs/stats`,客户端聚合
