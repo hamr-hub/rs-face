@@ -1,12 +1,17 @@
 //! PostgreSQL 持久化层:job/frame/face 三张表。
 //!
 //! - DB 不可用时 JobRegistry 降级为纯内存(不报错),保留可用性;
-//! - 所有写入走 `persist_*` 函数,无返回值(void 风格)。
+//! - 所有写入走 `persist_*` 函数,无返回值(void 风格);
+//! - 关键的"必须落地"操作(`insert_job`、`update_job_status`、`add_frames_batch`、
+//!   `set_original_key`)走 `crate::retry::retry_with_backoff` 包裹,
+//!   PG 短抖动(<10s)自动恢复,任务状态不丢。读取类不走 retry — 失败就让上层
+//!   决定要不要再次请求。
 
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
 
 use crate::jobs::{FaceEntry, FrameResult, JobKind, JobStats, JobStatus};
+use crate::retry::{retry_with_backoff, RetryPolicy};
 
 /// 前端埋点单条事件的扁平化形态(由 api::telemetry_ingest 接收并转发)。
 /// 字段和 `api::TelemetryEvent` 一致;这里独立定义是为了让 persist 层
@@ -197,17 +202,28 @@ impl Db {
             JobKind::Stream => "stream",
         };
         let status = status_to_str(status);
-        let _ = sqlx::query(
-            "INSERT INTO jobs (id, kind, display_name, status, created_ms) VALUES ($1,$2,$3,$4,$5)
-             ON CONFLICT (id) DO NOTHING",
+        let result = retry_with_backoff(
+            "pg.insert_job",
+            RetryPolicy::default_pg_s3(),
+            |_attempt| async {
+                sqlx::query(
+                    "INSERT INTO jobs (id, kind, display_name, status, created_ms) VALUES ($1,$2,$3,$4,$5)
+                     ON CONFLICT (id) DO NOTHING",
+                )
+                .bind(id)
+                .bind(kind)
+                .bind(display_name)
+                .bind(status)
+                .bind(created_ms as i64)
+                .execute(pool)
+                .await
+                .map(|_| ())
+            },
         )
-        .bind(id)
-        .bind(kind)
-        .bind(display_name)
-        .bind(status)
-        .bind(created_ms as i64)
-        .execute(pool)
         .await;
+        if let Err(e) = result {
+            eprintln!("[persist] insert_job({id}) failed after retry: {e}");
+        }
     }
 
     /// 记录任务实际使用的算法(在 run_job 构建 detector 后调用)。
@@ -215,11 +231,22 @@ impl Db {
         let Some(pool) = &self.pool else {
             return;
         };
-        let _ = sqlx::query("UPDATE jobs SET algo=$2 WHERE id=$1")
-            .bind(id)
-            .bind(algo)
-            .execute(pool)
-            .await;
+        let result = retry_with_backoff(
+            "pg.set_algo",
+            RetryPolicy::default_pg_s3(),
+            |_attempt| async {
+                sqlx::query("UPDATE jobs SET algo=$2 WHERE id=$1")
+                    .bind(id)
+                    .bind(algo)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+        if let Err(e) = result {
+            eprintln!("[persist] set_algo({id}) failed after retry: {e}");
+        }
     }
 
     pub async fn update_job_status(
@@ -233,24 +260,46 @@ impl Db {
             return;
         };
         let s = status_to_str(status);
-        let _ = sqlx::query("UPDATE jobs SET status=$2, finished_ms=$3, error=$4 WHERE id=$1")
-            .bind(id)
-            .bind(s)
-            .bind(finished_ms.map(|v| v as i64))
-            .bind(error)
-            .execute(pool)
-            .await;
+        let result = retry_with_backoff(
+            "pg.update_job_status",
+            RetryPolicy::default_pg_s3(),
+            |_attempt| async {
+                sqlx::query("UPDATE jobs SET status=$2, finished_ms=$3, error=$4 WHERE id=$1")
+                    .bind(id)
+                    .bind(s)
+                    .bind(finished_ms.map(|v| v as i64))
+                    .bind(error)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+        if let Err(e) = result {
+            eprintln!("[persist] update_job_status({id}) failed after retry: {e}");
+        }
     }
 
     pub async fn set_original_key(&self, id: &str, key: &str) {
         let Some(pool) = &self.pool else {
             return;
         };
-        let _ = sqlx::query("UPDATE jobs SET original_key=$2 WHERE id=$1")
-            .bind(id)
-            .bind(key)
-            .execute(pool)
-            .await;
+        let result = retry_with_backoff(
+            "pg.set_original_key",
+            RetryPolicy::default_pg_s3(),
+            |_attempt| async {
+                sqlx::query("UPDATE jobs SET original_key=$2 WHERE id=$1")
+                    .bind(id)
+                    .bind(key)
+                    .execute(pool)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+        if let Err(e) = result {
+            eprintln!("[persist] set_original_key({id}) failed after retry: {e}");
+        }
     }
 
     /// 单帧写(现在 run_job 走 add_frames_batch 批量路径;保留单帧 API
@@ -309,20 +358,28 @@ impl Db {
             ak.push(f.annotated_key.clone());
             ok.push(f.original_key.clone());
         }
-        if let Err(e) = sqlx::query(
-            "INSERT INTO frames (job_id, idx, timestamp_ms, annotated_key, original_key)
-             SELECT $1, * FROM UNNEST($2::bigint[], $3::bigint[], $4::text[], $5::text[])
-             ON CONFLICT (job_id, idx) DO NOTHING",
+        let result = retry_with_backoff(
+            "pg.add_frames_batch.frames",
+            RetryPolicy::default_pg_s3(),
+            |_attempt| async {
+                sqlx::query(
+                    "INSERT INTO frames (job_id, idx, timestamp_ms, annotated_key, original_key)
+                     SELECT $1, * FROM UNNEST($2::bigint[], $3::bigint[], $4::text[], $5::text[])
+                     ON CONFLICT (job_id, idx) DO NOTHING",
+                )
+                .bind(job_id)
+                .bind(&idx)
+                .bind(&ts)
+                .bind(&ak)
+                .bind(&ok)
+                .execute(pool)
+                .await
+                .map(|_| ())
+            },
         )
-        .bind(job_id)
-        .bind(&idx)
-        .bind(&ts)
-        .bind(&ak)
-        .bind(&ok)
-        .execute(pool)
-        .await
-        {
-            tracing::warn!("[persist] add_frames_batch frames failed: {e}");
+        .await;
+        if let Err(e) = result {
+            eprintln!("[persist] add_frames_batch frames failed after retry: {e}");
             return;
         }
         // 2) faces 表(展平全部帧的 face)
@@ -350,16 +407,32 @@ impl Db {
                 score.push(face.score);
             }
         }
-        if let Err(e) = sqlx::query(
-            "INSERT INTO faces (job_id, frame_idx, face_idx, key, x, y, w, h, score)
-             SELECT $1, * FROM UNNEST($2::bigint[], $3::int[], $4::text[], $5::int[], $6::int[], $7::int[], $8::int[], $9::real[])
-             ON CONFLICT DO NOTHING"
+        let result = retry_with_backoff(
+            "pg.add_frames_batch.faces",
+            RetryPolicy::default_pg_s3(),
+            |_attempt| async {
+                sqlx::query(
+                    "INSERT INTO faces (job_id, frame_idx, face_idx, key, x, y, w, h, score)
+                     SELECT $1, * FROM UNNEST($2::bigint[], $3::int[], $4::text[], $5::int[], $6::int[], $7::int[], $8::int[], $9::real[])
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(job_id)
+                .bind(&fidx)
+                .bind(&face_idx)
+                .bind(&key)
+                .bind(&x)
+                .bind(&y)
+                .bind(&w)
+                .bind(&h)
+                .bind(&score)
+                .execute(pool)
+                .await
+                .map(|_| ())
+            },
         )
-        .bind(job_id).bind(&fidx).bind(&face_idx).bind(&key)
-        .bind(&x).bind(&y).bind(&w).bind(&h).bind(&score)
-        .execute(pool).await
-        {
-            tracing::warn!("[persist] add_frames_batch faces failed: {e}");
+        .await;
+        if let Err(e) = result {
+            eprintln!("[persist] add_frames_batch faces failed after retry: {e}");
         }
     }
 

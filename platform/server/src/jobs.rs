@@ -24,6 +24,7 @@
 
 use crate::config::Config;
 use crate::persist::Db;
+use crate::retry::{retry_sync, RetryPolicy};
 use crate::s3::S3Client;
 use rsface::cnn::{CnnConfig, CnnDetector, CnnWeights};
 use rsface::detector::{Detection, Detector, DetectorConfig};
@@ -1158,10 +1159,18 @@ pub fn move_staged_into_job(
 
 /// 写入媒体:S3 优先,失败则降级到本地磁盘。
 /// 返回的 key 形如 `s3://<key>` 或 `local://<key>`,供 `/media/` 路由识别。
-/// 保留:被单测覆盖,生产路径现在走 `put_with_fallback_file` (流式 PUT)。
-#[allow(dead_code)]
+///
+/// **stability-hardening-2**:S3 put_object 现在走 `retry_sync`,transient 失败
+/// (网络抖动 / 短 5xx)会自动重试 5 次,只有永久失败(签名错 / 桶不存在)
+/// 才立即降级到 local。这把"rustfs 重启 / 临时网络抖动"这类瞬时失败从
+/// 误降级变成不可见,显著降低 inline:// 触发频率。
 fn put_with_fallback(reg: &JobRegistry, key: &str, ct: &str, bytes: &[u8]) -> String {
-    match reg.s3.put_object(key, ct, bytes.to_vec()) {
+    let s3_res = retry_sync(
+        &format!("s3.put_object({key})"),
+        RetryPolicy::default_pg_s3(),
+        || reg.s3.put_object(key, ct, bytes.to_vec()),
+    );
+    match s3_res {
         Ok(_) => format!("s3://{key}"),
         Err(e) => {
             tracing::warn!("[storage] S3 put failed for {key}: {e} — falling back to local disk");
@@ -1223,11 +1232,16 @@ pub fn put_bytes_with_fallback_blocking(
 ///
 /// 调用方负责在 SSE `frame` 事件里把 base64 拼回去(见 `inline_data_b64`)。
 fn put_with_inline_fallback(reg: &JobRegistry, key: &str, ct: &str, bytes: &[u8]) -> String {
-    match reg.s3.put_object(key, ct, bytes.to_vec()) {
-        Ok(_) => return format!("s3://{key}"),
-        Err(e) => {
-            tracing::warn!("[storage] S3 put failed for {key}: {e} — falling back to local disk");
-        }
+    let s3_res = retry_sync(
+        &format!("s3.put_object({key})"),
+        RetryPolicy::default_pg_s3(),
+        || reg.s3.put_object(key, ct, bytes.to_vec()),
+    );
+    if s3_res.is_ok() {
+        return format!("s3://{key}");
+    }
+    if let Err(e) = s3_res {
+        eprintln!("[storage] S3 put failed for {key}: {e} — falling back to local disk");
     }
     let path = reg.cfg.local_media_dir.join(key);
     if let Some(parent) = path.parent() {
@@ -1268,11 +1282,23 @@ pub fn cleanup_job_media_blocking(
         }
     }
     let prefix = format!("jobs/{id}/");
-    match s3.list_objects(&prefix) {
+    let list_res = retry_sync(
+        &format!("s3.list_objects({prefix})"),
+        RetryPolicy::default_pg_s3(),
+        || s3.list_objects(&prefix),
+    );
+    match list_res {
         Ok(keys) => {
             for key in keys {
-                if let Err(e) = s3.delete_object(&key) {
-                    tracing::warn!("[storage] delete object {key} failed: {e}");
+                let key_for_log = key.clone();
+                let key_for_op = key.clone();
+                let res = retry_sync(
+                    &format!("s3.delete_object({key})"),
+                    RetryPolicy::default_pg_s3(),
+                    move || s3.delete_object(&key_for_op),
+                );
+                if let Err(e) = res {
+                    eprintln!("[storage] delete object {key_for_log} failed: {e}");
                 }
             }
         }

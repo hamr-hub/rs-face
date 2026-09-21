@@ -9,7 +9,10 @@ mod error_codes;
 mod jobs;
 mod metrics;
 mod persist;
+mod rate_limit;
+mod retry;
 mod s3;
+mod slow_log;
 mod zip;
 
 use std::collections::HashMap;
