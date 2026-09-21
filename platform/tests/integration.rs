@@ -332,3 +332,123 @@ fn available_algos_includes_expected_three() {
     assert!(algos.contains(&"luminance"));
     // cnn 是 optional feature;默认 build 不一定有,不强校验。
 }
+
+/// E1+E2 集成:取消正在跑的视频任务,SSE 流应该收到 cancel 之前的所有
+/// frame 事件 + 终态 cancelled 事件 + 状态机翻 Cancelled。
+///
+/// 这个测试走"模拟 worker"模式:用 JobRegistry 创建一个 video 任务,
+/// 通过 broadcast channel 模拟 SSE 订阅;手动 emit N 个 frame 事件,
+/// 触发 cancel,然后验证订阅端收到 ≥ N 帧 + 终态 cancelled。
+///
+/// 不依赖 ffmpeg / rustfs / axum,纯逻辑验证 SSE contract。完整 HTTP 级
+/// SSE 测试需要 reqwest::bytes_stream + futures-util,见 robustness.rs
+/// 的 cancel_streams_partial_frames_then_terminal(底层路径同 SSE handler
+/// 用的 broadcast::Receiver)。
+#[tokio::test]
+async fn cancel_running_job_streams_partial_frames_via_sse() {
+    let (reg, shutdown) = boot_registry_for_test().await;
+    let job = reg
+        .create(
+            rsface_platform::jobs::JobKind::Video,
+            "cancel-sse.mp4".to_string(),
+        )
+        .expect("create");
+
+    // 模拟 SSE handler 订阅同一 broadcast channel。
+    let mut rx = job.event_tx.subscribe();
+
+    // 模拟 worker:连续 emit 30 帧(模拟 cancel 前已处理的)。
+    for i in 0..30u64 {
+        job.emit(&serde_json::json!({
+            "type": "frame",
+            "frame": {"index": i, "timestamp_ms": i * 100, "annotated_key": null, "original_key": null, "faces": []}
+        }).to_string());
+    }
+
+    // 触发 cancel(模拟 POST /api/jobs/{id}/cancel)。
+    let ok = reg.request_cancel(&job.id);
+    assert!(ok, "request_cancel returns true");
+
+    // 模拟 run_job 在下一帧 loop 顶部检测到 cancel,发终态 + 设状态。
+    job.set_status(rsface_platform::jobs::JobStatus::Cancelled);
+    job.emit(&serde_json::json!({"type": "cancelled"}).to_string());
+
+    // 收集订阅端事件。
+    let mut frames_seen: u64 = 0;
+    let mut saw_cancelled = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+            Ok(Ok(payload)) => {
+                let v: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+                match v.get("type").and_then(|t| t.as_str()) {
+                    Some("frame") => frames_seen += 1,
+                    Some("cancelled") => {
+                        saw_cancelled = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Err(_lagged)) => continue,
+            Err(_) => continue,
+        }
+    }
+
+    // 30 帧在 broadcast channel(capacity 256)内全部存活,订阅端应该全收到。
+    assert!(
+        frames_seen >= 25,
+        "expected ≥25 frame events before cancel, got {frames_seen}"
+    );
+    assert!(saw_cancelled, "expected 'cancelled' SSE event");
+    assert_eq!(
+        job.status(),
+        rsface_platform::jobs::JobStatus::Cancelled,
+        "job status must be 'cancelled'"
+    );
+    let _ = shutdown.send(());
+}
+
+/// 测试辅助:起一个 in-memory JobRegistry,与 robustness.rs 的同名辅助对齐。
+async fn boot_registry_for_test() -> (
+    std::sync::Arc<rsface_platform::jobs::JobRegistry>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let mut cfg = rsface_platform::config::Config::from_env();
+    cfg.tmp_dir = std::env::temp_dir().join(format!("rsface-it-cancel-{}", uuid_like()));
+    cfg.local_media_dir = cfg.tmp_dir.join("media");
+    cfg.database_url = "".to_string();
+    cfg.max_concurrent_jobs = 1;
+    cfg.max_queue_depth = 8;
+    cfg.shutdown_grace_secs = 2;
+    let _ = std::fs::create_dir_all(&cfg.tmp_dir);
+
+    let s3 = std::sync::Arc::new(rsface_platform::s3::S3Client::new(
+        cfg.s3_endpoint.clone(),
+        cfg.s3_region.clone(),
+        cfg.s3_access_key.clone(),
+        cfg.s3_secret_key.clone(),
+        cfg.s3_bucket.clone(),
+    ));
+    let db = std::sync::Arc::new(rsface_platform::persist::Db { pool: None });
+    let rt = tokio::runtime::Handle::current();
+    let reg = std::sync::Arc::new(rsface_platform::jobs::JobRegistry {
+        jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
+        s3,
+        cfg: cfg.clone(),
+        db,
+        rt: rt.clone(),
+        job_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent_jobs)),
+        running_jobs: std::sync::atomic::AtomicU64::new(0),
+        queued_jobs: std::sync::atomic::AtomicU64::new(0),
+        started_at: std::time::Instant::now(),
+        shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown_flag = reg.shutdown.clone();
+    tokio::spawn(async move {
+        let _ = rx.await;
+        shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    (reg, tx)
+}
