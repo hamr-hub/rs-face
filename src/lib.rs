@@ -239,6 +239,16 @@ pub mod pool;
 pub mod cnn;
 #[cfg(feature = "detector-luminance")]
 pub mod luminance_face;
+// New zero-dep detectors (skin-tone band, LBP histogram, HOG + linear
+// template). Each one is self-contained, brings no external
+// dependencies, and is always compiled in — the original detectors
+// are still feature-gated for binary-size control, but these three
+// live on the always-on path because the algorithm <-> ensemble
+// fuser contract is purely core-type (`Detection` + `iou`), so they
+// cannot break `cargo build --no-default-features --lib`.
+pub mod skin_face;
+pub mod lbp_face;
+pub mod hog_face;
 
 // Multi-algorithm ensemble fuser. No external deps and no detector
 // gate — `Detection` and `iou` are core types available in every
