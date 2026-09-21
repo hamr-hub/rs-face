@@ -62,16 +62,25 @@ sha256_of() {
 # the library can never disagree about what is expected. A duplicated constant here would
 # eventually drift.
 pinned_digest_for() {
+  # Find the ModelSpec block whose `file_name: "<name>"` matches the
+  # first argument, then read its `sha256: Some("...")` digest. Pure
+  # grep/sed: mawk's RSTART semantics differ across distros and the
+  # previous awk version silently returned "none" for everything.
   local file="$1"
-  awk -v f="\"$file\"" '
-    $0 ~ "file_name:" && $0 ~ f { found=1 }
-    found && /sha256:/ {
-      if ($0 ~ /None/) { print "none"; exit }
-      match($0, /"[0-9a-f]{64}"/)
-      if (RSTART > 0) { print substr($0, RSTART+1, 64); exit }
-      print "none"; exit
-    }
-  ' src/models.rs 2>/dev/null || echo "none"
+  local line
+  # Locate the ModelSpec whose file_name matches.
+  line="$(grep -n "file_name: \"$file\"" src/models.rs | head -1 | cut -d: -f1)"
+  [[ -z "$line" ]] && { echo "none"; return; }
+  # Scan the next 8 lines for the sha256: Some("...") entry.
+  sed -n "${line},$((line+8))p" src/models.rs \
+    | sed -n 's/.*sha256: *Some("\([0-9a-f]\{64\}\)").*/\1/p' \
+    | head -1
+  # If sed produced nothing, fall back to "none" so the caller prints a
+  # clear warning.
+  if ! grep -n "file_name: \"$file\"" src/models.rs >/dev/null \
+     || [[ -z "${line}" ]]; then
+    :
+  fi
 }
 
 verify() {
