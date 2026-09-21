@@ -196,6 +196,14 @@ required-features = [
 name = "synthetic_smoke"
 required-features = ["detector-haar"]
 
+# Zero-dep landmark + tracker demos. Both modules live in the core
+# (unconditional) part of the crate, so no feature gating is required.
+[[example]]
+name = "landmarks_demo"
+
+[[example]]
+name = "track_faces"
+
 # ---------------------------------------------------------------------------
 # Integration tests — same rationale as examples.
 # ---------------------------------------------------------------------------

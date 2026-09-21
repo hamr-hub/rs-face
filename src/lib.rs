@@ -206,7 +206,9 @@ pub mod embednet;
 pub mod face;
 pub mod face_detector;
 pub mod image;
+pub mod landmarks;
 pub mod recognizer;
+pub mod tracker;
 
 // Little byte (de)serialiser shared by the gallery/model stores; only the
 // stores need it.
