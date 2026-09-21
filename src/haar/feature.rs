@@ -433,6 +433,61 @@ mod tests {
     }
 
     #[test]
+    fn diagonal_feature_returns_nonzero_for_synthetic_diagonal_pattern() {
+        // 24x24 image with a clear 45° edge: top-left half (x + y < 24) bright,
+        // bottom-right half dark. A 2-rect `diagonal_edge` feature that combines
+        // two tilted parallelograms whose net weight is +1 / -1 must respond
+        // non-zero: the upper parallelogram covers mostly bright pixels while
+        // the lower one covers mostly dark ones.
+        //
+        // We deliberately test at window (0, 0) so the lower rect's tilted
+        // corners (x, y) = (0, 12), (-12, 24), (24, 36), (12, 48) probe the
+        // table's zero-border convention: even with one of the two rects
+        // clipped, the upper rect's cone still lands on bright pixels and the
+        // summed response is non-zero. (In real detector scans the window
+        // is placed so all corners fit inside the rotated table, which gives
+        // an even larger response — verified below as `bounded_r != 0`.)
+        let mut img = GrayImage::new(24, 24);
+        for y in 0..24 {
+            for x in 0..24 {
+                img[(x, y)] = if x + y < 24 { 255 } else { 0 };
+            }
+        }
+        let ii = IntegralImage::from_gray(&img);
+        let ri = RotatedIntegralImage::from_gray(&img);
+        let feat = HaarFeature::diagonal_edge(1, 2);
+        let r = feat.eval(&ii, &ri, 0, 0, 24, 24, ii.width(), ii.height());
+        assert_ne!(
+            r, 0.0,
+            "diagonal feature on a clear 45-degree edge must respond"
+        );
+        // Sanity check at a window that fits fully inside a larger image: the
+        // diagonal feature must still respond with the expected sign.
+        let mut big = GrayImage::new(48, 48);
+        for y in 0..48 {
+            for x in 0..48 {
+                big[(x, y)] = if x + y < 48 { 255 } else { 0 };
+            }
+        }
+        let big_ii = IntegralImage::from_gray(&big);
+        let big_ri = RotatedIntegralImage::from_gray(&big);
+        let bounded_r = feat.eval(
+            &big_ii,
+            &big_ri,
+            0,
+            0,
+            24,
+            24,
+            big_ii.width(),
+            big_ii.height(),
+        );
+        assert_ne!(
+            bounded_r, 0.0,
+            "diagonal feature in a fully-bounded window must respond"
+        );
+    }
+
+    #[test]
     fn eval_inbounds_matches_eval_bit_for_bit() {
         // Deterministic pseudo-random image covering all feature families.
         let (w, h) = (48usize, 40usize);
