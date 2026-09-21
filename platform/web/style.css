@@ -824,6 +824,100 @@ body {
 }
 .new-pane-shared .hint { margin-left: auto; }
 
+/* ============ 高级检测参数面板(params-panel.js) ============ */
+.params-panel {
+  width: 100%;
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.params-panel > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--fg-dim);
+  padding: 4px 0;
+  user-select: none;
+}
+.params-panel > summary::-webkit-details-marker { display: none; }
+.params-panel > summary::before {
+  content: "▸";
+  display: inline-block;
+  font-size: 10px;
+  transition: transform .15s;
+}
+.params-panel[open] > summary::before { transform: rotate(90deg); }
+.params-panel-meta {
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 99px;
+  font-size: 10.5px;
+  letter-spacing: .3px;
+  background: var(--bg-3);
+  color: var(--fg-dim);
+}
+.params-panel-meta[data-state="custom"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.params-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+.param-row {
+  display: flex; flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  transition: border-color .12s;
+}
+.param-row:hover, .param-row:focus-within { border-color: var(--border-2); }
+.param-row .param-k {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: .3px;
+}
+.param-row input[type="number"] {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  padding: 3px 6px;
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+.param-row input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.param-row .param-hint {
+  font-size: 10px;
+  color: var(--fg-dim-2);
+  letter-spacing: .2px;
+}
+.params-actions {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 10px;
+}
+.params-actions .params-hint {
+  font-size: 10.5px;
+  color: var(--fg-dim-2);
+  margin-left: auto;
+}
+@media (max-width: 540px) {
+  .params-grid { grid-template-columns: 1fr; }
+}
+
 .settings-list { display: flex; flex-direction: column; gap: 6px; }
 .setting-row {
   display: flex; justify-content: space-between; align-items: center;
