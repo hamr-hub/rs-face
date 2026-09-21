@@ -666,6 +666,11 @@ impl JobRegistry {
         // 通过 spawn_run 已经传入的 `rt` handle 在 tokio runtime 里 spawn
         // 一个独立 task 跑心跳;cancel 是同一 AtomicBool,run_job 退出后
         // 下一次轮询即结束。task 是 fire-and-forget,run_job 不阻塞等它。
+        //
+        // 同步启动高频心跳:`last_heartbeat_ts` 每 5s 刷新,服务于运行时
+        // janitor(`status='running' AND last_heartbeat_ts < now()-30s` 的
+        // 行会被标 failed/worker_died)。两个心跳共用同一个 cancel 标志,
+        // 任何一个 tick 看到 true 都立刻退出,不再写 DB。
         {
             let rt = self.rt.clone();
             let db = self.db.clone();
@@ -689,6 +694,30 @@ impl JobRegistry {
                 }
             });
             let _ = rt; // 当前实现用不到 rt(已有 handle),保留变量供未来扩展
+        }
+        // 高频心跳:last_heartbeat_ts 5s 刷新,janitor 用它判定 worker 是否
+        // 静默死亡。两条心跳任务独立,DB 写入走同一连接池,不阻塞 run_job。
+        {
+            let db = self.db.clone();
+            let id = job.id.clone();
+            let cancel = job.cancel.clone();
+            tokio::spawn(async move {
+                // 启动后立即刷一次,让 janitor 在第一轮扫描时不会误判
+                // "刚启动的 running 行没心跳 → worker_died"。
+                if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    db.heartbeat_realtime(&id).await;
+                }
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+                // 跳过首次立即触发(上面手动发过),与 30s 心跳对齐思路一致。
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    db.heartbeat_realtime(&id).await;
+                }
+            });
         }
 
         // 1) 输入预处理:图片归一化为 PGM;视频 URL 同步 ffmpeg 转 mp4;
@@ -1041,6 +1070,61 @@ impl JobRegistry {
         );
         Ok(())
     }
+}
+
+/// 启动死锁 janitor:每 30s 扫一次 DB,把 `status='running' AND
+/// last_heartbeat_ts < now() - 30s` 的行标 error(error='worker_died')。
+///
+/// `shutdown` 是平台 graceful-shutdown 标志:置 true 后本任务下一轮
+/// 醒来即退出,避免 shutdown 时 fire-and-forget task 撑住 axum 的
+/// graceful_shutdown。
+///
+/// 测试 hook:
+/// - `stale_secs_override` 允许集成测试把 30s 阈值压到 1s,
+///   让"worker 死亡"场景不需要真的等 30 秒。`None` = 用 30s 默认。
+/// - `tick_secs_override` 允许集成测试把扫描周期从 30s 压到更短,
+///   让"shutdown 后 janitor 退出"测试不等 30s。`None` = 用 30s 默认。
+pub fn spawn_janitor(
+    db: Arc<Db>,
+    shutdown: Arc<AtomicBool>,
+    stale_secs_override: Option<u64>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_janitor_with_tick(db, shutdown, stale_secs_override, None)
+}
+
+/// 与 `spawn_janitor` 同,但允许测试同时覆盖 tick 周期。生产路径
+/// 不要直接调这个 — 让默认 30s 周期生效以免 janitor 抢 DB 连接。
+pub fn spawn_janitor_with_tick(
+    db: Arc<Db>,
+    shutdown: Arc<AtomicBool>,
+    stale_secs_override: Option<u64>,
+    tick_secs_override: Option<u64>,
+) -> tokio::task::JoinHandle<()> {
+    let stale = stale_secs_override.unwrap_or(30);
+    let tick_secs = tick_secs_override.unwrap_or(30);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
+        // 跳过首次立即触发 — server 刚启动时 running 行可能还在 mark_started
+        // 路径中,last_heartbeat_ts 还没写。30s 后第一次扫描,已有 30s 的
+        // 历史 running 行才会被纳入判断。
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                tracing::info!("[janitor] shutdown signal received, exiting");
+                return;
+            }
+            match db.janitor_kill_stale(stale as i64).await {
+                Some(0) => {} // 没有 zombie,跳过日志
+                Some(n) => {
+                    tracing::warn!("[janitor] marked {n} stale job(s) as worker_died");
+                }
+                None => {
+                    // DB 不可用;不要紧,起动时 reap_orphans 会兜底。
+                }
+            }
+        }
+    })
 }
 
 fn finalize(job: &Job, started: std::time::Instant, tmp_dir: &Path) {

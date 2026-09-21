@@ -115,7 +115,9 @@ async fn main() {
         // 之前把它们标 error,避免前端永远看到"卡在 running"。
         // 阈值 5 分钟(>heartbeat 30s 间隔 × 10,确保正常 job 不会被误伤)。
         match db.reap_orphans(300).await {
-            Some(n) if n > 0 => println!("[rsface-platform] reaped {n} orphaned job(s) from previous run"),
+            Some(n) if n > 0 => {
+                println!("[rsface-platform] reaped {n} orphaned job(s) from previous run")
+            }
             Some(_) => {} // 0 跳过日志
             None => eprintln!("[rsface-platform] WARN: orphan reap skipped (DB pool unavailable)"),
         }
@@ -166,6 +168,11 @@ async fn main() {
     };
 
     let app = api::router(state.clone(), caches);
+
+    // 死锁 janitor:周期扫描 stale running 行。DB 不可用时 janitor 静默
+    // 无害(reap_orphans + heartbeat 写入路径在 DB None 时早返回)。
+    // shutdown 与 axum graceful_shutdown 同步,避免拖住进程退出。
+    let _janitor = jobs::spawn_janitor(db.clone(), state.shutdown.clone(), None);
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)
         .await
