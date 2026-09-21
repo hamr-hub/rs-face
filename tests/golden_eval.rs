@@ -248,23 +248,61 @@ where
     }
 }
 
-/// Load (or generate) the image for an entry. The synthetic entry has
-/// `path: None`; all others read from disk.
-fn load_entry(entry: &ImageEntry) -> GrayImage {
-    match entry.path {
-        Some(p) => load_image(p),
-        None => {
-            // Re-generate the synthetic face: the GT box position is
-            // hardcoded so this is a deterministic in-memory rebuild.
-            let (img, _) = synthetic_face();
-            img
-        }
-    }
+/// Synthetic-entry discriminator: maps each `path: None` entry to the
+/// generator function that produces its image. Real fixtures go through
+/// `load_image` instead. The variants below give us the 12-entry golden
+/// set's full mix of real photos, profile-like patterns, noise patterns,
+/// and a multi-face scene without requiring external image fixtures.
+#[derive(Clone, Copy, Debug)]
+enum SyntheticKind {
+    /// The canonical "Haar fails, band-signature fires" 200x200 pattern.
+    FrontalTuned,
+    /// 240x240 profile-like pattern, box at (80, 80, 80, 80).
+    ProfileA,
+    /// 240x240 profile-like pattern, box at (50, 90, 100, 80).
+    ProfileB,
+    /// 240x240 profile-like pattern, box at (70, 60, 90, 100).
+    ProfileC,
+    /// 240x240 uniform noise, no face (tests variance-norm floor).
+    NoiseUniform,
+    /// 240x240 checkerboard, no face (tests high-FP regimes).
+    NoiseChecker,
+    /// 240x240 gradient, no face (tests low-variance windows).
+    NoiseGradient,
+    /// 320x240 with 3 small face-like patches left-to-right.
+    MultiFace3,
 }
 
 struct ImageEntry {
     path: Option<&'static str>,
     gt: GroundTruth,
+    /// `Some(kind)` for synthetic in-memory entries; `None` for fixtures
+    /// loaded from disk.
+    synthetic: Option<SyntheticKind>,
+}
+
+/// Load (or generate) the image for an entry. Real fixtures (with
+/// `path: Some(_)`) are read from disk; synthetic entries are rebuilt
+/// in-memory from their kind tag. The hardcoded GT box positions in
+/// `golden_set` are the contract these generators must respect — a
+/// rebuild that moves the box desynchronises labels from images.
+fn load_entry(entry: &ImageEntry) -> GrayImage {
+    match (entry.path, entry.synthetic) {
+        (Some(p), _) => load_image(p),
+        (None, Some(SyntheticKind::FrontalTuned)) => synthetic_face().0,
+        (None, Some(SyntheticKind::ProfileA)) => synthetic_profile(80, 80, 80, 80),
+        (None, Some(SyntheticKind::ProfileB)) => synthetic_profile(50, 90, 100, 80),
+        (None, Some(SyntheticKind::ProfileC)) => synthetic_profile(70, 60, 90, 100),
+        (None, Some(SyntheticKind::NoiseUniform)) => synthetic_noise_uniform(),
+        (None, Some(SyntheticKind::NoiseChecker)) => synthetic_noise_checker(),
+        (None, Some(SyntheticKind::NoiseGradient)) => synthetic_noise_gradient(),
+        (None, Some(SyntheticKind::MultiFace3)) => synthetic_multi_face_3(),
+        (None, None) => {
+            // Default to the canonical frontal face for any legacy
+            // entry that doesn't tag its synthetic kind.
+            synthetic_face().0
+        }
+    }
 }
 
 /// Debug helper: print every detection each algorithm produces on
@@ -323,40 +361,118 @@ fn golden_eval_inspect() {
 }
 
 fn golden_set() -> Vec<ImageEntry> {
-    // Four face-positive entries:
-    //  - single frontal (lena)
-    //  - two-person (two-people)
-    //  - tiny embedded portrait (demo_face_256)
-    //  - in-memory synthetic face (`None` path, rebuilt on demand)
-    //    where Haar is known to miss and only the band-signature
-    //    detector can fire — the canonical "Haar fails" case where
-    //    the ensemble has to add value.
+    // Twelve-entry golden set (2026-09-21 expansion):
+    //  Real frontal (4):
+    //   - single frontal (lena)
+    //   - two-person (two-people)
+    //   - tiny embedded portrait (demo_face_256)
+    //   - large editorial portrait (biden)
+    //  Synthetic face-like (1):
+    //   - in-memory synthetic face where Haar is known to miss; the
+    //     canonical "Haar fails, band-signature detector fires" case
+    //     where the ensemble has to add value.
+    //  Synthetic profile-like (3):
+    //   - profile variants that exercise tilted rect paths and the
+    //     diagonal-edge feature family. None of them is a perfect
+    //     profile silhouette, but they all look like a "face edge" and
+    //     are calibrated to put the cascade at the boundary of
+    //     acceptance so the precision/recall frontier is visible.
+    //  Synthetic noise patterns (3):
+    //   - uniform noise (zero-variance windows — variance-norm floor
+    //     must keep these out), checkerboard (high-frequency texture
+    //     confuses LBP-style detectors), and gradient (smooth gradient
+    //     tests the variance pre-filter on low-variance scenes).
+    //  Synthetic multi-face scene (1):
+    //   - 3 small face-like patterns tiled into one 320x240 frame so
+    //     group_rectangles has to actually group, not just dedupe.
     //
-    // The 970×2204 biden.ppm is intentionally excluded — every
-    // algorithm's per-image cost is dominated by it (Haar ~1 s,
-    // luminance ~0.5 s, CNN ~minutes) which would push the dev-mode
-    // test well past the harness default. The `biden` label file is
-    // still kept under tests/fixtures/golden/labels/ so future
-    // longer-running evaluations (e.g. release-mode benchmarks) can
-    // include it without changing the eval harness.
+    // The biden.ppm 970×2204 entry is the slowest of the lot — every
+    // algorithm's per-image cost is dominated by it (Haar ~6 s, CNN
+    // ~minutes in debug). It is included to keep the per-algo F1
+    // comparable across the "real photo" axis (small/medium/large).
     let mut entries = Vec::new();
     for (img, label) in &[
         ("tests/fixtures/lena.ppm", "lena"),
         ("tests/fixtures/two-people.ppm", "two-people"),
         ("tests/fixtures/demo_face_256.pgm", "demo_face_256"),
+        ("tests/fixtures/biden.ppm", "biden"),
     ] {
         entries.push(ImageEntry {
             path: Some(img),
             gt: load_ground_truth(label),
+            synthetic: None,
         });
     }
-    // Synthetic face: generated in-memory; single GT box at (75, 75, 50, 50).
+
+    // Synthetic face: in-memory; single GT box at (75, 75, 50, 50).
     entries.push(ImageEntry {
         path: None,
         gt: GroundTruth {
             boxes: vec![(75, 75, 50, 50)],
         },
+        synthetic: Some(SyntheticKind::FrontalTuned),
     });
+
+    // Synthetic profile variants (in-memory): each is a 240x240 pattern
+    // whose strong horizontal gradient approximates a profile silhouette
+    // with a bright forehead, dark eye band, and a sloped jaw. The
+    // rectangular bounding boxes are intentionally loose — the goal is
+    // to measure "did the cascade fire on the profile-like region",
+    // not to evaluate sub-pixel box tightness.
+    entries.push(ImageEntry {
+        path: None,
+        gt: GroundTruth {
+            boxes: vec![(80, 80, 80, 80)],
+        },
+        synthetic: Some(SyntheticKind::ProfileA),
+    });
+    entries.push(ImageEntry {
+        path: None,
+        gt: GroundTruth {
+            boxes: vec![(50, 90, 100, 80)],
+        },
+        synthetic: Some(SyntheticKind::ProfileB),
+    });
+    entries.push(ImageEntry {
+        path: None,
+        gt: GroundTruth {
+            boxes: vec![(70, 60, 90, 100)],
+        },
+        synthetic: Some(SyntheticKind::ProfileC),
+    });
+
+    // Synthetic noise patterns (in-memory): each is a 240x240 image
+    // with no face-like structure. The ground truth is EMPTY so a
+    // detector's only valid response is "no detections" — any output
+    // is a false positive and contributes to FP count.
+    entries.push(ImageEntry {
+        path: None,
+        gt: GroundTruth { boxes: vec![] },
+        synthetic: Some(SyntheticKind::NoiseUniform),
+    });
+    entries.push(ImageEntry {
+        path: None,
+        gt: GroundTruth { boxes: vec![] },
+        synthetic: Some(SyntheticKind::NoiseChecker),
+    });
+    entries.push(ImageEntry {
+        path: None,
+        gt: GroundTruth { boxes: vec![] },
+        synthetic: Some(SyntheticKind::NoiseGradient),
+    });
+
+    // Synthetic multi-face scene (in-memory): 320x240 frame with 3
+    // small face-like patches tiled left-to-right. Group_rectangles
+    // has to actually group the cascade's many similar hits per patch
+    // into 3 distinct clusters, not just dedupe the entire image.
+    entries.push(ImageEntry {
+        path: None,
+        gt: GroundTruth {
+            boxes: vec![(20, 80, 70, 70), (130, 80, 70, 70), (240, 80, 70, 70)],
+        },
+        synthetic: Some(SyntheticKind::MultiFace3),
+    });
+
     entries
 }
 
@@ -399,6 +515,179 @@ fn synthetic_face() -> (GrayImage, (usize, usize, usize, usize)) {
         }
     }
     (img, (75, 75, 50, 50))
+}
+
+/// Synthetic 240x240 "profile-like" pattern: a bright forehead, dark eye
+/// band, and bright chin, but with the dark band offset to one side to
+/// mimic the asymmetric shadow of a profile face. The `(bx, by, bw, bh)`
+/// argument is the bounding box around the pattern's face region; the
+/// image's edge geometry and intensity levels are calibrated so the
+/// cascade's tilted rects and centre-surround features have non-zero
+/// response at that window position.
+///
+/// These are *not* real profile faces — they are deliberately
+/// under-detected to put the cascade at the boundary of acceptance so
+/// the precision/recall frontier is visible. Real profiles would require
+/// 1000s of annotated training samples and a full OpenCV-trained
+/// `haarcascade_profileface.xml` cascade, which is out of scope for the
+/// zero-dep library.
+#[allow(dead_code)]
+fn synthetic_profile(bx: usize, by: usize, bw: usize, bh: usize) -> GrayImage {
+    let (w, h) = (240usize, 240usize);
+    let mut img = GrayImage::new(w, h);
+    // Background: mid-grey with low-amplitude noise so the variance
+    // pre-filter does not kill the inner normrect outright.
+    for y in 0..h {
+        for x in 0..w {
+            let v = 80 + ((x.wrapping_mul(13) ^ y.wrapping_mul(7)) & 0x1F) as i32 - 15;
+            img[(x, y)] = v.clamp(40, 120) as u8;
+        }
+    }
+    // Forehead band: bright (~200), top of the box.
+    let fy0 = by;
+    let fy1 = by + bh / 4;
+    // Eye band: dark (~30), with a horizontal offset to simulate a
+    // profile silhouette's nose shadow on one side.
+    let ey0 = by + bh / 3;
+    let ey1 = by + (bh * 2) / 3;
+    let offset_x = bx + bw / 4;
+    // Chin band: mid (~140), bottom of the box.
+    let cy0 = by + (bh * 3) / 4;
+    let cy1 = by + bh;
+    for y in fy0..fy1.min(h) {
+        for x in bx..(bx + bw).min(w) {
+            let v = 200 + ((x.wrapping_mul(5) ^ y.wrapping_mul(11)) & 0x7) as i32 - 3;
+            img[(x, y)] = v.clamp(180, 220) as u8;
+        }
+    }
+    for y in ey0..ey1.min(h) {
+        for x in bx..(bx + bw).min(w) {
+            // Slight horizontal ramp: the dark band is darker on one
+            // side to mimic a profile silhouette.
+            let ramp = ((x as i32 - bx as i32) * 60 / bw.max(1) as i32) - 30;
+            let v = 30 + ramp;
+            img[(x, y)] = v.clamp(0, 60) as u8;
+            // Nose-bridge streak: a single bright column at the offset.
+            if (offset_x..offset_x + 3).contains(&x) {
+                img[(x, y)] = 220;
+            }
+        }
+    }
+    for y in cy0..cy1.min(h) {
+        for x in bx..(bx + bw).min(w) {
+            let v = 140 + ((x.wrapping_mul(7) ^ y.wrapping_mul(3)) & 0x7) as i32 - 3;
+            img[(x, y)] = v.clamp(120, 160) as u8;
+        }
+    }
+    img
+}
+
+/// 240x240 uniform noise (every pixel ≈ 128). Ground truth is empty;
+/// the cascade must report zero detections here. A correct cascade eval
+/// relies on the variance pre-filter (which we already pass at the
+/// `passes_variance` level) to skip these windows. After the
+/// `variance_norm` floor fix, even zero-variance windows return a bounded
+/// factor (≤ ~1000) so the cascade can still score them — the
+/// pre-filter is the only line of defence for this entry.
+#[allow(dead_code)]
+fn synthetic_noise_uniform() -> GrayImage {
+    let (w, h) = (240usize, 240usize);
+    let mut img = GrayImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            img[(x, y)] = 128;
+        }
+    }
+    img
+}
+
+/// 240x240 high-frequency checkerboard (16x16 cells of 0 / 255). Ground
+/// truth is empty. The high local variance inflates feature responses
+/// *without* any face-like structure; a correctly-tuned cascade rejects
+/// these via the stage-threshold sum, not the variance pre-filter. This
+/// entry exists to measure the false-positive rate on busy backgrounds.
+#[allow(dead_code)]
+fn synthetic_noise_checker() -> GrayImage {
+    let (w, h) = (240usize, 240usize);
+    let mut img = GrayImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            img[(x, y)] = if ((x / 16) + (y / 16)) & 1 == 0 {
+                0
+            } else {
+                255
+            };
+        }
+    }
+    img
+}
+
+/// 240x240 vertical gradient (top=20, bottom=220). Ground truth is
+/// empty. Low-frequency gradients have moderate variance, so the
+/// pre-filter passes but the cascade should still reject (no
+/// face-like structure). This entry measures the cascade's tolerance
+/// to wide illumination gradients.
+#[allow(dead_code)]
+fn synthetic_noise_gradient() -> GrayImage {
+    let (w, h) = (240usize, 240usize);
+    let mut img = GrayImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let v = 20 + (y * 200 / h) as i32;
+            img[(x, y)] = v.clamp(0, 255) as u8;
+        }
+    }
+    img
+}
+
+/// 320x240 frame with three 70x70 face-like patches tiled left-to-right
+/// at y=80. Each patch is a downsized copy of `synthetic_face()` so the
+/// cascade recognises each as a face. `group_rectangles` has to actually
+/// group the cascade's many similar hits per patch into 3 distinct
+/// clusters, not just dedupe the entire image. The GT boxes are
+/// `(20, 80, 70, 70)`, `(130, 80, 70, 70)`, `(240, 80, 70, 70)`; the
+/// third one is on the very right edge of the frame and must still
+/// survive the cascade's image-bounds clamp.
+#[allow(dead_code)]
+fn synthetic_multi_face_3() -> GrayImage {
+    let (w, h) = (320usize, 240usize);
+    let mut img = GrayImage::new(w, h);
+    // Dark grey background so the variance pre-filter rejects the
+    // empty regions cleanly.
+    for y in 0..h {
+        for x in 0..w {
+            img[(x, y)] = 30;
+        }
+    }
+    for (ox, _oy) in &[(20usize, 80usize), (130usize, 80usize), (240usize, 80usize)] {
+        // Build a 70x70 face-like patch in-place using the same logic
+        // as `synthetic_face` (top bright, mid dark, bottom mid).
+        for dy in 0..70 {
+            for dx in 0..70 {
+                let x = ox + dx;
+                let y = 80 + dy;
+                if x >= w || y >= h {
+                    continue;
+                }
+                let v = if dy < 28 {
+                    200 + ((dx.wrapping_mul(7) ^ dy.wrapping_mul(11)) & 0xF) as i32 - 7
+                } else if dy < 50 {
+                    let mut v = 40;
+                    if (20..30).contains(&dx) || (38..46).contains(&dx) {
+                        v = 12;
+                    }
+                    if (32..38).contains(&dx) && dy > 33 && dy < 47 {
+                        v += 60;
+                    }
+                    v
+                } else {
+                    130 + ((dx.wrapping_mul(5) ^ dy.wrapping_mul(3)) & 0x7) as i32 - 3
+                };
+                img[(x, y)] = v.clamp(0, 255) as u8;
+            }
+        }
+    }
+    img
 }
 
 /// Pair every algorithm against the synthetic face and report which
