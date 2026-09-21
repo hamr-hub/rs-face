@@ -21,11 +21,22 @@ pub struct WeakFeature {
 }
 
 /// One cascade stage. A window passes the stage iff the sum of the selected
-/// leaf values is `≥ stage_threshold + stage_bias` (the exact predicate used
-/// by [`Cascade::classify`]).
+/// leaf values is `≥ stage_threshold + cascade.stage_bias` (the exact
+/// predicate used by [`Cascade::classify`]).
+///
+/// `effective_threshold` is the per-stage cached `stage_threshold + bias`,
+/// recomputed when the owning cascade's bias changes via
+/// [`Cascade::recompute_effective_thresholds`]. Storing the sum precomputed
+/// removes one f32 add per stage per window from the inner loop — at ~50k
+/// windows × 25 stages that's 1.25M saves/frame and is what the previous
+/// 130 → <80 ms sprint targeted.
 #[derive(Clone, Debug)]
 pub struct Stage {
     pub stage_threshold: f32,
+    /// Cached `stage_threshold + cascade.stage_bias` at the last recompute
+    /// (see [`Cascade::recompute_effective_thresholds`]). The cascade's inner
+    /// loop uses this directly instead of recomputing the sum every window.
+    pub effective_threshold: f32,
     pub weak_features: Vec<WeakFeature>,
 }
 
@@ -68,6 +79,17 @@ impl Cascade {
             features: Vec::new(),
             stages: Vec::new(),
             stage_bias,
+        }
+    }
+
+    /// Recompute each stage's cached `effective_threshold` from the current
+    /// `stage_bias`. Call after every load and after every mutation of
+    /// `stage_bias`. The cascade's inner loop reads `effective_threshold`
+    /// directly — without this pass the bias would silently be ignored.
+    pub fn recompute_effective_thresholds(&mut self) {
+        let bias = self.stage_bias;
+        for stage in &mut self.stages {
+            stage.effective_threshold = stage.stage_threshold + bias;
         }
     }
 }
@@ -320,7 +342,7 @@ impl Cascade {
             sum += v;
             details.push((w.feature_index as usize, value, v));
         }
-        Some((sum, stage.stage_threshold + self.stage_bias, details))
+        Some((sum, stage.effective_threshold, details))
     }
 
     /// Evaluate a window. Returns `Some(score)` if the window passes all stages,
@@ -606,7 +628,7 @@ impl Cascade {
                 };
                 stage_sum += v;
             }
-            if stage_sum < stage.stage_threshold + self.stage_bias {
+            if stage_sum < stage.effective_threshold {
                 return None;
             }
             *total += stage_sum;
@@ -775,6 +797,12 @@ impl Cascade {
             }
             stages.push(Stage {
                 stage_threshold,
+                // Effective threshold is `stage_threshold + cascade.stage_bias`;
+                // populated for the freshly-loaded bias=0 case. Any later
+                // override of `stage_bias` must call
+                // `recompute_effective_thresholds` for the inner loop to see
+                // it.
+                effective_threshold: stage_threshold,
                 weak_features,
             });
         }

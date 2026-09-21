@@ -836,6 +836,7 @@ mod tests {
         let idx = (c.features.len() - 1) as u32;
         c.stages.push(crate::haar::Stage {
             stage_threshold: -10.0,
+            effective_threshold: -10.0,
             weak_features: vec![crate::haar::WeakFeature {
                 feature_index: idx,
                 threshold: 0.0,

@@ -196,6 +196,10 @@ pub fn run_batch_dir(
     let images = discover_images(input_dir)?;
     if let Some(bias) = cfg.stage_bias {
         cascade.stage_bias = bias;
+        // Cache the per-stage effective_threshold so the inner loop sees the
+        // override. Without this, the inner loop would still use the
+        // cached zero-bias value and the override would silently no-op.
+        cascade.recompute_effective_thresholds();
     }
 
     // Build the detector once and reuse — its per-call setup (integral image

@@ -372,6 +372,9 @@ fn main() {
         .and_then(|s| s.parse().ok())
     {
         cascade.stage_bias = b;
+        // Cascade's inner loop reads the cached per-stage
+        // `effective_threshold`; bias override must recompute it.
+        cascade.recompute_effective_thresholds();
         eprintln!("[rs-face] stage_bias overridden to {}", b);
     }
     println!(

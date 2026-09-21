@@ -148,6 +148,7 @@ pub fn demo_face_cascade() -> Cascade {
     // Eval convention: value < threshold → left_val (face), else → right_val.
     c.stages.push(Stage {
         stage_threshold: 0.5,
+        effective_threshold: 0.5,
         weak_features: vec![WeakFeature {
             feature_index: i_vc as u32,
             threshold: 0.0,
@@ -160,6 +161,7 @@ pub fn demo_face_cascade() -> Cascade {
     // Stage 2 — bright center vs dark sides.
     c.stages.push(Stage {
         stage_threshold: 0.5,
+        effective_threshold: 0.5,
         weak_features: vec![WeakFeature {
             feature_index: i_hc as u32,
             threshold: 0.0,
@@ -172,6 +174,7 @@ pub fn demo_face_cascade() -> Cascade {
     // Stage 3 — eye band darker than forehead + chin.
     c.stages.push(Stage {
         stage_threshold: -1.0,
+        effective_threshold: -1.0,
         weak_features: vec![WeakFeature {
             feature_index: i_eye as u32,
             threshold: 0.0,
@@ -184,6 +187,7 @@ pub fn demo_face_cascade() -> Cascade {
     // Stage 4 — vertical edge between top and bottom halves.
     c.stages.push(Stage {
         stage_threshold: -1.0,
+        effective_threshold: -1.0,
         weak_features: vec![WeakFeature {
             feature_index: i_ve as u32,
             threshold: 0.0,
@@ -196,6 +200,7 @@ pub fn demo_face_cascade() -> Cascade {
     // Stage 5 — nose bridge brightness.
     c.stages.push(Stage {
         stage_threshold: -1.0,
+        effective_threshold: -1.0,
         weak_features: vec![WeakFeature {
             feature_index: i_nose as u32,
             threshold: 0.0,
@@ -208,6 +213,7 @@ pub fn demo_face_cascade() -> Cascade {
     // Stage 6 — top vs bottom.
     c.stages.push(Stage {
         stage_threshold: -1.0,
+        effective_threshold: -1.0,
         weak_features: vec![WeakFeature {
             feature_index: i_tb as u32,
             threshold: 0.0,
@@ -222,6 +228,7 @@ pub fn demo_face_cascade() -> Cascade {
     // variance normalisation) hits the face branch.
     c.stages.push(Stage {
         stage_threshold: -1.0,
+        effective_threshold: -1.0,
         weak_features: vec![WeakFeature {
             feature_index: i_lr as u32,
             threshold: 0.01,
@@ -234,6 +241,7 @@ pub fn demo_face_cascade() -> Cascade {
     // Stage 8 — combine the strongest cues for a final pass.
     c.stages.push(Stage {
         stage_threshold: -0.5,
+        effective_threshold: -0.5,
         weak_features: vec![
             WeakFeature {
                 feature_index: i_ve as u32,
