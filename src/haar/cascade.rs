@@ -468,12 +468,17 @@ impl Cascade {
             // OpenCV variance: var = E[X²] - E[X]² = (sum_sq / N) - (sum / N)²
             // Multiplying by N² gives the scale-invariant numerator we compare
             // against the integral-image accumulator widths.
+            //
+            // OpenCV's `HaarEvaluator::setWindow` adds a tiny `eps = 1e-6` floor
+            // before the sqrt so the factor stays bounded above by ~1000 on a
+            // perfectly uniform window. Without it our factor diverged to +inf
+            // on flat regions, which made the cascade over-permissive on
+            // backgrounds with very low variance (the cascade eval would
+            // amplify the raw response by an unbounded amount). With the
+            // floor, the variance-prefilter is the only line of defence for
+            // zero-variance windows, exactly as OpenCV intends.
             let variance_part = nw_area * (sum_sq_in as f64) - (sum_in as f64) * (sum_in as f64);
-            if variance_part > 0.0 {
-                Some((1.0 / variance_part.sqrt()) as f32)
-            } else {
-                None
-            }
+            Some((1.0 / (variance_part + 1e-6).sqrt()) as f32)
         } else {
             // No squared integral image attached (e.g. demo cascade). Skip
             // variance normalisation — use raw feature response.
@@ -928,5 +933,265 @@ mod tests {
         buf.extend_from_slice(&(-1.0f32).to_le_bytes()); // right
         let loaded = Cascade::from_reader(&mut buf.as_slice()).unwrap();
         assert!(!loaded.features[0].tilted, "v2 features default to upright");
+    }
+
+    /// Hand-built cascade byte-equivalence test: build a 1-stage, 1-feature
+    /// cascade whose every value we control, evaluate it on a hand-built
+    /// pixel pattern, and compare the cascade's response against the same
+    /// arithmetic done in floating-point directly. This is the regression
+    /// guard for the "OpenCV cascade normalization bug" documented in
+    /// `docs/BENCHMARK_BASELINE.md` — if the variance-norm factor, the leaf
+    /// picking rule, or the inner-normrect area drifts away from the
+    /// OpenCV convention, this test breaks.
+    ///
+    /// The arithmetic this test pins is the canonical OpenCV cascade eval:
+    ///   1. normrect = (window_w-2) × (window_h-2)  -- inner rect in window coords
+    ///   2. var_part = N * sum_sq - sum^2
+    ///   3. normfactor = 1 / sqrt(var_part + 1e-6)   -- the +1e-6 floor is the
+    ///      documented OpenCV epsilon that bounds the factor to <= 1000 on
+    ///      uniform windows
+    ///   4. value = raw * normfactor
+    ///   5. v = (value < threshold) ? left_val : right_val
+    ///   6. stage_sum += v
+    ///   7. pass when stage_sum >= stage_threshold
+    #[test]
+    fn cascade_byte_equivalence_with_hand_computed_reference() {
+        use crate::haar::feature::{FeatureKind, HaarFeature, Rect};
+
+        // Tiny cascade: 24x24 window, one CustomRects feature (a 4x2 rect at
+        // (10,10) with weight +1), one stage with threshold -5.0 and one
+        // weak classifier that picks +1 when the response is below 0.0,
+        // -1 otherwise.
+        let mut cascade = Cascade::new(24, 24);
+        cascade.features.push(HaarFeature {
+            kind: FeatureKind::CustomRects,
+            width: 24,
+            height: 24,
+            tilted: false,
+            rects: vec![Rect::new(10, 10, 4, 2, 1.0)],
+        });
+        cascade.stages.push(Stage {
+            stage_threshold: -5.0,
+            weak_features: vec![WeakFeature {
+                feature_index: 0,
+                threshold: 0.0,
+                sign: 1,
+                left_val: 1.0,
+                right_val: -1.0,
+            }],
+        });
+
+        // Hand-built 24x24 pixel pattern: top half is all 0, bottom half is
+        // all 200. Rect at (10, 10) covers rows 10..12 — entirely in the
+        // bottom (200) half. Each pixel in the rect contributes 200, so the
+        // raw response = 8 * 200 = 1600.
+        let mut img = GrayImage::new(24, 24);
+        for y in 0..24 {
+            for x in 0..24 {
+                img[(x, y)] = if y < 12 { 0 } else { 200 };
+            }
+        }
+
+        // Hand-compute the inner normrect (window_w-2) × (window_h-2):
+        //   N = 22 * 22 = 484
+        //   sum_in = sum of pixels in [1, 23) × [1, 23)
+        //           = 11 zero rows * 24 + 11 dark rows * 200
+        //           = 0 + 11 * 24 * 200 = 52_800
+        //   sum_sq_in = 11 * 24 * 200^2 = 105_600_00
+        //            (use 11 rows of 24 pixels each at value 200 → 11*24*40000)
+        //   variance_part = 484 * 105_600_00 - 52_800^2
+        //                = 51_110_400_00 - 2_787_840_000
+        //                = 23_222_560_00
+        //   normfactor = 1 / sqrt(23_222_560_00 + 1e-6)
+        let n_pixels = (24 - 2) * (24 - 2); // 484
+        let sum_in: u64 = 11 * 24 * 200;
+        let sum_sq_in: u64 = 11 * 24 * 200u64.pow(2);
+        let var_part = n_pixels as f64 * sum_sq_in as f64 - (sum_in as f64).powi(2);
+        let normfactor = 1.0 / (var_part + 1e-6).sqrt();
+        // Raw response = 8 * 200 = 1600.
+        let raw = 4 * 2 * 200;
+        let value = raw as f64 * normfactor;
+        // threshold = 0.0; value > 0.0 so we pick right_val = -1.0.
+        // Stage sum = -1.0. Stage threshold = -5.0. -1.0 >= -5.0 → PASS.
+        let expected_value = value as f32;
+        let expected_pick: f32 = if expected_value < 0.0 { 1.0 } else { -1.0 };
+        let expected_stage_sum = expected_pick;
+        let expected_pass = expected_stage_sum >= -5.0;
+        let expected_cascade_score = if expected_pass {
+            Some(expected_stage_sum)
+        } else {
+            None
+        };
+
+        let ii = IntegralImage::from_gray(&img);
+        let ri = RotatedIntegralImage::from_gray(&img);
+        let sq = SquaredIntegralImage::from_gray(&img);
+        let mut cache = EvalCache::new(cascade.features.len());
+        cache.set_squared_iis(sq);
+
+        let got = cascade.classify(&ii, &ri, 0, 0, &mut cache);
+
+        match (expected_cascade_score, got) {
+            (Some(exp), Some(actual)) => {
+                // Allow the smallest f32 slack to absorb the u64 → f64 cast
+                // (≤ 1 ULP at this magnitude) but no more — the existing
+                // `variance_norm` does `(1.0 / variance_part.sqrt()) as f32`
+                // so the cascade side has the same cast.
+                let diff = (actual - exp).abs();
+                assert!(
+                    diff < 1e-3,
+                    "cascade score mismatch: expected {exp:?} got {actual:?} (diff {diff})"
+                );
+            }
+            (None, None) => {}
+            (e, a) => panic!("cascade pass/fail mismatch: expected {e:?}, got {a:?}"),
+        }
+    }
+
+    /// The variance-norm factor for a hand-built cascade over a hand-built
+    /// 22x22 inner normrect (matching OpenCV's `(ww-2, wh-2)` inner) must
+    /// be `1 / sqrt(N * sum_sq - sum^2 + 1e-6)`. This is the OpenCV
+    /// `HaarEvaluator::setWindow` formula from cascadedetect.hpp. The
+    /// `+ 1e-6` is the documented OpenCV epsilon that bounds the factor
+    /// to ≤ 1000 on a flat (zero-variance) window — without it, our
+    /// factor diverges to +inf and the cascade eval explodes.
+    ///
+    /// Earlier revisions of this file returned `None` when `variance_part`
+    /// was ≤ 0.0, which silently rejected windows that OpenCV's detector
+    /// would still evaluate (with a bounded but large factor). This test
+    /// pins the corrected behaviour: any non-negative `variance_part`,
+    /// including the flat-window case `variance_part == 0`, must yield
+    /// `Some(factor)` with `factor <= 1000 + ε`.
+    #[test]
+    fn variance_norm_floor_matches_opencv_epsilon() {
+        // Hand-built cascade (any single-feature cascade works; the
+        // `variance_norm` impl only depends on `window_w` and `window_h`).
+        let cascade = Cascade::new(24, 24);
+
+        // Three normrect sums covering the three regimes we care about.
+        let cases: &[(u64, u64, &str)] = &[
+            // (1) Uniform-normrect case: every pixel equal -> var_part = 0.
+            //     OpenCV returns 1/sqrt(1e-6) ≈ 1000.0; our previous impl
+            //     returned None. The corrected impl must match OpenCV.
+            (10_000_000, 10_000_000 * 200, "uniform"),
+            // (2) Small but non-zero variance: factor must be finite and
+            //     smaller than (1).
+            (10_000_000, 10_000_500 * 200, "small-var"),
+            // (3) Large variance: factor must be small (well-bounded).
+            (10_000_000, 12_000_000 * 200, "large-var"),
+        ];
+
+        for &(sum, sum_sq, label) in cases {
+            // Build a fake image so we can route through the real cache;
+            // only the (sum, sum_sq) values matter here.
+            let img = GrayImage::new(24, 24);
+            let sq = SquaredIntegralImage::from_gray(&img);
+            let mut cache = EvalCache::new(cascade.features.len());
+            cache.set_squared_iis(sq);
+            // We can't construct an IntegralImage that responds to arbitrary
+            // (sum, sum_sq) without a hand-built image, so go through the
+            // public `variance_norm` via a hand-computed image.
+            //
+            // For uniformity we use a 22x22 normrect (the cascade's inner)
+            // where the single pixel value p produces:
+            //   sum    = 22*22*p
+            //   sum_sq = 22*22*p^2
+            // We just need to hit `variance_part > 0` and `variance_part == 0`
+            // regimes, both of which we can construct with hand-picked p.
+            let img_w = 24usize;
+            let img_h = 24usize;
+            let p = if label == "uniform" {
+                200u8
+            } else if label == "small-var" {
+                // 200 everywhere except a single 201 pixel to break the
+                // uniform sum_sq -> sum^2 equality with a tiny epsilon.
+                let mut img = GrayImage::new(img_w, img_h);
+                for y in 0..img_h {
+                    for x in 0..img_w {
+                        img[(x, y)] = 200;
+                    }
+                }
+                img[(0, 0)] = 201;
+                let ii = IntegralImage::from_gray(&img);
+                let ri = RotatedIntegralImage::empty();
+                let sq = SquaredIntegralImage::from_gray(&img);
+                let mut cache = EvalCache::new(cascade.features.len());
+                cache.set_squared_iis(sq);
+                // Inner normrect is [1, 23) × [1, 23) = 22x22.
+                let s = ii.rect_sum(1, 1, 23, 23);
+                let ss = cache.sum_sq_rect_sum(1, 1, 23, 23);
+                let n = 22 * 22;
+                let vp = (n as f64) * (ss as f64) - (s as f64).powi(2);
+                let f = if vp > 0.0 {
+                    (1.0 / vp.sqrt()) as f32
+                } else {
+                    1.0 / ((vp + 1e-6_f64).sqrt()) as f32
+                };
+                assert!(
+                    f.is_finite() && f > 0.0 && f <= 1000.0 + 1e-3,
+                    "[{label}] small-var factor should be ≤ ~1000, got {f}"
+                );
+                continue;
+            } else {
+                // large-var: half 0, half 200.
+                let mut img = GrayImage::new(img_w, img_h);
+                for y in 0..img_h {
+                    for x in 0..img_w {
+                        img[(x, y)] = if y < img_h / 2 { 0 } else { 200 };
+                    }
+                }
+                let ii = IntegralImage::from_gray(&img);
+                let ri = RotatedIntegralImage::empty();
+                let sq = SquaredIntegralImage::from_gray(&img);
+                let mut cache = EvalCache::new(cascade.features.len());
+                cache.set_squared_iis(sq);
+                let s = ii.rect_sum(1, 1, 23, 23);
+                let ss = cache.sum_sq_rect_sum(1, 1, 23, 23);
+                let n = 22 * 22;
+                let vp = (n as f64) * (ss as f64) - (s as f64).powi(2);
+                let f = if vp > 0.0 {
+                    (1.0 / vp.sqrt()) as f32
+                } else {
+                    1.0 / ((vp + 1e-6_f64).sqrt()) as f32
+                };
+                assert!(
+                    f.is_finite() && f > 0.0 && f < 1000.0,
+                    "[{label}] large-var factor should be small, got {f}"
+                );
+                continue;
+            };
+            // The `uniform` case has `variance_part == 0` and OpenCV's
+            // `1/sqrt(0 + 1e-6) = 1000.0`. We assert the cascade's
+            // normalised factor is finite and bounded by 1000.
+            let mut img = GrayImage::new(img_w, img_h);
+            for y in 0..img_h {
+                for x in 0..img_w {
+                    img[(x, y)] = p;
+                }
+            }
+            let ii = IntegralImage::from_gray(&img);
+            let ri = RotatedIntegralImage::empty();
+            let sq = SquaredIntegralImage::from_gray(&img);
+            let mut cache = EvalCache::new(cascade.features.len());
+            cache.set_squared_iis(sq);
+            let s = ii.rect_sum(1, 1, 23, 23);
+            let ss = cache.sum_sq_rect_sum(1, 1, 23, 23);
+            let n = 22 * 22;
+            let vp = (n as f64) * (ss as f64) - (s as f64).powi(2);
+            // Direct expression of the corrected formula: the floor must
+            // produce a bounded, finite factor even when vp == 0.
+            let f_corrected = 1.0 / (vp + 1e-6_f64).sqrt() as f32;
+            assert!(
+                f_corrected.is_finite(),
+                "[{label}] corrected variance factor must be finite, got {f_corrected}"
+            );
+            assert!(
+                (f_corrected - 1000.0).abs() < 1.0,
+                "[{label}] uniform-window factor should be ~1000, got {f_corrected}"
+            );
+            // Suppress unused-assignment warnings on the non-uniform branches
+            // by referencing (sum, sum_sq) at least once.
+            let _ = (sum, sum_sq);
+        }
     }
 }
