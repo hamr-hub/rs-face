@@ -904,6 +904,7 @@ name = "rs-face"
 version = "0.2.0"
 dependencies = [
  "cudarc",
+ "flate2",
  "metal",
  "ort",
  "tract-onnx",

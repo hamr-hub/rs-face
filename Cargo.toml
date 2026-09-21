@@ -259,9 +259,13 @@ required-features = ["video-id"]
 
 [dependencies]
 
-# We intentionally keep ZERO runtime dependencies for the core library.
-# Video decoding falls back to a std-only path (HTTP image stream or
-# frame sequence) when no native decoder is compiled in.
+# PNG zlib decoding. The hand-rolled DEFLATE reader in src/image/png.rs only
+# supported uncompressed (stored) blocks, so every real PNG — which uses
+# fixed/dynamic Huffman — failed to decode and face enrollment was impossible.
+# flate2 with the default miniz_oxide backend is pure Rust (no C toolchain,
+# safe on Jetson aarch64) and is already present in Cargo.lock transitively.
+flate2 = "1.1"
+
 
 # GPU backends. Each is gated behind its own cargo feature so the default
 # build keeps zero deps on hosts that only use the CPU detectors. The
