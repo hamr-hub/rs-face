@@ -1102,4 +1102,106 @@ mod tests {
         // Same origin but a size delta beyond eps is NOT similar.
         assert!(!similar_rects(&a, &det(100, 100, 72, 72, 0.0), GROUP_EPS));
     }
+
+    /// OpenCV `detectMultiScale` semantics: a single face produces a cloud
+    /// of similar raw hits across neighbouring pyramid levels and window
+    /// positions. The OpenCV `groupRectangles(..., minNeighbors=3)` pass
+    /// must drop a cluster of `<= 3` similar hits even when their IoU
+    /// against the strongest survivor would be above the IoU NMS threshold.
+    ///
+    /// `group_rectangles(raw, 3)` must therefore keep nothing when fed
+    /// exactly 3 similar rects; the 4th hit is the one that flips the
+    /// count over the threshold and produces the surviving averaged rect.
+    #[test]
+    fn nms_min_neighbors_drops_duplicate_detections() {
+        // Three rects at the same face with sub-pixel jitter: every pair is
+        // within OpenCV's `eps = 0.2` `SimilarRects` delta, so they all
+        // collapse into one cluster.
+        let raw = vec![
+            det(100, 100, 50, 50, 1.0),
+            det(101, 101, 50, 50, 2.0),
+            det(102, 102, 50, 50, 3.0),
+        ];
+        // Exactly 3 hits, threshold = 3: must NOT survive (n1 <= 3 rejects).
+        assert!(
+            group_rectangles(raw, 3).is_empty(),
+            "3 hits with min_neighbors=3 must drop the cluster"
+        );
+
+        // A 4th similar hit lifts the cluster above the threshold and the
+        // strongest score (the 4th) survives with the cluster's averaged
+        // box and the surviving member's score.
+        let raw = vec![
+            det(100, 100, 50, 50, 1.0),
+            det(101, 101, 50, 50, 2.0),
+            det(102, 102, 50, 50, 3.0),
+            det(103, 103, 50, 50, 9.5),
+        ];
+        let out = group_rectangles(raw, 3);
+        assert_eq!(out.len(), 1, "4 hits must produce exactly 1 cluster");
+        assert_eq!(out[0].score, 9.5, "best member score survives");
+        // Truncated average of x: (100+101+102+103)/4 = 101.
+        assert_eq!(out[0].x, 101);
+        assert_eq!(out[0].y, 101);
+
+        // min_neighbors=0 disables the group threshold (OpenCV `groupThreshold<=0`):
+        // every raw hit survives untouched so the downstream IoU NMS has full
+        // detail to work with.
+        let raw = vec![det(100, 100, 50, 50, 1.0), det(102, 102, 50, 50, 2.0)];
+        let passthrough = group_rectangles(raw.clone(), 0);
+        assert_eq!(passthrough.len(), 2);
+    }
+
+    /// Two non-overlapping face detections must both survive grouping
+    /// and the IoU NMS pass — they live in different `SimilarRects` clusters
+    /// AND have IoU = 0 with each other.
+    #[test]
+    fn nms_keeps_distinct_faces() {
+        let raw = vec![
+            // Face A: 4 similar rects clustered around (100, 100).
+            det(100, 100, 50, 50, 1.0),
+            det(101, 100, 50, 50, 2.0),
+            det(100, 101, 50, 50, 3.0),
+            det(101, 101, 50, 50, 4.0),
+            // Face B: 4 similar rects clustered around (300, 300). Far
+            // enough away (delta = 0.2 * 50 = 10) that no pair is similar.
+            det(300, 300, 50, 50, 1.0),
+            det(301, 300, 50, 50, 2.0),
+            det(300, 301, 50, 50, 3.0),
+            det(301, 301, 50, 50, 4.0),
+        ];
+        let grouped = group_rectangles(raw, 3);
+        assert_eq!(
+            grouped.len(),
+            2,
+            "two distinct faces must form two clusters"
+        );
+        // IoU NMS at 0.3 keeps both because they are completely disjoint.
+        let nms = non_max_suppression(grouped, 0.3);
+        assert_eq!(nms.len(), 2, "disjoint faces must both survive NMS");
+
+        // Full pipeline (group_rectangles → non_max_suppression at the
+        // detector's `nms_iou_threshold`) is the OpenCV `detectMultiScale`
+        // contract. Pin the composition so a future refactor doesn't
+        // accidentally short-circuit either stage. Each face needs 4
+        // similar rects to clear the `n1 > min_neighbors` (strictly-greater)
+        // gate; 3 hits per face would be dropped.
+        let raw = vec![
+            det(100, 100, 50, 50, 1.0),
+            det(101, 101, 50, 50, 2.0),
+            det(102, 102, 50, 50, 3.0),
+            det(103, 103, 50, 50, 4.0),
+            det(300, 300, 50, 50, 1.0),
+            det(301, 301, 50, 50, 2.0),
+            det(302, 302, 50, 50, 3.0),
+            det(303, 303, 50, 50, 4.0),
+        ];
+        let grouped = group_rectangles(raw, 3);
+        let nms = non_max_suppression(grouped, 0.3);
+        assert_eq!(
+            nms.len(),
+            2,
+            "two distinct faces must survive the OpenCV detectMultiScale pipeline"
+        );
+    }
 }
