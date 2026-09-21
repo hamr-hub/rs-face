@@ -10,8 +10,9 @@
 //!
 //! ## Why this matters
 //!
-//! The three classical zero-dep detectors in this crate have
-//! **complementary** failure modes (see memory 2026-08-14, 2026-09-08):
+//! The classical zero-dep detectors in this crate have
+//! **complementary** failure modes (see memory 2026-08-14, 2026-09-08,
+//! 2026-09-21):
 //!
 //! - **Haar** (Viola-Jones): reliable on real frontal faces, fires
 //!   rarely on synthetic / low-contrast inputs, can miss rotated or
@@ -24,6 +25,16 @@
 //!   hand-crafted weights — 1000+ detections on lena with conf=1.0 —
 //!   so by itself the CNN is a precision disaster. As a *vote*
 //!   inside an ensemble, the consensus filter removes most of that.
+//! - **skin** (skin-tone band + connected components): cheap
+//!   luminance-band mask; orthogonal to the gradient detectors —
+//!   soft-lit portraits where Haar fails still light up because skin
+//!   is a contiguous blob.
+//! - **lbp** (uniform-LBP histogram + chi² distance): fires on local
+//!   texture (corners, edges, spots) around the eyes and mouth; the
+//!   most "statistical" detector in the pool.
+//! - **hog** (Dalal-Triggs HOG + hand-built face template): fires on
+//!   the distribution of gradient orientations; on cluttered scenes
+//!   with random orientations it scores low.
 //!
 //! Pairwise ensemble of any two of them gives a free recall floor at
 //! the union of their detections and a precision floor at the
@@ -45,9 +56,9 @@ use crate::face::{iou, Detection};
 ///
 /// The `source` string is the same name returned by
 /// [`crate::face_detector::FaceDetector::name`] (e.g. `"haar"`,
-/// `"luminance"`, `"cnn"`) and is preserved on the fused output so
-/// callers can show the consensus breakdown ("haar + luminance agree
-/// at x=…") on the platform compare card.
+/// `"luminance"`, `"cnn"`, `"skin"`, `"lbp"`, `"hog"`) and is preserved
+/// on the fused output so callers can show the breakdown
+/// ("haar + luminance agree at x=…") on the platform compare card.
 #[derive(Clone, Debug)]
 pub struct TaggedDetection {
     pub detection: Detection,
@@ -409,5 +420,35 @@ mod tests {
         let b = TaggedDetection::new(det(50, 50, 50, 0, 0.9), "luminance", 1.0);
         let out = fuse(vec![a, b], &EnsembleConfig::default());
         assert!(out.is_empty(), "zero-area boxes must not cluster");
+    }
+
+    #[test]
+    fn new_algos_cluster_with_haar() {
+        // The three new detectors (skin, lbp, hog) should plug into
+        // the same fusion pool as the existing ones. A Haar hit
+        // overlapping a skin / lbp / hog hit must form a single
+        // cluster, and the `sources` field must list every
+        // contributing algorithm.
+        let haar = TaggedDetection::new(det(10, 10, 50, 50, 0.9), "haar", 1.0);
+        let skin = TaggedDetection::new(det(12, 12, 50, 50, 0.8), "skin", 1.0);
+        let lbp = TaggedDetection::new(det(11, 11, 50, 50, 0.7), "lbp", 1.0);
+        let hog = TaggedDetection::new(det(10, 10, 50, 50, 0.6), "hog", 1.0);
+        let out = fuse(vec![haar, lbp, skin, hog], &EnsembleConfig::default());
+        assert_eq!(out.len(), 1, "all overlapping boxes must cluster");
+        assert_eq!(out[0].votes, 4);
+        assert_eq!(out[0].sources, "haar+hog+lbp+skin");
+    }
+
+    #[test]
+    fn new_algos_respect_weight_overrides() {
+        // The new sources must honour `EnsembleConfig::source_weights`
+        // overrides just like the originals.
+        let a = TaggedDetection::new(det(0, 0, 50, 50, 0.9), "haar", 1.0);
+        let b = TaggedDetection::new(det(0, 0, 50, 50, 0.9), "skin", 1.0);
+        let mut cfg = EnsembleConfig::default();
+        cfg.source_weights.insert("skin", 0.0);
+        let out = fuse(vec![a, b], &cfg);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].sources, "haar");
     }
 }

@@ -184,16 +184,19 @@ impl HogFaceDetector {
                             theta += std::f32::consts::PI;
                         }
                         let bin_f = theta / std::f32::consts::PI * HOG_BINS as f32;
-                        let bin = (bin_f as usize).min(HOG_BINS - 1);
                         // Trilinear interpolation: split magnitude
                         // between the two nearest bins and the
                         // neighbouring cells along the gradient
                         // direction. For simplicity and speed we do
                         // a 1-D split on the bin axis only — accurate
                         // enough for the reference implementation.
-                        let lower = bin_f.floor() as usize;
+                        // bin_f can land exactly on HOG_BINS when
+                        // theta = π; wrap modulo HOG_BINS so the
+                        // lower index is always in range.
+                        let lower_f = bin_f.floor();
+                        let lower = (lower_f as usize) % HOG_BINS;
                         let upper = (lower + 1) % HOG_BINS;
-                        let t = bin_f - lower as f32;
+                        let t = bin_f - lower_f;
                         hist[lower] += mag * (1.0 - t);
                         hist[upper] += mag * t;
                     }

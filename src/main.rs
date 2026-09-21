@@ -7,9 +7,12 @@ use rsface::detector::{Detector, DetectorConfig};
 use rsface::face_detector::FaceDetector;
 use rsface::haar::bundled::bundled_frontalface_cascade;
 use rsface::haar::Cascade;
+use rsface::hog_face::{HogConfig, HogFaceDetector};
 use rsface::image::GrayImage;
+use rsface::lbp_face::{LbpConfig, LbpFaceDetector};
 use rsface::luminance_face::{LuminanceConfig, LuminanceFaceDetector};
 use rsface::pipeline::{Pipeline, PipelineConfig};
+use rsface::skin_face::{SkinConfig, SkinFaceDetector};
 use rsface::source;
 
 fn print_help() {
@@ -17,7 +20,7 @@ fn print_help() {
         "rs-face — zero-dep multi-algorithm face detector\n\n\
          USAGE:\n  \
          rs-face demo                         zero-arg install check on a built-in portrait\n  \
-         rs-face <INPUT> --out <DIR> --algo <haar|cnn|luminance> [options]\n\n\
+         rs-face <INPUT> --out <DIR> --algo <haar|cnn|luminance|skin|lbp|hog> [options]\n\n\
          INPUT forms:\n  \
            demo                built-in 256x256 portrait, no external files (default --out ./rsface-demo)\n  \
            test://N            synthetic test pattern (N frames)\n  \
@@ -28,7 +31,10 @@ fn print_help() {
          ALGORITHMS:\n  \
            haar       Viola-Jones Haar cascade (default; core::Detector)\n  \
            cnn        tiny 24x24 Conv+ReLU+Pool+FC net, trainable with cnn_train\n  \
-           luminance  band-pattern + mirror symmetry (no weights, classical CV)\n\n\
+           luminance  band-pattern + mirror symmetry (no weights, classical CV)\n  \
+           skin       skin-tone band + morphology + connected components (no weights)\n  \
+           lbp        uniform LBP histogram + chi-squared face prior (no weights)\n  \
+           hog        Dalal-Triggs HOG + hand-built face template (no weights)\n\n\
          OPTIONS:\n  \
            --out <DIR>           output directory (required)\n  \
            --batch-dir <DIR>     scan DIR for *.png/*.jpg/*.ppm/*.pgm images,\n  \
@@ -85,7 +91,7 @@ fn print_algos() {
            ---------  ------------  ----------------------------------------"
     );
     // The list is the source of truth. Adding a new detector means adding a row here.
-    let rows: [(&str, &str, &str); 3] = [
+    let rows: [(&str, &str, &str); 6] = [
         (
             "haar",
             "Production",
@@ -100,6 +106,21 @@ fn print_algos() {
             "luminance",
             "Experimental",
             "Band-pattern + mirror-symmetry detector. No weights at all, fully classical CV; strongest on frontal portraits.",
+        ),
+        (
+            "skin",
+            "Experimental",
+            "Skin-tone luminance band + morphological opening + 4-connectivity flood-fill + aspect-ratio filter. Zero weights; the fastest detector in the crate; orthogonal to every gradient-based one.",
+        ),
+        (
+            "lbp",
+            "Experimental",
+            "Uniform-LBP (Local Binary Pattern) 59-bin histogram with chi-squared distance from a hand-built face-prior signature. Multi-scale sliding window; no weights.",
+        ),
+        (
+            "hog",
+            "Experimental",
+            "Dalal-Triggs HOG (8x8 cells, 2x2 blocks, 9 orientation bins) with a hand-built face template. Multi-scale sliding window; no trained weights.",
         ),
     ];
     for (name, mat, desc) in rows {
@@ -331,10 +352,12 @@ fn main() {
             }
         }
     };
-    // yunet / mtcnn / hog were placeholder detectors and have been removed;
+    // yunet / mtcnn were placeholder detectors and have been removed;
     // scrfd / arcface names stay recognised so users get a precise fallback
     // message pointing at the ONNX feature-gated example rather than a typo hint.
-    let known: &[&str] = &["haar", "cnn", "luminance", "scrfd", "arcface"];
+    let known: &[&str] = &[
+        "haar", "cnn", "luminance", "skin", "lbp", "hog", "scrfd", "arcface",
+    ];
     if !known.contains(&algo_name.as_str()) {
         let suggestion = did_you_mean(&algo_name, known);
         match suggestion {
@@ -554,6 +577,39 @@ fn main() {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("luminance pipeline error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "skin" => {
+            match run_with_detector(&mut *src, &out, &cfg, |img: &GrayImage| {
+                SkinFaceDetector::new(SkinConfig::default()).detect(img)
+            }) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("skin pipeline error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "lbp" => {
+            match run_with_detector(&mut *src, &out, &cfg, |img: &GrayImage| {
+                LbpFaceDetector::new(LbpConfig::default()).detect(img)
+            }) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("lbp pipeline error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "hog" => {
+            match run_with_detector(&mut *src, &out, &cfg, |img: &GrayImage| {
+                HogFaceDetector::new(HogConfig::default()).detect(img)
+            }) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("hog pipeline error: {}", e);
                     std::process::exit(1);
                 }
             }
