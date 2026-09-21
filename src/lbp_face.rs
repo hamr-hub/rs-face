@@ -220,8 +220,7 @@ impl FaceDetector for LbpFaceDetector {
 
             let mut cur_win = win;
             while cur_win <= max_win_at_scale && cur_win < cur_w.min(cur_h) {
-                let stride =
-                    ((self.config.stride as f32) * scale).round().max(1.0) as usize;
+                let stride = ((self.config.stride as f32) * scale).round().max(1.0) as usize;
                 let mut y = 0;
                 while y + cur_win <= cur_h {
                     let mut x = 0;

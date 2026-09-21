@@ -356,7 +356,14 @@ fn main() {
     // scrfd / arcface names stay recognised so users get a precise fallback
     // message pointing at the ONNX feature-gated example rather than a typo hint.
     let known: &[&str] = &[
-        "haar", "cnn", "luminance", "skin", "lbp", "hog", "scrfd", "arcface",
+        "haar",
+        "cnn",
+        "luminance",
+        "skin",
+        "lbp",
+        "hog",
+        "scrfd",
+        "arcface",
     ];
     if !known.contains(&algo_name.as_str()) {
         let suggestion = did_you_mean(&algo_name, known);

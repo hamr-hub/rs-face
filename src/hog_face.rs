@@ -142,7 +142,8 @@ impl HogFaceDetector {
     }
 
     /// Compute the HOG descriptor for a square window starting at
-    /// `(x, y)` in the *gradient* image (see [`compute_gradients`]).
+    /// `(x, y)` in the *gradient* image (see
+    /// [`HogFaceDetector::compute_gradients`]).
     /// The descriptor length is [`hog_descriptor_len`].
     pub fn descriptor(
         gx: &[f32],
@@ -160,8 +161,7 @@ impl HogFaceDetector {
             return Vec::new();
         }
         // 1) Per-cell histograms.
-        let mut cells: Vec<[f32; HOG_BINS]> =
-            vec![[0.0; HOG_BINS]; cps * cps];
+        let mut cells: Vec<[f32; HOG_BINS]> = vec![[0.0; HOG_BINS]; cps * cps];
         for cy in 0..cps {
             for cx in 0..cps {
                 let x0 = x + cx * cell;
@@ -206,7 +206,9 @@ impl HogFaceDetector {
         }
         // 2) Per-block (2x2 cells) L2-norm concatenation.
         let blocks_per_side = cps - HOG_BLOCK + 1;
-        let mut desc = Vec::with_capacity(blocks_per_side * blocks_per_side * HOG_BLOCK * HOG_BLOCK * HOG_BINS);
+        let mut desc = Vec::with_capacity(
+            blocks_per_side * blocks_per_side * HOG_BLOCK * HOG_BLOCK * HOG_BINS,
+        );
         let eps = 1e-6f32;
         for by in 0..blocks_per_side {
             for bx in 0..blocks_per_side {
@@ -216,9 +218,7 @@ impl HogFaceDetector {
                     for dx in 0..HOG_BLOCK {
                         let c = &cells[(by + dy) * cps + (bx + dx)];
                         let base = (dy * HOG_BLOCK + dx) * HOG_BINS;
-                        for b in 0..HOG_BINS {
-                            block[base + b] = c[b];
-                        }
+                        block[base..base + HOG_BINS].copy_from_slice(&c[..HOG_BINS]);
                     }
                 }
                 // L2-normalise.
@@ -297,8 +297,7 @@ impl FaceDetector for HogFaceDetector {
             } else {
                 ((self.config.min_size as f32) * scale).round() as usize
             };
-            let max_win_at_scale =
-                ((self.config.max_size as f32) * scale).round() as usize;
+            let max_win_at_scale = ((self.config.max_size as f32) * scale).round() as usize;
             if win < (HOG_CELL * HOG_BLOCK)
                 || win >= cur_w.min(cur_h)
                 || max_win_at_scale < (HOG_CELL * HOG_BLOCK)
@@ -309,8 +308,7 @@ impl FaceDetector for HogFaceDetector {
 
             let mut cur_win = win;
             while cur_win <= max_win_at_scale && cur_win < cur_w.min(cur_h) {
-                let stride =
-                    ((self.config.stride as f32) * scale).round().max(1.0) as usize;
+                let stride = ((self.config.stride as f32) * scale).round().max(1.0) as usize;
                 let mut y = 0;
                 while y + cur_win <= cur_h {
                     let mut x = 0;
@@ -417,12 +415,8 @@ fn face_template(cells_per_side: usize) -> Vec<f32> {
             // Mouth band: cells roughly in [1/2 .. 3/4] vertical range.
             let is_mouth = cy_f >= cells_per_side / 2 && cy_f < (cells_per_side * 3) / 4;
             // Nose column: cells roughly in [3/8 .. 5/8] horizontal range.
-            let is_nose_col =
-                cx_f >= (cells_per_side * 3) / 8 && cx_f < (cells_per_side * 5) / 8;
-            let base_block = (by * blocks_per_side + bx)
-                * HOG_BLOCK
-                * HOG_BLOCK
-                * HOG_BINS;
+            let is_nose_col = cx_f >= (cells_per_side * 3) / 8 && cx_f < (cells_per_side * 5) / 8;
+            let base_block = (by * blocks_per_side + bx) * HOG_BLOCK * HOG_BLOCK * HOG_BINS;
             for dy in 0..HOG_BLOCK {
                 for dx in 0..HOG_BLOCK {
                     let base_cell = base_block + (dy * HOG_BLOCK + dx) * HOG_BINS;
@@ -543,7 +537,10 @@ mod tests {
                 }
             }
         }
-        assert!(max_mag > 100.0, "horizontal edge must produce large gradient");
+        assert!(
+            max_mag > 100.0,
+            "horizontal edge must produce large gradient"
+        );
     }
 
     #[test]
@@ -556,8 +553,7 @@ mod tests {
         let mut eye_h_sum = 0.0f32;
         for by in 2..3 {
             for bx in 0..blocks_per_side {
-                let base_block =
-                    (by * blocks_per_side + bx) * HOG_BLOCK * HOG_BLOCK * HOG_BINS;
+                let base_block = (by * blocks_per_side + bx) * HOG_BLOCK * HOG_BLOCK * HOG_BINS;
                 for dy in 0..HOG_BLOCK {
                     for dx in 0..HOG_BLOCK {
                         let base_cell = base_block + (dy * HOG_BLOCK + dx) * HOG_BINS;

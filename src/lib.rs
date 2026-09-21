@@ -246,9 +246,9 @@ pub mod luminance_face;
 // live on the always-on path because the algorithm <-> ensemble
 // fuser contract is purely core-type (`Detection` + `iou`), so they
 // cannot break `cargo build --no-default-features --lib`.
-pub mod skin_face;
-pub mod lbp_face;
 pub mod hog_face;
+pub mod lbp_face;
+pub mod skin_face;
 
 // Multi-algorithm ensemble fuser. No external deps and no detector
 // gate — `Detection` and `iou` are core types available in every
