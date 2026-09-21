@@ -288,6 +288,30 @@ pub fn norm_crop(src: &RgbImage, lms: &Landmarks) -> Option<RgbImage> {
     warp_similarity(src, &t, ARCFACE_CROP_SIZE, ARCFACE_CROP_SIZE)
 }
 
+/// Convenience wrapper: align a face whose 5-point landmarks come from the
+/// zero-dep [`crate::landmarks`] estimator (or any source producing
+/// [`crate::landmarks::FivePointLandmarks`]) to the canonical 112×112 crop.
+///
+/// Equivalent to `norm_crop(src, &five_pt.to_face_landmarks())` but
+/// spares callers the explicit conversion step. Returns `None` for
+/// degenerate landmark configurations, same as [`norm_crop`].
+pub fn norm_crop_from_five_point(
+    src: &RgbImage,
+    five_pt: &crate::landmarks::FivePointLandmarks,
+) -> Option<RgbImage> {
+    norm_crop(src, &five_pt.to_face_landmarks())
+}
+
+/// Estimate the similarity transform taking a 5-point landmark set produced
+/// by the zero-dep [`crate::landmarks`] estimator to the ArcFace canonical
+/// 112×112 layout. Same as [`estimate_arcface_transform`] but accepts the
+/// estimator's [`crate::landmarks::FivePointLandmarks`] directly.
+pub fn estimate_arcface_transform_from_five_point(
+    five_pt: &crate::landmarks::FivePointLandmarks,
+) -> Option<SimilarityTransform> {
+    estimate_arcface_transform(&five_pt.to_face_landmarks())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
