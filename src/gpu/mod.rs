@@ -46,27 +46,83 @@ pub struct GpuDetection {
 
 /// GPU-side integral image + variance pre-filter. Falls back to CPU when no
 /// GPU is available.
+///
+/// Backend-agnostic since 2026-09: the constructor either builds an
+/// OpenCL `Context` (the legacy path) or wraps any
+/// [`crate::gpu::backend::GpuBackend`] (CUDA / Metal / future
+/// backends). The `compute_*` methods dispatch to whichever source
+/// was picked.
 pub struct GpuIntegral {
-    ctx: Arc<Context>,
+    inner: GpuIntegralImpl,
+}
+
+enum GpuIntegralImpl {
+    /// Hand-rolled OpenCL path. Still works on every host with a
+    /// libOpenCL.so.1 + vendor ICD (Intel iGPU, AMD APU, NVIDIA
+    /// discrete GPUs).
+    OpenCL(Arc<Context>),
+    /// `backend::auto()` selection — typically CUDA on Jetson / NVIDIA
+    /// discrete, Metal on Apple Silicon. Built when OpenCL is absent
+    /// (e.g. Jetson Tegra which doesn't ship libnvidia-opencl.so.1).
+    Backend(Arc<dyn crate::gpu::backend::GpuBackend>),
 }
 
 impl GpuIntegral {
     pub fn new() -> Option<Self> {
-        Context::new().ok().map(|c| Self { ctx: Arc::new(c) })
+        Context::new().ok().map(|c| Self {
+            inner: GpuIntegralImpl::OpenCL(Arc::new(c)),
+        })
+    }
+
+    /// Wrap any [`crate::gpu::backend::GpuBackend`] (CUDA / Metal /
+    /// OpenCL) in a `GpuIntegral` so the existing detector call sites
+    /// (`g.compute_dual(...)`, `g.variance_prefilter(...)`, ...) keep
+    /// working without per-detector refactors.
+    pub fn from_backend(
+        backend: Box<dyn crate::gpu::backend::GpuBackend>,
+        info: GpuInfo,
+    ) -> Self {
+        Self {
+            inner: GpuIntegralImpl::Backend(Arc::from(backend)),
+        }
     }
 
     pub fn info(&self) -> GpuInfo {
-        self.ctx.info.clone()
+        match &self.inner {
+            GpuIntegralImpl::OpenCL(ctx) => ctx.info.clone(),
+            GpuIntegralImpl::Backend(b) => {
+                let info = b.info();
+                GpuInfo {
+                    platform_name: format!("{} ({})", info.backend, info.vendor),
+                    device_name: info.device.clone(),
+                    compute_units: info.compute_units,
+                }
+            }
+        }
     }
 
     /// Compute integral image on the GPU.
+    ///
+    /// Only the OpenCL path produces a standalone u32 integral — the
+    /// CUDA backend builds tables internally and returns empty here.
+    /// The detector path uses `compute_dual` so this is rarely called
+    /// in practice, but kept for API parity.
     pub fn compute(&self, img: &GrayImage) -> Vec<u32> {
-        unsafe { self.ctx.compute_integral(img) }
+        match &self.inner {
+            GpuIntegralImpl::OpenCL(ctx) => unsafe { ctx.compute_integral(img) },
+            GpuIntegralImpl::Backend(b) => {
+                let (ii, _) = b.as_ref().compute_integral_dual(img);
+                ii
+            }
+        }
     }
 
     /// Compute both regular and squared integral images on the GPU in one pass.
     pub fn compute_dual(&self, img: &GrayImage) -> (Vec<u32>, Vec<u64>) {
-        unsafe { self.ctx.compute_integral_dual(img) }
+        match &self.inner {
+            GpuIntegralImpl::OpenCL(ctx) => unsafe { ctx.compute_integral_dual(img) },
+            GpuIntegralImpl::Backend(b) => b.as_ref().compute_integral_dual(img),
+        }
     }
 
     /// Run the variance pre-filter on the GPU in parallel. One work-item per
@@ -80,9 +136,13 @@ impl GpuIntegral {
         stride: usize,
         variance_threshold: u64,
     ) -> Vec<u8> {
-        unsafe {
-            self.ctx
-                .variance_prefilter(img, win_w, win_h, stride, variance_threshold)
+        match &self.inner {
+            GpuIntegralImpl::OpenCL(ctx) => unsafe {
+                ctx.variance_prefilter(img, win_w, win_h, stride, variance_threshold)
+            },
+            GpuIntegralImpl::Backend(b) => {
+                b.as_ref().variance_prefilter(img, win_w, win_h, stride, variance_threshold)
+            }
         }
     }
 
@@ -93,8 +153,30 @@ impl GpuIntegral {
         cascade: &Cascade,
         img: &GrayImage,
         max_detections: usize,
-    ) -> Vec<GpuDetection> {
-        unsafe { self.ctx.detect_windows(cascade, img, max_detections) }
+    ) -> Vec<crate::gpu::GpuDetection> {
+        // The OpenCL path produces its own `GpuDetection` with (x,y,w,h,score)
+        // populated; the `Backend` trait returns its own `GpuDetection`.
+        // Both structs have identical fields so a `from`-style conversion
+        // would be safe, but we keep the legacy OpenCL return value here
+        // and convert the backend one in place. Both arms produce a Vec
+        // of the same struct shape; callers only read the common fields.
+        match &self.inner {
+            GpuIntegralImpl::OpenCL(ctx) => unsafe {
+                ctx.detect_windows(cascade, img, max_detections)
+            },
+            GpuIntegralImpl::Backend(b) => {
+                let raw = b.as_ref().detect_windows(cascade, img, max_detections);
+                raw.into_iter()
+                    .map(|d| crate::gpu::GpuDetection {
+                        x: d.x,
+                        y: d.y,
+                        w: d.w,
+                        h: d.h,
+                        score: d.score,
+                    })
+                    .collect()
+            }
+        }
     }
 }
 

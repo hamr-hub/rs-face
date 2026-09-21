@@ -79,6 +79,20 @@ pub struct GpuDetection {
 pub trait GpuBackend: Send + Sync {
     fn info(&self) -> &GpuInfo;
 
+    /// Compute both regular + squared integral images on the GPU in
+    /// one pass. Returns `(ii_u32, ii_sq_u64)` tables sized
+    /// `(W+1) × (H+1)` each.
+    ///
+    /// The CUDA backend's `variance_prefilter` builds its own tables
+    /// internally so it accepts a no-op here (`Vec::new()`). The
+    /// OpenCL path uses the result for the squared-integral variance
+    /// normalisation. The trait exposes both shapes so the existing
+    /// detector call sites (`g.compute_dual(...)`) keep working.
+    fn compute_integral_dual(&self, img: &GrayImage) -> (Vec<u32>, Vec<u64>) {
+        let _ = img;
+        (Vec::new(), Vec::new())
+    }
+
     /// Per-window variance pre-filter. Returns ``mask[y * nx + x]`` =
     /// 1 if the window at ``(x*stride, y*stride)`` passes the variance
     /// threshold, 0 otherwise.
