@@ -32,6 +32,7 @@ impl RetryPolicy {
     }
 
     /// 仅 2 次重试(用于热路径 / 实时性要求高的端点,如 /media)。
+    #[allow(dead_code)]
     pub const fn fast() -> Self {
         Self {
             max_retries: 2,
@@ -41,6 +42,7 @@ impl RetryPolicy {
     }
 
     /// 不重试。给"明知不可能瞬时恢复"的失败用,例如鉴权 / 4xx 错误。
+    #[allow(dead_code)]
     pub const fn no_retry() -> Self {
         Self {
             max_retries: 0,
@@ -103,7 +105,11 @@ pub fn is_transient(msg: &str) -> bool {
 ///
 /// 重试期间每次都把 attempt + delay + reason 打到 stderr,运维可以从时间线上
 /// 直接看到 transient 抖动的频次和累计延迟。
-pub async fn retry_with_backoff<F, Fut, T, E>(op_name: &str, policy: RetryPolicy, mut op: F) -> Result<T, E>
+pub async fn retry_with_backoff<F, Fut, T, E>(
+    op_name: &str,
+    policy: RetryPolicy,
+    mut op: F,
+) -> Result<T, E>
 where
     F: FnMut(u32) -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -248,7 +254,10 @@ mod tests {
             "panic: index out of bounds",
             "",
         ] {
-            assert!(!is_transient(msg), "should NOT classify as transient: {msg}");
+            assert!(
+                !is_transient(msg),
+                "should NOT classify as transient: {msg}"
+            );
         }
     }
 
@@ -256,14 +265,15 @@ mod tests {
     async fn succeeds_first_try_no_log() {
         let counter = Arc::new(AtomicU32::new(0));
         let c2 = counter.clone();
-        let r: Result<u32, &'static str> = retry_with_backoff("test", RetryPolicy::default_pg_s3(), move |_attempt| {
-            let c = c2.clone();
-            async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                Ok(42)
-            }
-        })
-        .await;
+        let r: Result<u32, &'static str> =
+            retry_with_backoff("test", RetryPolicy::default_pg_s3(), move |_attempt| {
+                let c = c2.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(42)
+                }
+            })
+            .await;
         assert_eq!(r.unwrap(), 42);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
@@ -272,22 +282,26 @@ mod tests {
     async fn retries_then_succeeds() {
         let counter = Arc::new(AtomicU32::new(0));
         let c2 = counter.clone();
-        let r: Result<u32, String> = retry_with_backoff("flaky", RetryPolicy {
-            max_retries: 3,
-            initial_delay: Duration::from_millis(1),
-            max_delay: Duration::from_millis(5),
-        }, move |_attempt| {
-            let c = c2.clone();
-            async move {
-                let n = c.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    // 前两次给 transient 错误
-                    Err("connection timeout".into())
-                } else {
-                    Ok(7)
+        let r: Result<u32, String> = retry_with_backoff(
+            "flaky",
+            RetryPolicy {
+                max_retries: 3,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(5),
+            },
+            move |_attempt| {
+                let c = c2.clone();
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    if n < 2 {
+                        // 前两次给 transient 错误
+                        Err("connection timeout".into())
+                    } else {
+                        Ok(7)
+                    }
                 }
-            }
-        })
+            },
+        )
         .await;
         assert_eq!(r.unwrap(), 7);
         assert_eq!(counter.load(Ordering::SeqCst), 3);
@@ -322,14 +336,15 @@ mod tests {
     async fn does_not_retry_permanent_error() {
         let counter = Arc::new(AtomicU32::new(0));
         let c2 = counter.clone();
-        let r: Result<u32, String> = retry_with_backoff("perm", RetryPolicy::default_pg_s3(), move |_attempt| {
-            let c = c2.clone();
-            async move {
-                c.fetch_add(1, Ordering::SeqCst);
-                Err("bucket does not exist".into())
-            }
-        })
-        .await;
+        let r: Result<u32, String> =
+            retry_with_backoff("perm", RetryPolicy::default_pg_s3(), move |_attempt| {
+                let c = c2.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err("bucket does not exist".into())
+                }
+            })
+            .await;
         assert!(r.is_err());
         // Only one attempt — permanent error short-circuits retry loop.
         assert_eq!(counter.load(Ordering::SeqCst), 1);

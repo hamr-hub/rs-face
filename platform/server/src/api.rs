@@ -142,13 +142,12 @@ async fn rate_limit_middleware(
     let path = req.uri().path();
     let method = req.method().clone();
     // 决定限流档位:
-    // - POST 写路径 60/min
-    // - GET  读路径 600/min
+    // - POST/DELETE 写路径 60/min
+    // - GET 读路径 600/min
     // - 其它放行
     let (capacity, refill) = match (method.as_str(), classify_route(path)) {
-        ("POST", RouteKind::JobWrite) => (60u32, 1.0f64),
-        ("GET", RouteKind::JobRead) => (600u32, 10.0f64),
-        ("DELETE", RouteKind::JobWrite) => (60u32, 1.0f64),
+        ("POST", RouteKind::JobWrite) | ("DELETE", RouteKind::JobWrite) => (60u32, 1.0f64),
+        ("GET", RouteKind::JobWrite) => (600u32, 10.0f64),
         _ => return next.run(req).await,
     };
     // 取 IP:ConnectInfo > X-Forwarded-For > unknown
@@ -163,7 +162,10 @@ async fn rate_limit_middleware(
         let mut resp = error_response_with(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
             crate::error_codes::RATE_LIMITED,
-            &format!("rate limit exceeded for {ip}; try again in {}s", decision.retry_after_secs),
+            &format!(
+                "rate limit exceeded for {ip}; try again in {}s",
+                decision.retry_after_secs
+            ),
             Some("slow down request rate or distribute across IPs"),
         );
         let _ = resp.headers_mut().insert(
@@ -197,7 +199,6 @@ async fn rate_limit_middleware(
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum RouteKind {
     JobWrite,
-    JobRead,
     Other,
 }
 
@@ -207,9 +208,9 @@ fn classify_route(path: &str) -> RouteKind {
     if path.ends_with("/events") {
         return RouteKind::Other;
     }
-    // `/api/jobs*` 全部分类到 job 命名空间;具体写/读再按方法判断
+    // `/api/jobs*` 全部分类到 job 命名空间,统一写档限流。
     if path.starts_with("/api/jobs") || path.starts_with("/api/import") {
-        return RouteKind::JobWrite; // 默认 write 档;read 档由 GET 切换
+        return RouteKind::JobWrite;
     }
     RouteKind::Other
 }
@@ -690,7 +691,12 @@ async fn job_detail(
                     .unwrap_or_default();
             Json(v).into_response()
         }
-        None => error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None),
+        None => error_response_with(
+            StatusCode::NOT_FOUND,
+            crate::error_codes::JOB_NOT_FOUND,
+            "no such job",
+            None,
+        ),
     }
 }
 
@@ -703,7 +709,12 @@ async fn cancel_job(
             job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             Json(serde_json::json!({"ok": true})).into_response()
         }
-        None => error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None),
+        None => error_response_with(
+            StatusCode::NOT_FOUND,
+            crate::error_codes::JOB_NOT_FOUND,
+            "no such job",
+            None,
+        ),
     }
 }
 
@@ -802,7 +813,12 @@ async fn retry_job(
 ) -> Response {
     let original = {
         let Some(j) = state.get(&id) else {
-            return error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None);
+            return error_response_with(
+                StatusCode::NOT_FOUND,
+                crate::error_codes::JOB_NOT_FOUND,
+                "no such job",
+                None,
+            );
         };
         let inp = j
             .original_input
@@ -905,7 +921,14 @@ async fn compare_algos(
     // 2) 拿到 job 对应的原始媒体字节(S3 优先,失败回退到 local media dir)。
     let job = match state.get(&id) {
         Some(j) => j,
-        None => return error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None),
+        None => {
+            return error_response_with(
+                StatusCode::NOT_FOUND,
+                crate::error_codes::JOB_NOT_FOUND,
+                "no such job",
+                None,
+            )
+        }
     };
     let media_key = job
         .original_media_key
@@ -995,12 +1018,14 @@ async fn compare_algos(
             .await;
             match res {
                 Ok(Ok((b, _ct))) => b,
-                _ => return error_response_with(
-                    StatusCode::NOT_FOUND,
-                    crate::error_codes::S3_OBJECT_NOT_FOUND,
-                    "S3 object not found",
-                    None,
-                ),
+                _ => {
+                    return error_response_with(
+                        StatusCode::NOT_FOUND,
+                        crate::error_codes::S3_OBJECT_NOT_FOUND,
+                        "S3 object not found",
+                        None,
+                    )
+                }
             }
         } else {
             return error_response_with(
@@ -1329,7 +1354,12 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         if let Some(p) = staged_path {
             let _ = tokio::fs::remove_file(p).await;
         }
-        return error_response_with(StatusCode::BAD_REQUEST, crate::error_codes::PARAM_MISSING, "missing 'file' field", None);
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_MISSING,
+            "missing 'file' field",
+            None,
+        );
     };
     let Some(staged) = staged_path else {
         return error_response_with(
@@ -1666,7 +1696,12 @@ async fn job_events(
     Query(q): Query<EventsQuery>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None);
+        return error_response_with(
+            StatusCode::NOT_FOUND,
+            crate::error_codes::JOB_NOT_FOUND,
+            "no such job",
+            None,
+        );
     };
     // 连接数限制:超限直接拒绝,不再 subscribe/spawn。
     let active = SSE_CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -1903,13 +1938,23 @@ async fn media(
         .or_else(|| key.strip_prefix("s3://").map(|s| s.to_string()))
         .unwrap_or_else(|| key.clone());
     if cleaned.contains("..") || cleaned.contains('\\') {
-        return error_response_with(StatusCode::BAD_REQUEST, crate::error_codes::MEDIA_BAD_KEY, "bad key", None);
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::MEDIA_BAD_KEY,
+            "bad key",
+            None,
+        );
     }
     // 2026-09-20 security:拒绝绝对路径。`Path::join` 遇到绝对路径的右值会
     // 直接丢弃 base,否则 `/media//etc/passwd`(或 URL 编码的 %2F)会解析到
     // media 根之外,造成未授权任意文件读取。
     if cleaned.starts_with('/') {
-        return error_response_with(StatusCode::BAD_REQUEST, crate::error_codes::MEDIA_BAD_KEY, "bad key", None);
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::MEDIA_BAD_KEY,
+            "bad key",
+            None,
+        );
     }
 
     // `inline://` 兜底:这种 key 表示数据 base64 嵌在 SSE 事件的 `inline`
@@ -1951,7 +1996,12 @@ async fn media(
             _ => false,
         };
         if !inside {
-            return error_response_with(StatusCode::BAD_REQUEST, crate::error_codes::MEDIA_BAD_KEY, "bad key", None);
+            return error_response_with(
+                StatusCode::BAD_REQUEST,
+                crate::error_codes::MEDIA_BAD_KEY,
+                "bad key",
+                None,
+            );
         }
         // 先拿文件长度(无 Range 时也直接读,旧路径)。
         let total = match tokio::fs::metadata(&local_path).await {
@@ -2141,7 +2191,12 @@ async fn download_zip(
     Path(id): Path<String>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None);
+        return error_response_with(
+            StatusCode::NOT_FOUND,
+            crate::error_codes::JOB_NOT_FOUND,
+            "no such job",
+            None,
+        );
     };
     // Mutex 中毒也不 panic:取内部值继续,避免单个任务毒锁把请求线程带挂。
     let frames = job.frames.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -2606,12 +2661,14 @@ async fn import_video(
     };
     let job = match state.get(&id) {
         Some(j) => j,
-        None => return error_response_with(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            crate::error_codes::INTERNAL_RUNTIME,
-            "job vanished",
-            None,
-        ),
+        None => {
+            return error_response_with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                crate::error_codes::INTERNAL_RUNTIME,
+                "job vanished",
+                None,
+            )
+        }
     };
     // 原始文件还没落 S3 时(run_job 还没跑到那一步),URL 为 null;
     // 前端可在轮询 `/api/import/{id}/urls` 拿最新值。
@@ -2651,7 +2708,12 @@ async fn import_video_url(
     // 平台本身是 LAN 部署,所以这个限制相对宽松 — 仍挡掉 169.254 / IPv6 link-local / 0.0.0.0。
     if let Some(host) = url.split("://").nth(1).and_then(|s| s.split('/').next()) {
         if is_blocked_host(host) {
-            return error_response_with(StatusCode::FORBIDDEN, crate::error_codes::SSRF_BLOCKED, "url host is in a blocked range", Some("use a public address or self-host the target"));
+            return error_response_with(
+                StatusCode::FORBIDDEN,
+                crate::error_codes::SSRF_BLOCKED,
+                "url host is in a blocked range",
+                Some("use a public address or self-host the target"),
+            );
         }
     }
 
@@ -2752,7 +2814,12 @@ async fn import_urls(
     Path(id): Path<String>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None);
+        return error_response_with(
+            StatusCode::NOT_FOUND,
+            crate::error_codes::JOB_NOT_FOUND,
+            "no such job",
+            None,
+        );
     };
     let original = job
         .original_media_key
@@ -2800,6 +2867,7 @@ async fn import_urls(
 ///
 /// 安全 #1+#2:闭包见审查报告;`is_blocked_host` 收到的是规范化后的 host,
 /// `::ffff:127.0.0.1` / `%31%32%37.0.0.1` 不再绕开。
+#[cfg(test)]
 fn normalize_host_for_check(host: &str) -> Option<String> {
     if host.is_empty() || host.contains("..") {
         return None;

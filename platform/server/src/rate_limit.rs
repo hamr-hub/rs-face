@@ -93,6 +93,8 @@ pub struct RateLimiter {
     buckets: Arc<RwLock<HashMap<String, TokenBucket>>>,
     /// 每 N 次 write 检查一次 stale bucket eviction,降低清理成本。
     evict_every: u64,
+    /// idle 桶清理阈值 — 后台任务调 `evict_idle` 时使用,字段保留供后续调优。
+    #[allow(dead_code)]
     idle_evict_after: Duration,
     op_count: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -113,12 +115,7 @@ impl RateLimiter {
     ///
     /// `capacity` 和 `refill_per_sec` 是该路由的速率上限。
     /// 返回 \`LimitDecision\` — allowed=false 时调用方应该 429 + Retry-After。
-    pub async fn check(
-        &self,
-        ip: &str,
-        capacity: u32,
-        refill_per_sec: f64,
-    ) -> LimitDecision {
+    pub async fn check(&self, ip: &str, capacity: u32, refill_per_sec: f64) -> LimitDecision {
         let now = Instant::now();
         // 1) read 路径:尝试拿桶决策
         {
@@ -157,8 +154,10 @@ impl RateLimiter {
     /// 后台偶发清理:每 N 次写操作扫描一次,把 idle > 阈值 的桶删掉。
     /// 当前 RwLock 已经是 guard 持锁状态,所以这里只看 size 决定是否要清理。
     fn maybe_evict(&self, buckets: &HashMap<String, TokenBucket>) {
-        let n = self.op_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n % self.evict_every != 0 {
+        let n = self
+            .op_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !n.is_multiple_of(self.evict_every) {
             return;
         }
         // 注意:这里不能直接 &mut HashMap 调用,因为调用方已持锁。
@@ -167,6 +166,7 @@ impl RateLimiter {
     }
 
     /// 主动扫描并删除 idle 桶(由后台任务每分钟调一次)。
+    #[allow(dead_code)]
     pub async fn evict_idle(&self) -> usize {
         let now = Instant::now();
         let mut wg = self.buckets.write().await;
@@ -176,6 +176,7 @@ impl RateLimiter {
     }
 
     /// 调试 / 测试用 — 当前桶数。
+    #[allow(dead_code)]
     pub async fn bucket_count(&self) -> usize {
         self.buckets.read().await.len()
     }
@@ -190,12 +191,13 @@ impl Default for RateLimiter {
 /// 从 axum 的 \`ConnectInfo\` 提取 IP,fallback "unknown"。
 ///
 /// axum 默认不启用 ConnectInfo,所以 middleware 用法是:
-/// \`\`\`
+/// ```ignore
 /// use axum::extract::ConnectInfo;
 /// use std::net::SocketAddr;
 /// async fn handler(ConnectInfo(addr): ConnectInfo<SocketAddr>, ...) { ... }
-/// \`\`\`
-/// 然后从 \`addr.ip()\` 拿 IP。在 axum router 启动时用 \`into_make_service_with_connect_info::<SocketAddr>()\`。
+/// ```
+/// 然后从 `addr.ip()` 拿 IP。在 axum router 启动时用
+/// `into_make_service_with_connect_info::<SocketAddr>()`。
 pub fn ip_from_request(remote: Option<SocketAddr>, headers: &axum::http::HeaderMap) -> String {
     if let Some(addr) = remote {
         return addr.ip().to_string();
@@ -218,12 +220,7 @@ mod tests {
 
     fn policy_post() -> (u32, f64) {
         // 60 req/min = 1 req/sec 平均,但允许突发 60 个
-        (60, 60.0 / 60.0)
-    }
-
-    fn policy_get() -> (u32, f64) {
-        // 600 req/min = 10 req/sec
-        (600, 600.0 / 60.0)
+        (60, 1.0)
     }
 
     #[tokio::test]
@@ -244,8 +241,15 @@ mod tests {
         let d2 = rl.check("2.2.2.2", cap, rate).await;
         assert!(d2.allowed);
         let d3 = rl.check("2.2.2.2", cap, rate).await;
-        assert!(!d3.allowed, "3rd request should be denied with cap=2 rate=1/s");
-        assert!(d3.retry_after_secs >= 1, "retry-after must be ~1s, got {}", d3.retry_after_secs);
+        assert!(
+            !d3.allowed,
+            "3rd request should be denied with cap=2 rate=1/s"
+        );
+        assert!(
+            d3.retry_after_secs >= 1,
+            "retry-after must be ~1s, got {}",
+            d3.retry_after_secs
+        );
     }
 
     #[tokio::test]

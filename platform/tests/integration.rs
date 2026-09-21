@@ -78,7 +78,11 @@ async fn boot_server() -> Option<(String, tokio::sync::oneshot::Sender<()>)> {
         jobs_list_json: std::sync::Arc::new(TtlCache::new("jl", Duration::from_millis(500))),
         jobs_stats_json: std::sync::Arc::new(TtlCache::new("js", Duration::from_millis(500))),
     };
-    let app = api::router(state.clone(), caches);
+    let app = api::router(
+        state.clone(),
+        caches,
+        std::sync::Arc::new(rsface_platform::rate_limit::RateLimiter::new()),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.ok()?;
     let addr = listener.local_addr().ok()?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();

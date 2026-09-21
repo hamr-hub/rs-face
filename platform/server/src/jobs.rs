@@ -1164,6 +1164,7 @@ pub fn move_staged_into_job(
 /// (网络抖动 / 短 5xx)会自动重试 5 次,只有永久失败(签名错 / 桶不存在)
 /// 才立即降级到 local。这把"rustfs 重启 / 临时网络抖动"这类瞬时失败从
 /// 误降级变成不可见,显著降低 inline:// 触发频率。
+#[cfg(test)]
 fn put_with_fallback(reg: &JobRegistry, key: &str, ct: &str, bytes: &[u8]) -> String {
     let s3_res = retry_sync(
         &format!("s3.put_object({key})"),

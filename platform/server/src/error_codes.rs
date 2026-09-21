@@ -13,6 +13,11 @@
 //! - 测试固定码表 + `assert_code_shape` 防御"snake_case + ASCII + ≤ 32"被违反,
 //!   防止生产 API 出非机器可读字段。
 
+// 故意保留 41 个常量(全集),即使部分尚未在 handler 中使用 — 这是稳定性
+// 投资的契约:`error_response_with` 走常量,避免散落字符串字面量漂移。
+// 允许 dead_code:全集定义 + 测试 assert_code_shape 都会引用。
+#![allow(dead_code)]
+
 /// 兜底码 — 新代码不允许出现,只给老 `error_response(msg)` 路径用。
 pub const INTERNAL: &str = "internal";
 /// HTTP 404 默认 — 缺省错误归类。
@@ -152,7 +157,9 @@ pub fn classify_error_message(msg: &str) -> &'static str {
     let m = msg.to_ascii_lowercase();
     // pg — 具体子分类必须先匹配。注意 PG 错误信息常用 "timed out" 而非 "timeout",
     // 因此这里把三个常见短语都纳进 pool-acquire 检测。
-    if m.contains("pool") && (m.contains("timeout") || m.contains("timed out") || m.contains("acquire")) {
+    if m.contains("pool")
+        && (m.contains("timeout") || m.contains("timed out") || m.contains("acquire"))
+    {
         return PG_TIMEOUT;
     }
     if m.contains("postgres") || m.contains("sqlx") || m.contains("pg: ") {
@@ -326,7 +333,9 @@ mod tests {
     #[test]
     fn classify_s3_signature_mismatch() {
         assert_eq!(
-            classify_error_message("The request signature we calculated does not match the signature you provided"),
+            classify_error_message(
+                "The request signature we calculated does not match the signature you provided"
+            ),
             S3_SIGNATURE_MISMATCH
         );
     }
@@ -389,7 +398,10 @@ mod tests {
 
     #[test]
     fn classify_falls_back_to_internal() {
-        assert_eq!(classify_error_message("something totally unrelated"), INTERNAL);
+        assert_eq!(
+            classify_error_message("something totally unrelated"),
+            INTERNAL
+        );
         assert_eq!(classify_error_message(""), INTERNAL);
     }
 
