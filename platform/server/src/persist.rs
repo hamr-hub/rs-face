@@ -83,6 +83,10 @@ impl Db {
                 "0003_jobs_health_columns.sql",
                 include_str!("../../migrations/0003_jobs_health_columns.sql"),
             ),
+            (
+                "0004_jobs_heartbeat.sql",
+                include_str!("../../migrations/0004_jobs_heartbeat.sql"),
+            ),
         ];
         let mut applied = 0u64;
         for (name, sql) in files {
@@ -288,18 +292,70 @@ impl Db {
         .await;
     }
 
+    /// 高频心跳:worker 主循环每 ~5s 写一次 `last_heartbeat_ts = now()`。
+    /// 与 `heartbeat()`(30s 周期,服务于启动 orphan reaper)语义不同:
+    /// 这里走更细的粒度,让运行时 janitor(30s 扫一次)能区分"worker 真死"
+    /// vs"worker 还在跑但当前帧耗时长"。
+    /// 仅写 running 行;job 已终止时 UPDATE 影响 0 行,无害。
+    pub async fn heartbeat_realtime(&self, id: &str) {
+        let Some(pool) = &self.pool else {
+            return;
+        };
+        let _ = sqlx::query(
+            "UPDATE jobs SET last_heartbeat_ts=now(), updated_at=now() \
+             WHERE id=$1 AND status='running'",
+        )
+        .bind(id)
+        .execute(pool)
+        .await;
+    }
+
+    /// 死锁 janitor:扫描所有 `status='running' AND last_heartbeat_ts < now() - stale_secs`
+    /// 的行,把它们的 status 改为 'error',error 字段填 `worker_died` 作为
+    /// 可读原因。返回被标记的行数。
+    ///
+    /// **触发场景**:worker 线程被 panic / OOM / deadlock / runtime 强杀,
+    /// 但进程还在跑 / 重新拉起了新进程,DB 留下 status='running' 但
+    /// 心跳不再刷新的行。前端看不到这种 zombie,UI 永远卡在"运行中"。
+    ///
+    /// **与 `reap_orphans` 的区别**:reap_orphans 在 server 启动时跑一次,
+    /// 阈值 5 分钟,负责"上次进程崩溃留下的";这里是运行时周期任务,
+    /// 阈值 30 秒,负责"本次运行期 worker 静默死了"。
+    pub async fn janitor_kill_stale(&self, stale_secs: i64) -> Option<u64> {
+        let pool = self.pool.as_ref()?;
+        let res = sqlx::query(
+            "UPDATE jobs SET status='error', \
+             error='worker_died', \
+             error_code='worker_died', \
+             finished_ms=$2, \
+             updated_at=now() \
+             WHERE status='running' \
+               AND last_heartbeat_ts IS NOT NULL \
+               AND last_heartbeat_ts < now() - make_interval(secs => $1)",
+        )
+        .bind(stale_secs as f64)
+        .bind(now_ms_u64() as i64)
+        .execute(pool)
+        .await;
+        match res {
+            Ok(r) => Some(r.rows_affected()),
+            Err(e) => {
+                tracing::warn!("[persist] janitor_kill_stale failed: {e}");
+                None
+            }
+        }
+    }
+
     /// 设置归档标志(侧栏默认隐藏;与内存 `Job::archived` 字段镜像)。
     pub async fn set_archived(&self, id: &str, archived: bool) {
         let Some(pool) = &self.pool else {
             return;
         };
-        let _ = sqlx::query(
-            "UPDATE jobs SET archived=$2, updated_at=now() WHERE id=$1",
-        )
-        .bind(id)
-        .bind(archived)
-        .execute(pool)
-        .await;
+        let _ = sqlx::query("UPDATE jobs SET archived=$2, updated_at=now() WHERE id=$1")
+            .bind(id)
+            .bind(archived)
+            .execute(pool)
+            .await;
     }
 
     /// 设置错误码(API `error_code` 字段):与 `error` 文本共存,
@@ -312,13 +368,11 @@ impl Db {
         let Some(pool) = &self.pool else {
             return;
         };
-        let _ = sqlx::query(
-            "UPDATE jobs SET error_code=$2, updated_at=now() WHERE id=$1",
-        )
-        .bind(id)
-        .bind(code)
-        .execute(pool)
-        .await;
+        let _ = sqlx::query("UPDATE jobs SET error_code=$2, updated_at=now() WHERE id=$1")
+            .bind(id)
+            .bind(code)
+            .execute(pool)
+            .await;
     }
 
     /// 孤儿任务回收:扫描所有 `status IN ('queued','running')` 且
@@ -878,7 +932,9 @@ mod tests {
         assert_eq!(init.len(), 7);
         let telemetry = split_sql_statements(include_str!("../../migrations/0002_telemetry.sql"));
         assert_eq!(telemetry.len(), 1);
-        let health = split_sql_statements(include_str!("../../migrations/0003_jobs_health_columns.sql"));
+        let health = split_sql_statements(include_str!(
+            "../../migrations/0003_jobs_health_columns.sql"
+        ));
         // 5 列 ALTER + 5 索引 CREATE = 10 top-level statements
         // (started_at / heartbeat_at / updated_at / archived / error_code;
         //  BRIN × 2 + status B-tree + archived 组合 + error_code B-tree)
@@ -886,6 +942,15 @@ mod tests {
             health.len() >= 10,
             "0003 should split into ≥10 stmts, got {}",
             health.len()
+        );
+        let heartbeat =
+            split_sql_statements(include_str!("../../migrations/0004_jobs_heartbeat.sql"));
+        // ALTER + UPDATE + CREATE INDEX = 3 top-level statements
+        assert_eq!(
+            heartbeat.len(),
+            3,
+            "0004 should split into 3 stmts (ALTER + UPDATE + CREATE INDEX), got {}",
+            heartbeat.len()
         );
     }
 }
