@@ -250,6 +250,10 @@ required-features = ["detector-haar"]
 name = "property_face"
 required-features = ["detector-haar", "detector-luminance"]
 
+[[test]]
+name = "cli_flags"
+required-features = ["detector-haar"]
+
 [dependencies]
 
 # We intentionally keep ZERO runtime dependencies for the core library.
