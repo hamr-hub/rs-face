@@ -50,7 +50,7 @@
 //! - [`eigenface`]           : PCA / Turk-Pentland eigenfaces, Jacobi eigendecomposition in pure `std`.
 //! - [`fisherface`]          : Fisherfaces / LDA (Belhumeur–Hespanha–Kriegman): n−C PCA reduction then C−1 class-discriminant axes; best zero-dep pair EER.
 //! - [`lbph`]                : uniform Local Binary Patterns histograms + chi-square distance.
-//! - [`embednet`]            : zero-dependency **trainable embedding CNN** (im2col convs, full backprop, contrastive-pair Adam trainer, `.rsen` weights) — a mini-ArcFace in pure `std`, producing 128-d embeddings for the same [`embedding::Gallery`] as ONNX ArcFace.
+//! - [`embednet`]            : zero-dependency **trainable embedding CNN** (im2col convs, full backprop; contrastive-pair or ArcFace angular-margin Adam trainer, `.rsen` weights) — a mini-ArcFace in pure `std`, producing 128-d embeddings for the same [`embedding::Gallery`] as ONNX ArcFace.
 //! - [`lbph_store`]          : zero-dep binary gallery persistence (save/load across restarts, no crops needed).
 //! - [`subspace_store`]      : trained-model persistence for eigenfaces/fisherfaces (mean, axes, projections).
 //! - [`video_id`]            : video-level identification — IoU tracker + single-linkage clusterer + cross-video re-id. Plugs any (detector, recogniser) pair via the [`video_id::Identify`] trait; example wires the zero-dep haar + LBPH path.
