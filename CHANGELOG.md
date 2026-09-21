@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — multi-recogniser identity consensus
+- **`POST /api/jobs/{id}/recognize` exposes weighted-vote face identity
+  in the web UI.** The endpoint takes an uploaded image job, runs the
+  configured detector, then identifies every detected face with LBPH,
+  eigenfaces and Fisherfaces, fusing the per-recogniser outcomes through
+  `ensemble::fuse_recognitions`. The response carries each face's
+  consensus label (votes, confidence, agreeing sources) plus full
+  per-recogniser vote detail (match / below-threshold / ambiguous and
+  distance). Results are cached per job, and the gallery is loaded once
+  and cached process-wide.
+- **`recognize.js` consensus panel**: a topbar toggle (☺) renders the
+  consensus over the preview image (labelled boxes with vote count and
+  confidence) and lists each face with its recogniser breakdown. No new
+  JavaScript dependencies; the choice persists in `localStorage`.
+- **Registered-face gallery convention**: identity is supplied through
+  `RSFACE_GALLERY_DIR`, a folder of identity folders (one subdirectory
+  per person containing `.pgm`/`.ppm`/`.png` crops). docker compose
+  mounts `../data/gallery` into the server; a missing or empty gallery
+  makes `/recognize` return `no_gallery` without affecting detection
+  features. Documented in `platform/.env.example`.
+
 ### Changed — docs honesty & rustdoc gate
 - **`cargo doc` is now warning-free for both crates and enforced in CI**:
   crate-level docs linked feature-gated ONNX modules (`scrfd`, `arcface`,

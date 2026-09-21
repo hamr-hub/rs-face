@@ -975,7 +975,6 @@ fn row_prefix_u32_scalar(src: &[u8], dst: &mut [u32], carry: u32) {
     }
 }
 
-
 /// Dispatch to the best row-prefix kernel for the current target.
 fn row_prefix_u32_dispatch(src: &[u8], dst: &mut [u32]) {
     #[cfg(target_arch = "x86_64")]
@@ -1335,10 +1334,7 @@ unsafe fn variance_mask_4_x86_64(
         let s23 = _mm_castsi128_pd(_mm_set_epi64x(sum[3] as i64, sum[2] as i64));
         // Lane i holds `sum_sq[i]`.
         let ss01 = _mm_castsi128_pd(_mm_set_epi64x(sum_sq[1] as i64, sum_sq[0] as i64));
-        let ss23 = _mm_castsi128_pd(_mm_set_epi64x(
-            sum_sq[3] as i64,
-            sum_sq[2] as i64,
-        ));
+        let ss23 = _mm_castsi128_pd(_mm_set_epi64x(sum_sq[3] as i64, sum_sq[2] as i64));
         let n = _mm_set1_pd(n_pixels_f64);
         let thr = _mm_set1_pd(thr_n_sq_f64);
         // ss * N
@@ -1379,12 +1375,7 @@ unsafe fn variance_mask_4_aarch64(
         // Materialise the 4 u64s into 2 f64x2 vectors via a stack temp
         // (NEON f64 vectors are not bit-castable from u64 vectors on all
         // toolchains, so we go through f64 storage).
-        let mut s_buf = [
-            sum[0] as f64,
-            sum[1] as f64,
-            sum[2] as f64,
-            sum[3] as f64,
-        ];
+        let mut s_buf = [sum[0] as f64, sum[1] as f64, sum[2] as f64, sum[3] as f64];
         let mut ss_buf = [
             sum_sq[0] as f64,
             sum_sq[1] as f64,
@@ -1571,16 +1562,21 @@ mod tests {
     fn rect_sum_simd_matches_scalar() {
         // Build a few different integral tables; for each, exhaustively
         // call both paths on every sub-rectangle the table could host.
-        for &(w, h) in &[(8usize, 6usize), (16, 12), (32, 24), (49, 33), (64, 64), (129, 65)] {
+        for &(w, h) in &[
+            (8usize, 6usize),
+            (16, 12),
+            (32, 24),
+            (49, 33),
+            (64, 64),
+            (129, 65),
+        ] {
             let img = lcg_image(w, h);
             let ii = IntegralImage::from_gray(&img);
             for ry in 0..=h {
                 for rx in 0..=w {
                     for ry2 in (ry + 1)..=h {
                         for rx2 in (rx + 1)..=w {
-                            let scalar = unsafe {
-                                ii.rect_sum_unchecked_narrow(rx, ry, rx2, ry2)
-                            };
+                            let scalar = unsafe { ii.rect_sum_unchecked_narrow(rx, ry, rx2, ry2) };
                             let simd = unsafe {
                                 ii.rect_sum_unchecked_narrow_simd_method(rx, ry, rx2, ry2)
                             };
@@ -1965,14 +1961,21 @@ mod tests {
                             }
                         }
                         let mask_simd = SquaredIntegralImage::passes_variance_mask_4(
-                            sums, sum_sqs, n_f64, thr_n_sq_f64,
+                            sums,
+                            sum_sqs,
+                            n_f64,
+                            thr_n_sq_f64,
                         );
                         let mut mask_scalar = 0u32;
                         for k in 0..4 {
                             let s = sums[k];
                             let ss = sum_sqs[k];
                             let pass = SquaredIntegralImage::passes_variance_sums_fast(
-                                s, ss, n_pixels, n_pixels_sq, thr,
+                                s,
+                                ss,
+                                n_pixels,
+                                n_pixels_sq,
+                                thr,
                             );
                             if pass {
                                 mask_scalar |= 1 << k;
@@ -2004,15 +2007,18 @@ mod tests {
         let mut stripes_img = GrayImage::new(640, 480);
         for y in 0..480 {
             for x in 0..640 {
-                stripes_img[(x, y)] = if ((x / 4) + (y / 4)) & 1 == 0 { 20 } else { 230 };
+                stripes_img[(x, y)] = if ((x / 4) + (y / 4)) & 1 == 0 {
+                    20
+                } else {
+                    230
+                };
             }
         }
         run("stripes", stripes_img);
         let mut blob_img = GrayImage::new(640, 480);
         for y in 0..480 {
             for x in 0..640 {
-                let d =
-                    ((x as f32 - 320.0).powi(2) + (y as f32 - 240.0).powi(2)).sqrt();
+                let d = ((x as f32 - 320.0).powi(2) + (y as f32 - 240.0).powi(2)).sqrt();
                 blob_img[(x, y)] = if d < 80.0 { 220 } else { 30 };
             }
         }
@@ -2066,14 +2072,21 @@ mod tests {
                             }
                         }
                         let mask_simd = SquaredIntegralImage::passes_variance_mask_4(
-                            sums, sum_sqs, n_f64, thr_n_sq_f64,
+                            sums,
+                            sum_sqs,
+                            n_f64,
+                            thr_n_sq_f64,
                         );
                         let mut mask_scalar = 0u32;
                         for k in 0..4 {
                             let s = sums[k];
                             let ss = sum_sqs[k];
                             let pass = SquaredIntegralImage::passes_variance_sums_fast(
-                                s, ss, n_pixels, n_pixels_sq, thr,
+                                s,
+                                ss,
+                                n_pixels,
+                                n_pixels_sq,
+                                thr,
                             );
                             if pass {
                                 mask_scalar |= 1 << k;
@@ -2087,7 +2100,8 @@ mod tests {
                     x += 1;
                 }
                 assert_eq!(
-                    bad, 0,
+                    bad,
+                    0,
                     "seed={seed} thr={thr}: {bad} 4-tuples disagree (out of {} windows)",
                     (ii.width() - win_w + 1) * (ii.height() - win_h + 1) / 4,
                 );

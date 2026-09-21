@@ -110,7 +110,7 @@ impl Recognition {
 /// [`crate::face_detector::FaceDetector`]: every method is panic-free on
 /// empty / uniform input and an empty gallery yields
 /// [`Recognition::NoCandidates`] rather than a panic.
-pub trait FaceRecognizer: Send {
+pub trait FaceRecognizer: Send + Sync {
     /// Stable lowercase id (`"lbph"` / `"eigenface"` / `"fisherface"`),
     /// used by the CLI and platform dispatch exactly like
     /// [`crate::face_detector::FaceDetector::name`].

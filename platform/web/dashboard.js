@@ -114,7 +114,7 @@ const dashboard = (() => {
     try {
       const d = await compute();
       renderStats(d); renderAlgos(d); renderTimeline(d);
-      utils.$('#dash-meta').textContent = `数据源:内存中的 /api/jobs · 任务总数 ${d.total} · 刷新于 ${new Date().toLocaleTimeString()}`;
+      utils.$('#dash-meta').textContent = `数据源:内存 + 历史(/api/jobs 合并 PG) · 任务总数 ${d.total} · 刷新于 ${new Date().toLocaleTimeString()}`;
       // 埋点摘要独立加载(无 DB 也不阻塞主面板)
       renderTelemetry();
     } catch (e) {

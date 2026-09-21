@@ -15,6 +15,7 @@ pub struct S3Client {
     access_key: String,
     secret_key: String,
     bucket: String,
+    retry: RetryPolicy,
 }
 
 #[derive(Debug)]
@@ -27,7 +28,99 @@ impl std::fmt::Display for S3Error {
 }
 impl std::error::Error for S3Error {}
 
+impl S3Error {
+    /// 是否值得重试:5xx + transport 层(connect / read / write timeout)+ 429。
+    /// 4xx 一律不重试(bad bucket / bad key / signature / forbidden)。
+    /// 解析签名错误也不重试 — 重试只是浪费代币 + 加重服务端负担。
+    pub fn is_transient(&self) -> bool {
+        let s = &self.0;
+        if s.starts_with("transport:") {
+            return true;
+        }
+        // 格式: `status <code>: <message>` 或 `status <code> for <method> <path>`
+        if let Some(rest) = s.strip_prefix("status ") {
+            // 取第一个 token 作为 code
+            let code_str = rest.split([':', ' ']).next().unwrap_or("");
+            if let Ok(code) = code_str.parse::<u16>() {
+                return code == 429 || (500..600).contains(&code);
+            }
+        }
+        false
+    }
+}
+
+/// 指数退避重试策略。`max_attempts` 包括首次失败的那一次。
+/// 尝试序列:`base`, `base*2`, `base*4`, ... 上限 `max_delay`。
+#[derive(Clone, Copy, Debug)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub base_delay: std::time::Duration,
+    pub max_delay: std::time::Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            // 4 次尝试:首失败 + 3 次重试(累计 ~700ms / 1.5s / 3.1s,不超过 max_delay)。
+            max_attempts: 4,
+            base_delay: std::time::Duration::from_millis(100),
+            max_delay: std::time::Duration::from_secs(2),
+        }
+    }
+}
+
+/// 用平台 env 变量构造:从 `Config::s3_max_retries` / `s3_retry_base_ms`
+/// / `s3_retry_max_ms` 推断。供 `main.rs` 在创建 `S3Client` 时调。
+impl RetryPolicy {
+    pub fn from_env_counts(max_attempts: u32, base_ms: u64, max_ms: u64) -> Self {
+        Self {
+            max_attempts: max_attempts.max(1),
+            base_delay: std::time::Duration::from_millis(base_ms),
+            max_delay: std::time::Duration::from_millis(max_ms.max(base_ms)),
+        }
+    }
+}
+
+/// 同步 retry 包装:`op` 在瞬态失败时按指数退避重试,非瞬态立即返回。
+/// `attempts_left = 0` 表示不再重试,直接退出;`op` 一次调用消耗一次。
+fn retry_sync<T, F>(policy: RetryPolicy, mut op: F) -> Result<T, S3Error>
+where
+    F: FnMut() -> Result<T, S3Error>,
+{
+    let mut delay = policy.base_delay;
+    let mut last_err: Option<S3Error> = None;
+    for attempt in 0..policy.max_attempts {
+        match op() {
+            Ok(v) => {
+                if attempt > 0 {
+                    tracing::info!("[s3] succeeded after {} retry", attempt);
+                }
+                return Ok(v);
+            }
+            Err(e) => {
+                let transient = e.is_transient();
+                if !transient || attempt + 1 >= policy.max_attempts {
+                    return Err(e);
+                }
+                tracing::warn!(
+                    "[s3] transient error (attempt {}/{}): {} — sleeping {:?} before retry",
+                    attempt + 1,
+                    policy.max_attempts,
+                    e,
+                    delay
+                );
+                last_err = Some(e);
+                std::thread::sleep(delay);
+                // 退避:base * 2^attempt,夹到 max_delay。
+                delay = std::cmp::min(delay.saturating_mul(2), policy.max_delay);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| S3Error("retry exhausted with no error".into())))
+}
+
 impl S3Client {
+    #[allow(dead_code)] // 保留为 rsface_platform library API;bin 走 with_retry
     pub fn new(
         endpoint: String,
         region: String,
@@ -43,71 +136,110 @@ impl S3Client {
             access_key,
             secret_key,
             bucket,
+            retry: RetryPolicy::default(),
+        }
+    }
+
+    /// 用自定义重试策略构造(供测试 / 需要关闭重试的场景)。
+    #[allow(dead_code)]
+    pub fn with_retry(
+        endpoint: String,
+        region: String,
+        access_key: String,
+        secret_key: String,
+        bucket: String,
+        retry: RetryPolicy,
+    ) -> Self {
+        let endpoint = endpoint.trim_end_matches('/').to_string();
+        Self {
+            agent: agent_builder_no_tls(),
+            endpoint,
+            region,
+            access_key,
+            secret_key,
+            bucket,
+            retry,
         }
     }
 
     /// 桶不存在则创建;HEAD 失败区分 404 vs 403,避免坏凭据被当桶不存在再试一次。
     pub fn ensure_bucket(&self) -> Result<(), S3Error> {
-        match self.request("HEAD", "/", &[], &[], None) {
-            Ok(_) => Ok(()),
-            Err(S3Error(e))
-                if e.contains("404") || e.contains("NotFound") || e.contains("NoSuchKey") =>
-            {
-                self.request("PUT", "/", &[], &[], None).map(|_| ())
+        retry_sync(self.retry, || {
+            match self.request("HEAD", "/", &[], &[], None) {
+                Ok(_) => Ok(()),
+                Err(S3Error(e))
+                    if e.contains("404") || e.contains("NotFound") || e.contains("NoSuchKey") =>
+                {
+                    self.request("PUT", "/", &[], &[], None).map(|_| ())
+                }
+                Err(other) => Err(other),
             }
-            Err(other) => Err(other),
-        }
+        })
     }
 
     pub fn put_object(&self, key: &str, content_type: &str, body: Vec<u8>) -> Result<(), S3Error> {
-        self.request(
-            "PUT",
-            &format!("/{key}"),
-            &[],
-            &[("content-type", content_type)],
-            Some(Body::Bytes(body)),
-        )
-        .map(|_| ())
+        retry_sync(self.retry, || {
+            self.request(
+                "PUT",
+                &format!("/{key}"),
+                &[],
+                &[("content-type", content_type)],
+                Some(Body::Bytes(body.clone())),
+            )
+            .map(|_| ())
+        })
     }
 
     /// 流式 PUT:从 `path` 直接发送文件内容,body 在请求过程中按需 read。
     /// 用于大文件上传到 S3 时避免 `fs::read` + `to_vec` 双倍拷贝。
     /// 调用方负责文件存在性与大小;签名阶段 ureq 会 seek-to-end 读 Content-Length。
+    ///
+    /// 注:大文件流的 retry 不能简单重发整个文件 — 这里只对短耗时操作
+    /// (open / metadata stat / 短包上传) 走 retry;长传输过程中失败留给上层
+    /// 重传(put_with_fallback 已能落到 local 兜底)。
     pub fn put_object_file(
         &self,
         key: &str,
         content_type: &str,
         path: &std::path::Path,
     ) -> Result<(), S3Error> {
+        // open + stat 是同步 fs 操作,失败非瞬态;在 retry 之外做一次。
         let f = std::fs::File::open(path)
             .map_err(|e| S3Error(format!("open for put {path:?}: {e}")))?;
         let len = f
             .metadata()
             .map_err(|e| S3Error(format!("stat for put {path:?}: {e}")))?
             .len();
-        self.request(
-            "PUT",
-            &format!("/{key}"),
-            &[],
-            &[
-                ("content-type", content_type),
-                ("content-length", &len.to_string()),
-            ],
-            Some(Body::File(f)),
-        )
-        .map(|_| ())
+        // 仅在网络层失败时重试 — 文件 fd 不可复制,重试需重新 open。
+        retry_sync(self.retry, || {
+            let f = std::fs::File::open(path)
+                .map_err(|e| S3Error(format!("open for put {path:?}: {e}")))?;
+            self.request(
+                "PUT",
+                &format!("/{key}"),
+                &[],
+                &[
+                    ("content-type", content_type),
+                    ("content-length", &len.to_string()),
+                ],
+                Some(Body::File(f)),
+            )
+            .map(|_| ())
+        })
     }
 
     pub fn get_object(&self, key: &str) -> Result<(Vec<u8>, String), S3Error> {
-        let resp = self.request("GET", &format!("/{key}"), &[], &[], None)?;
-        let ct = resp
-            .header("content-type")
-            .unwrap_or("application/octet-stream")
-            .to_string();
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut resp.into_reader(), &mut buf)
-            .map_err(|e| S3Error(e.to_string()))?;
-        Ok((buf, ct))
+        retry_sync(self.retry, || {
+            let resp = self.request("GET", &format!("/{key}"), &[], &[], None)?;
+            let ct = resp
+                .header("content-type")
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut resp.into_reader(), &mut buf)
+                .map_err(|e| S3Error(e.to_string()))?;
+            Ok((buf, ct))
+        })
     }
 
     /// 带 Range 的 GET(S3 语义:`bytes=start-end`,end 含端,可省略表示到 EOF)。
@@ -121,20 +253,23 @@ impl S3Client {
         start: u64,
         end: Option<u64>,
     ) -> Result<(Vec<u8>, u64), S3Error> {
-        let range = match end {
-            Some(e) => format!("bytes={start}-{e}"),
-            None => format!("bytes={start}-"),
-        };
-        let resp = self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
-        let cr_total = resp
-            .header("content-range")
-            .and_then(|v| v.rsplit('/').next())
-            .and_then(|t| t.parse::<u64>().ok());
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut resp.into_reader(), &mut buf)
-            .map_err(|e| S3Error(e.to_string()))?;
-        let total = cr_total.unwrap_or(buf.len() as u64);
-        Ok((buf, total))
+        retry_sync(self.retry, || {
+            let range = match end {
+                Some(e) => format!("bytes={start}-{e}"),
+                None => format!("bytes={start}-"),
+            };
+            let resp =
+                self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
+            let cr_total = resp
+                .header("content-range")
+                .and_then(|v| v.rsplit('/').next())
+                .and_then(|t| t.parse::<u64>().ok());
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut resp.into_reader(), &mut buf)
+                .map_err(|e| S3Error(e.to_string()))?;
+            let total = cr_total.unwrap_or(buf.len() as u64);
+            Ok((buf, total))
+        })
     }
 
     /// 流式 Range GET:返回 `tokio::io::AsyncRead` 适配器 + Content-Range total。
@@ -147,34 +282,41 @@ impl S3Client {
         start: u64,
         end: Option<u64>,
     ) -> Result<(S3RangeStream, u64), S3Error> {
-        let range = match end {
-            Some(e) => format!("bytes={start}-{e}"),
-            None => format!("bytes={start}-"),
-        };
-        let resp = self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
-        let total = resp
-            .header("content-range")
-            .and_then(|v| v.rsplit('/').next())
-            .and_then(|t| t.parse::<u64>().ok())
-            .ok_or_else(|| S3Error("missing Content-Range total".into()))?;
-        // resp.into_reader() 是 sync std::io::Read;包到 S3RangeStream。
-        let sync_reader = resp.into_reader();
-        Ok((S3RangeStream::new(sync_reader), total))
+        retry_sync(self.retry, || {
+            let range = match end {
+                Some(e) => format!("bytes={start}-{e}"),
+                None => format!("bytes={start}-"),
+            };
+            let resp =
+                self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
+            let total = resp
+                .header("content-range")
+                .and_then(|v| v.rsplit('/').next())
+                .and_then(|t| t.parse::<u64>().ok())
+                .ok_or_else(|| S3Error("missing Content-Range total".into()))?;
+            // resp.into_reader() 是 sync std::io::Read;包到 S3RangeStream。
+            let sync_reader = resp.into_reader();
+            Ok((S3RangeStream::new(sync_reader), total))
+        })
     }
 
     /// HEAD object:取 Content-Length(不下载 body)。Range 请求需要先知道
     /// 对象总大小来构造 `Content-Range` 响应头。
     pub fn head_object(&self, key: &str) -> Result<u64, S3Error> {
-        let resp = self.request("HEAD", &format!("/{key}"), &[], &[], None)?;
-        resp.header("content-length")
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or_else(|| S3Error("HEAD missing content-length".into()))
+        retry_sync(self.retry, || {
+            let resp = self.request("HEAD", &format!("/{key}"), &[], &[], None)?;
+            resp.header("content-length")
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or_else(|| S3Error("HEAD missing content-length".into()))
+        })
     }
 
     /// 轻量健康检查:`HEAD /<bucket>` 看 rustfs 是否可达 + 凭据是否合法。
     /// 用于 `/api/health/deep` 端点。
     pub fn ping(&self) -> Result<(), S3Error> {
-        self.request("HEAD", "/", &[], &[], None).map(|_| ())
+        retry_sync(self.retry, || {
+            self.request("HEAD", "/", &[], &[], None).map(|_| ())
+        })
     }
 
     /// ListObjectsV2:列出 `prefix` 下全部对象 key(自动按 continuation-token
@@ -183,29 +325,37 @@ impl S3Client {
         let mut keys = Vec::new();
         let mut token: Option<String> = None;
         loop {
-            let mut query: Vec<(String, String)> = vec![
-                ("list-type".to_string(), "2".to_string()),
-                ("prefix".to_string(), prefix.to_string()),
-            ];
-            if let Some(t) = &token {
-                query.push(("continuation-token".to_string(), t.clone()));
-            }
-            let q_ref: Vec<(&str, &str)> = query
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            let resp = self.request("GET", "/", &q_ref, &[], None)?;
-            let mut xml = String::new();
-            std::io::Read::read_to_string(&mut resp.into_reader(), &mut xml)
-                .map_err(|e| S3Error(e.to_string()))?;
-            keys.extend(extract_xml_tag_values(&xml, "Key"));
-            let truncated = extract_xml_tag_values(&xml, "IsTruncated")
-                .first()
-                .map(|s| s == "true")
-                .unwrap_or(false);
-            let next = extract_xml_tag_values(&xml, "NextContinuationToken")
-                .into_iter()
-                .next();
+            // 每页独立 retry:翻页中途失败不会让前面已收到的 keys 失效,
+            // 整段失败重试也是同样的 query,服务端的 continuation-token
+            // 在短期抖动后通常仍可用。
+            let page = retry_sync(self.retry, || {
+                let mut query: Vec<(String, String)> = vec![
+                    ("list-type".to_string(), "2".to_string()),
+                    ("prefix".to_string(), prefix.to_string()),
+                ];
+                if let Some(t) = &token {
+                    query.push(("continuation-token".to_string(), t.clone()));
+                }
+                let q_ref: Vec<(&str, &str)> = query
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                let resp = self.request("GET", "/", &q_ref, &[], None)?;
+                let mut xml = String::new();
+                std::io::Read::read_to_string(&mut resp.into_reader(), &mut xml)
+                    .map_err(|e| S3Error(e.to_string()))?;
+                let keys = extract_xml_tag_values(&xml, "Key");
+                let truncated = extract_xml_tag_values(&xml, "IsTruncated")
+                    .first()
+                    .map(|s| s == "true")
+                    .unwrap_or(false);
+                let next = extract_xml_tag_values(&xml, "NextContinuationToken")
+                    .into_iter()
+                    .next();
+                Ok((keys, truncated, next))
+            })?;
+            let (page_keys, truncated, next) = page;
+            keys.extend(page_keys);
             match (truncated, next) {
                 (true, Some(t)) => token = Some(t),
                 _ => break,
@@ -217,8 +367,10 @@ impl S3Client {
     /// DELETE object。任务删除时逐个调用(平台是 LAN 单桶,按键 DELETE 无需
     /// DeleteObjects 必需的 Content-MD5,免引 md5 实现)。
     pub fn delete_object(&self, key: &str) -> Result<(), S3Error> {
-        self.request("DELETE", &format!("/{key}"), &[], &[], None)
-            .map(|_| ())
+        retry_sync(self.retry, || {
+            self.request("DELETE", &format!("/{key}"), &[], &[], None)
+                .map(|_| ())
+        })
     }
 
     // ---- 内部:签名 + 发请求 ----
@@ -607,6 +759,78 @@ fn amz_date_from_unix(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s3_error_classifies_transient() {
+        // 5xx + 429 = 瞬态
+        assert!(S3Error("status 500: boom".into()).is_transient());
+        assert!(S3Error("status 503: service unavailable".into()).is_transient());
+        assert!(S3Error("status 429: rate limit".into()).is_transient());
+        // transport 层
+        assert!(S3Error("transport: connection refused".into()).is_transient());
+        // 4xx = 非瞬态
+        assert!(!S3Error("status 400: bad request".into()).is_transient());
+        assert!(!S3Error("status 403: forbidden".into()).is_transient());
+        assert!(!S3Error("status 404: not found".into()).is_transient());
+        assert!(!S3Error("status 416: range not satisfiable".into()).is_transient());
+        // 未识别格式 = 非瞬态(安全侧:宁可漏报也不误重试)
+        assert!(!S3Error("random parse failure".into()).is_transient());
+    }
+
+    #[test]
+    fn retry_sync_succeeds_on_second_attempt() {
+        // 首失败(瞬态) → 二成功 → 返回 Ok
+        let mut calls = 0u32;
+        let policy = RetryPolicy {
+            max_attempts: 4,
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(2),
+        };
+        let res: Result<u32, S3Error> = retry_sync(policy, || {
+            calls += 1;
+            if calls == 1 {
+                Err(S3Error("status 503: try later".into()))
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(res.unwrap(), 42);
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn retry_sync_gives_up_on_non_transient() {
+        // 4xx 立即放弃,不重试
+        let mut calls = 0u32;
+        let policy = RetryPolicy {
+            max_attempts: 4,
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(2),
+        };
+        let res: Result<(), S3Error> = retry_sync(policy, || {
+            calls += 1;
+            Err(S3Error("status 404: not found".into()))
+        });
+        assert!(res.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_sync_exhausts_attempts() {
+        // 持续 503:4 次尝试都用完,然后返回最后一次错误
+        let mut calls = 0u32;
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(2),
+        };
+        let res: Result<(), S3Error> = retry_sync(policy, || {
+            calls += 1;
+            Err(S3Error("status 500: persistent".into()))
+        });
+        assert!(res.is_err());
+        assert_eq!(calls, 3);
+    }
 
     #[test]
     fn amz_date_shape() {

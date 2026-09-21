@@ -29,6 +29,8 @@ function readApiJson(r) {
 const api = {
   // 列表带 200ms 内存缓存:同一 tab 内 SSE 帧事件 + sidebar 刷新可能连发 2-3 次。
   // 命中路径 0 次 HTTP,0 次 JSON parse。
+  // 响应里包含"内存 live + PG 历史"合并的 jobs(in-memory 覆盖 PG 同 id 的) —
+  // 见 platform/server/src/api.rs list_jobs 的合并逻辑。
   listJobs() {
     const cached = apiCache.listJobs;
     if (cached && Date.now() - cached.at < 200) return Promise.resolve(cached.value);
@@ -119,7 +121,25 @@ const utils = (() => {
     if (/^(https?:|data:|blob:)/.test(key)) return key;
     return '/media/' + encodeURIComponent(key);
   }
-  return { $, $$, toast: legacyToast, fmtTime, fmtAbsTime, escapeHtml, highlight, debounce, throttleRaf, mediaUrl };
+  /** 人类可读字节大小(B / KB / MB / GB)。原本在 dropzone-preview.js /
+   *  upload-queue.js 各定义一份,现统一收口到 utils。 */
+  function humanSize(n) {
+    if (n == null || isNaN(n)) return '0 B';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+  /** 从 `{error, error_code, error_hint}` 响应里抽取最佳错误描述。
+   *  优先级:error_hint(若有) > error(必有)。`error_code` 用于机器化
+   *  分支但不进 toast(避免给最终用户展示代码)。 */
+  function explainError(body, fallback) {
+    if (!body || typeof body !== 'object') return fallback || '未知错误';
+    if (body.error_hint) return body.error_hint;
+    if (body.error) return body.error;
+    return fallback || '未知错误';
+  }
+  return { $, $$, toast: legacyToast, fmtTime, fmtAbsTime, escapeHtml, highlight, debounce, throttleRaf, mediaUrl, humanSize, explainError };
 })();
 
 const state = {
@@ -1818,12 +1838,11 @@ const upload = (() => {
       const data = await api.importVideoUrl(url, getAlgoChoice());
       if (data.error) {
         if (window.__track) window.__track('upload_failed', { kind: 'video_url' });
-        return toast.error('导入失败: ' + data.error);
+        // 后端新版契约带 error_hint(可读修复提示) + error_code(机器化),
+        // 优先展示 hint(若有)。
+        const msg = utils.explainError(data, '服务端错误');
+        return toast.error('导入失败: ' + msg);
       }
-      if (window.__track) window.__track('upload_submitted', {
-        kind: 'video_url', algo: getAlgoChoice() || null,
-        round_trip_ms: Date.now() - t0, fetched_bytes: data.fetched_bytes || 0,
-      });
       apiCache.bustAll();
       toast.success('已拉取,开始识别 #' + (data.job_id || '').slice(0, 8));
       const job = await api.getJob(data.job_id);
@@ -1931,7 +1950,25 @@ const sse = (() => {
     state.eventSource = es;
     es.onmessage = (ev) => {
       let msg; try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.type === 'frame') scheduleRefresh();
+      if (msg.type === 'frame') {
+        // 增量更新:不再为每帧触发一次 /api/jobs/{id} 全量重拉。
+        // 视频 / 流任务每 15fps 触发 scheduleRefresh 会给 server 带来 15 GET/s
+        // 的风暴;改成纯前端追加帧 + 调一次 preview 内部轻量 renderProgress。
+        if (state.currentJob && msg.frame) {
+          if (!Array.isArray(state.currentJob.frames)) state.currentJob.frames = [];
+          // 去重:后端偶尔会重发同一帧 index(并发批次边界),保留先到的。
+          const idx = msg.frame.index;
+          const dup = state.currentJob.frames.some(f => f && f.index === idx);
+          if (!dup) state.currentJob.frames.push(msg.frame);
+          // inline:// 兜底 base64(优雅降级场景):让 preview 后续能直渲染。
+          if (msg.inline) state.currentInline = msg.inline;
+          preview.renderProgress(state.currentJob);
+          preview.renderFaceGrid(state.currentJob);
+        }
+        // 单帧事件限频:旧逻辑走 rAF throttle;这里保持相同节流,把
+        // 重型的 preview.render() 降到 60fps 即可。
+        scheduleRefresh();
+      }
       else if (msg.type === 'heartbeat') applyHeartbeat(msg);
       else if (msg.type === 'detector') {
         // 后端在任务启动时推 detector 事件:把 algo 记进 job.stats,
@@ -1944,7 +1981,18 @@ const sse = (() => {
         }
       }
       else if (msg.type === 'done' || msg.type === 'cancelled' || msg.type === 'error') {
-        detach(); scheduleRefresh();
+        // 终态:不仅 detach + 刷新当前 job,还要 bust apiCache.listJobs 并
+        // 主动拉一次列表 — 否则 sidebar 仍会显示 stale "running",直到用户
+        // 切 tab 或手刷才会更新(visibility 触发)。
+        detach();
+        apiCache.bust('listJobs');
+        scheduleRefresh();
+        // 异步刷新 sidebar,失败静默(KPI 2s 轮询兜底)
+        if (api && api.listJobs && sidebar && sidebar.setJobs) {
+          api.listJobs().then(jobs => {
+            try { sidebar.setJobs(jobs); } catch {}
+          }).catch(() => {});
+        }
         if (msg.type === 'done') toast.success('任务完成');
         else if (msg.type === 'cancelled') toast.info('已停止');
         else toast.error('任务出错: ' + (msg.message || ''));

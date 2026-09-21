@@ -89,7 +89,19 @@ const uploadQueue = (() => {
     if (!files || !files.length) return [];
     const arr = Array.from(files);
     const newIds = [];
+    let skippedDup = 0;
     for (const file of arr) {
+      // 高并发兜底:同一文件(name+size+lastModified)已经在 queue 里
+      // 排队或上传中,跳过入队,避免用户重复拖拽/双击触发 N 个相同任务。
+      // 同一文件不同 lastModified(重新选择过)按新文件处理。
+      const sig = (file.name || '') + '|' + (file.size || 0) + '|' + (file.lastModified || 0);
+      const dup = items.find(x =>
+        x.kind === kind &&
+        x.file &&
+        (x.file.name || '') + '|' + (x.file.size || 0) + '|' + (x.file.lastModified || 0) === sig &&
+        (x.status === STATE.queued || x.status === STATE.uploading)
+      );
+      if (dup) { skippedDup++; continue; }
       const id = 'uq-' + (++_seq);
       const item = {
         id, file, kind,
@@ -109,10 +121,15 @@ const uploadQueue = (() => {
       appendItemRow(item);
     }
     updateSummary();
-    showPanel();
-    if (window.__track) window.__track('upload_queued', { kind, count: arr.length });
-    // 立即尝试调度
-    pump();
+    if (newIds.length) {
+      showPanel();
+      if (window.__track) window.__track('upload_queued', { kind, count: newIds.length });
+      // 立即尝试调度
+      pump();
+    }
+    if (skippedDup > 0 && kind !== 'url') {
+      toast.info(`已跳过 ${skippedDup} 个重复文件`);
+    }
     return newIds;
   }
 
@@ -210,7 +227,8 @@ const uploadQueue = (() => {
       finish(it, data && data.job_id ? data.job_id : null);
     } catch (e) {
       if (it.status === STATE.cancelled) return;
-      fail(it, e && e.message ? e.message : 'upload failed');
+      // e.hint 由 xhrUpload 从 body.error_hint 抽出来,优先展示给用户
+      fail(it, e && e.message ? e.message : 'upload failed', e && e.hint);
     }
   }
 
@@ -229,10 +247,20 @@ const uploadQueue = (() => {
         let body = null;
         try { body = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch {}
         if (xhr.status >= 200 && xhr.status < 300) {
-          if (body && body.error) { reject(new Error(body.error)); return; }
+          if (body && body.error) {
+            // 把后端的 error_hint 抽到 e.hint,runUpload 会优先展示
+            const e = new Error(body.error);
+            if (body.error_hint) e.hint = body.error_hint;
+            if (body.error_code) e.code = body.error_code;
+            reject(e);
+            return;
+          }
           resolve(body || {});
         } else {
-          reject(new Error((body && body.error) || ('HTTP ' + xhr.status)));
+          const e = new Error((body && body.error) || ('HTTP ' + xhr.status));
+          if (body && body.error_hint) e.hint = body.error_hint;
+          if (body && body.error_code) e.code = body.error_code;
+          reject(e);
         }
       };
       xhr.onerror = () => reject(new Error('network error'));
@@ -264,12 +292,15 @@ const uploadQueue = (() => {
     if (window.__track) window.__track('upload_done', { kind: it.kind, size_kb: Math.round((it.size || 0) / 1024), job_id: !!jobId });
   }
 
-  function fail(it, msg) {
+  function fail(it, msg, hint) {
     it.status = STATE.error;
     it.error = msg;
     it.xhr = null;
     updateItemRow(it);
-    toast.error(`上传失败: ${it.name} · ${msg}`);
+    // 优先用后端 hint(更可读),否则用原始 msg。`error_code` 暂不进 toast,
+    // 但保留在 li.title 给高级用户 / 测试看。
+    const detail = hint || msg;
+    toast.error(`上传失败: ${it.name} · ${detail}`);
     if (window.__track) window.__track('upload_failed', { kind: it.kind, message: (msg || '').slice(0, 64) });
   }
 
@@ -406,13 +437,8 @@ const uploadQueue = (() => {
     return it.status;
   }
 
-  function humanSize(n) {
-    if (n == null || isNaN(n)) return '0 B';
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
-    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
-  }
+  // humanSize 已上移到 utils(避免与 dropzone-preview.js 重复)
+  function humanSize(n) { return utils.humanSize(n); }
 
   function escape(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

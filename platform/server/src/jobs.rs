@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Semaphore};
 
 #[derive(Clone, Copy, PartialEq, Serialize, Debug)]
@@ -125,6 +125,19 @@ pub struct Job {
     /// 任务运行线程的 JoinHandle。中 #5:cleanup 删除媒体前 join 一下,
     /// 防止后台线程在 delete 之后继续写 S3 对象(产生孤儿)。
     pub worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// `/api/jobs/{id}/recognize` 的 per-job 缓存。
+    /// 键:`{job_id}|{detector}|{media_key}`;失效:media_key 变化(用户
+    /// 重新上传)→ 旧 key 不命中,自动重建。
+    /// 锁粒度:识别 handler 只短持锁 clone body,不会拖住 spawn_blocking。
+    pub recognize_cache: Mutex<Option<RecognizeCache>>,
+}
+
+/// `/recognize` per-job 缓存实体。`body` 是可直接返回给前端的 JSON Value,
+/// 命中缓存时跳过检测 + 共识融合(每次 ~5-20 ms 单图)。
+#[derive(Clone, Debug)]
+pub struct RecognizeCache {
+    pub cache_key: String,
+    pub body: serde_json::Value,
 }
 
 impl Job {
@@ -220,6 +233,14 @@ pub struct JobRegistry {
     pub started_at: std::time::Instant,
     /// 停机信号:true 后 spawn_run 不再接收新任务,运行中的收到 cancel。
     pub shutdown: Arc<AtomicBool>,
+    /// 已加载的人脸画廊(懒加载)。`/api/jobs/{id}/recognize` 第一次请求时
+    /// 从 `cfg.gallery_dir` 训练三个识别器(LBPH/Eigenface/Fisherface),
+    /// 后续请求复用;空目录或目录不存在 → 缓存为 `None`,API 返回 `no_gallery`。
+    /// 每条 entry = (gallery_dir 路径, 加载时刻,Arc<GalleryBundle>)。
+    /// 锁粒度:整个 registry 一把 Mutex,识别请求之间的争抢极短(<10µs),
+    /// 不需要更细粒度(读路径只 clone Arc)。
+    pub gallery_cache:
+        Mutex<Option<(std::path::PathBuf, std::time::SystemTime, Arc<crate::recognition::GalleryBundle>)>>,
 }
 
 /// 终态判断:done/cancelled/error 视为已结束,queued/running 仍在跑。
@@ -302,6 +323,7 @@ impl JobRegistry {
             cancel: Arc::new(AtomicBool::new(false)),
             event_tx: tx,
             worker: Mutex::new(None),
+            recognize_cache: Mutex::new(None),
         });
         self.jobs
             .lock()
@@ -660,62 +682,96 @@ impl JobRegistry {
             });
         }
 
-        // heartbeat:每 30s 写一次 `heartbeat_at = now()`。
-        // orphan 扫描(启动时)会用"heartbeat_at < now()-5min"判僵尸;
-        // 没有这一行,运行超过 5 分钟但还没 finish 的 job 会被误判。
-        // 通过 spawn_run 已经传入的 `rt` handle 在 tokio runtime 里 spawn
-        // 一个独立 task 跑心跳;cancel 是同一 AtomicBool,run_job 退出后
-        // 下一次轮询即结束。task 是 fire-and-forget,run_job 不阻塞等它。
+        // heartbeat:每 5s 写一次 `heartbeat_at = now()` + `last_heartbeat_ts = now()`。
+        // - `heartbeat_at` 走 30s 节奏对 startup-reaper 够用,但与 5s 实时心跳合并到
+        //   同一 task 后,reaper 看到的"alive"时间窗更紧(30s → 5s),更不容易误判长
+        //   任务为僵尸。同一任务里两个 `UPDATE` 顺序执行,DB 写入次数仍是 1 round-trip
+        //   一次,合并不引入额外开销。
+        // - `last_heartbeat_ts` 5s 刷新,服务于运行时 janitor(30s 阈值)。
         //
-        // 同步启动高频心跳:`last_heartbeat_ts` 每 5s 刷新,服务于运行时
-        // janitor(`status='running' AND last_heartbeat_ts < now()-30s` 的
-        // 行会被标 failed/worker_died)。两个心跳共用同一个 cancel 标志,
-        // 任何一个 tick 看到 true 都立刻退出,不再写 DB。
+        // 任务合并:旧实现是两条独立 `tokio::spawn` 任务,每 5s/30s 各占一次 DB
+        // 连接槽位(共 2 条 in-flight tokio task)。现在两条 DB 写入 + 一次 SSE 推
+        // 帧(`heartbeat` 事件)集中在同一 task 里:
+        // - DB tick:5s,同时写两列
+        // - SSE tick:1s,只 emit,不写 DB
+        // 三者共享同一个 cancel AtomicBool,任意 tick 看到 true 即退出。
         {
-            let rt = self.rt.clone();
             let db = self.db.clone();
             let id = job.id.clone();
             let cancel = job.cancel.clone();
+            let event_tx = job.event_tx.clone();
+            let job_for_sse = job.clone();
             tokio::spawn(async move {
-                // 第一次心跳立刻发:让 orphan 扫描在 job 启动 30s 内就能
+                // 第一次 tick 立刻发:让 startup-reaper 在 job 启动 30s 内就能
                 // 看到"alive"标记(而不是等到第一个 30s tick)。
                 if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     db.heartbeat(&id).await;
-                }
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-                // 跳过首次立即触发(上面已经手动发过了),让 30s 节奏对齐。
-                tick.tick().await;
-                loop {
-                    tick.tick().await;
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    db.heartbeat(&id).await;
-                }
-            });
-            let _ = rt; // 当前实现用不到 rt(已有 handle),保留变量供未来扩展
-        }
-        // 高频心跳:last_heartbeat_ts 5s 刷新,janitor 用它判定 worker 是否
-        // 静默死亡。两条心跳任务独立,DB 写入走同一连接池,不阻塞 run_job。
-        {
-            let db = self.db.clone();
-            let id = job.id.clone();
-            let cancel = job.cancel.clone();
-            tokio::spawn(async move {
-                // 启动后立即刷一次,让 janitor 在第一轮扫描时不会误判
-                // "刚启动的 running 行没心跳 → worker_died"。
-                if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     db.heartbeat_realtime(&id).await;
+                    let _ = event_tx.send(
+                        serde_json::json!({
+                            "type": "heartbeat",
+                            "fps": 0.0_f32,
+                            "frames_processed": job_for_sse
+                                .stats
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .frames_processed,
+                        })
+                        .to_string(),
+                    );
                 }
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-                // 跳过首次立即触发(上面手动发过),与 30s 心跳对齐思路一致。
-                tick.tick().await;
+                let mut tick_db = tokio::time::interval(std::time::Duration::from_secs(5));
+                // 跳过首次立即触发(上面已经手动发过),让 5s 节奏对齐。
+                tick_db.tick().await;
+                let mut tick_sse = tokio::time::interval(std::time::Duration::from_secs(1));
+                tick_sse.tick().await;
+                // SSE 心跳:每 1s 用 frames_processed 增量算 fps,推给前端
+                // (前端 `applyHeartbeat` 用它更新 fps_window)。不写 DB,
+                // 单次成本 = 1 次 stats 锁 + 1 次 broadcast send(无订阅者直接
+                // 返回,零开销)。
+                let mut last_frames: u64 = job_for_sse
+                    .stats
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .frames_processed;
+                let mut last_ts = Instant::now();
                 loop {
-                    tick.tick().await;
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
+                    tokio::select! {
+                        _ = tick_db.tick() => {
+                            if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                            db.heartbeat(&id).await;
+                            db.heartbeat_realtime(&id).await;
+                        }
+                        _ = tick_sse.tick() => {
+                            if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                            let now = Instant::now();
+                            let frames_now = job_for_sse
+                                .stats
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .frames_processed;
+                            let dt_ms = now.saturating_duration_since(last_ts).as_millis() as u64;
+                            let df = frames_now.saturating_sub(last_frames);
+                            // dt_ms = 0 时 fps=0(系统时钟回退或同 ms 内连发);
+                            // 显式 clamp 到 1000 fps 防异常广播峰值。
+                            let fps = if dt_ms > 0 {
+                                let f = (df as f32) * 1000.0 / (dt_ms as f32);
+                                f.min(1000.0)
+                            } else {
+                                0.0
+                            };
+                            last_frames = frames_now;
+                            last_ts = now;
+                            let _ = event_tx.send(
+                                serde_json::json!({
+                                    "type": "heartbeat",
+                                    "fps": fps,
+                                    "frames_processed": frames_now,
+                                })
+                                .to_string(),
+                            );
+                        }
                     }
-                    db.heartbeat_realtime(&id).await;
                 }
             });
         }
@@ -1204,26 +1260,13 @@ fn normalize_image_input(input: &str, work_dir: &Path) -> std::io::Result<String
 fn frame_rgb(frame: &Frame) -> RgbImage {
     match &frame.rgb {
         Some(rgb) => clone_rgb(rgb),
-        None => gray_to_rgb(&frame.gray),
+        None => RgbImage::from_gray(&frame.gray),
     }
 }
 
 fn clone_rgb(src: &RgbImage) -> RgbImage {
     let mut out = RgbImage::new(src.width(), src.height());
     out.as_mut_slice().copy_from_slice(src.as_slice());
-    out
-}
-
-fn gray_to_rgb(gray: &GrayImage) -> RgbImage {
-    let (w, h) = (gray.width(), gray.height());
-    let mut out = RgbImage::new(w, h);
-    let dst = out.as_mut_slice();
-    let src = gray.as_slice();
-    for (i, &v) in src.iter().enumerate() {
-        dst[i * 3] = v;
-        dst[i * 3 + 1] = v;
-        dst[i * 3 + 2] = v;
-    }
     out
 }
 
@@ -1586,13 +1629,25 @@ impl DetectorKind {
     }
 
     /// 算法名,供 SSE 事件 + /api/config + /api/jobs/{id}/compare 使用。
+    /// 返回的字符串与 `KIND_*` 常量对齐 — `available_algos()` 直接消费
+    /// 这套常量,避免算法列表与 kind_name 字面量各自维护。
     pub fn kind_name(&self) -> &'static str {
         match self {
-            DetectorKind::Haar(_) => "haar",
-            DetectorKind::Cnn(_) => "cnn",
-            DetectorKind::Luminance(_) => "luminance",
+            DetectorKind::Haar(_) => Self::KIND_HAAR,
+            DetectorKind::Cnn(_) => Self::KIND_CNN,
+            DetectorKind::Luminance(_) => Self::KIND_LUMINANCE,
         }
     }
+
+    /// 稳定的算法 ID,用于 SSE / JSON / DB 列。改这些字符串会破坏:
+    /// - 前端 compare 卡片的下拉选项
+    /// - `/api/config` 的 algo 字段
+    /// - DB 中已有的 algo 行(`aggregate_algo_stats` 按字符串分桶)
+    ///
+    /// 所以是 breaking change,改名时需要双写期 + 一次性迁移。
+    pub const KIND_HAAR: &'static str = "haar";
+    pub const KIND_CNN: &'static str = "cnn";
+    pub const KIND_LUMINANCE: &'static str = "luminance";
 }
 
 /// 解析 `RSFACE_ALGO` 环境变量,未设置时按历史规则(cnn_weights 路径
@@ -1603,20 +1658,26 @@ fn select_algo_name(cfg: &Config) -> String {
         .ok()
         .map(|s| s.trim().to_ascii_lowercase());
     match from_env.as_deref() {
-        Some("haar") | Some("cnn") | Some("luminance") => from_env.unwrap(),
+        Some(name)
+            if name == DetectorKind::KIND_HAAR
+                || name == DetectorKind::KIND_CNN
+                || name == DetectorKind::KIND_LUMINANCE =>
+        {
+            from_env.unwrap()
+        }
         Some(other) => {
             tracing::warn!("[jobs] unknown RSFACE_ALGO='{other}', falling back to haar/cnn logic");
             if cfg.use_cnn || cfg.cnn_weights.is_some() {
-                "cnn".to_string()
+                DetectorKind::KIND_CNN.to_string()
             } else {
-                "haar".to_string()
+                DetectorKind::KIND_HAAR.to_string()
             }
         }
         None => {
             if cfg.use_cnn || cfg.cnn_weights.is_some() {
-                "cnn".to_string()
+                DetectorKind::KIND_CNN.to_string()
             } else {
-                "haar".to_string()
+                DetectorKind::KIND_HAAR.to_string()
             }
         }
     }
@@ -1635,7 +1696,7 @@ pub fn build_detector(cfg: &Config, override_algo: Option<&str>) -> std::io::Res
         _ => select_algo_name(cfg),
     };
     match algo.as_str() {
-        "haar" => {
+        DetectorKind::KIND_HAAR => {
             let cascade = Cascade::load(&cfg.cascade_path).map_err(|e| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -1651,7 +1712,7 @@ pub fn build_detector(cfg: &Config, override_algo: Option<&str>) -> std::io::Res
             };
             Ok(DetectorKind::Haar(Detector::new(cascade, dcfg)))
         }
-        "cnn" => {
+        DetectorKind::KIND_CNN => {
             let cnn_cfg = CnnConfig {
                 window_w: cfg.min_face_size.max(8),
                 window_h: cfg.min_face_size.max(8),
@@ -1671,7 +1732,7 @@ pub fn build_detector(cfg: &Config, override_algo: Option<&str>) -> std::io::Res
             };
             Ok(DetectorKind::Cnn(det))
         }
-        "luminance" => Ok(DetectorKind::Luminance(LuminanceFaceDetector::new(
+        DetectorKind::KIND_LUMINANCE => Ok(DetectorKind::Luminance(LuminanceFaceDetector::new(
             LuminanceConfig::default(),
         ))),
         other => Err(std::io::Error::new(
@@ -1685,7 +1746,7 @@ pub fn build_detector(cfg: &Config, override_algo: Option<&str>) -> std::io::Res
 /// 与 `build_detector` 共享选择规则,只是不依赖 cfg 里的任何路径。
 pub fn build_detector_by_name(name: &str) -> std::io::Result<DetectorKind> {
     match name {
-        "haar" => {
+        DetectorKind::KIND_HAAR => {
             // 拿一个空的 Config 走默认 cascade 路径(平台 .env 默认 cascade.rfcf)。
             let cfg = Config::from_env();
             let cascade = Cascade::load(&cfg.cascade_path).map_err(|e| {
@@ -1699,8 +1760,8 @@ pub fn build_detector_by_name(name: &str) -> std::io::Result<DetectorKind> {
                 DetectorConfig::default(),
             )))
         }
-        "cnn" => Ok(DetectorKind::Cnn(CnnDetector::new(CnnConfig::default()))),
-        "luminance" => Ok(DetectorKind::Luminance(LuminanceFaceDetector::new(
+        DetectorKind::KIND_CNN => Ok(DetectorKind::Cnn(CnnDetector::new(CnnConfig::default()))),
+        DetectorKind::KIND_LUMINANCE => Ok(DetectorKind::Luminance(LuminanceFaceDetector::new(
             LuminanceConfig::default(),
         ))),
         other => Err(std::io::Error::new(
@@ -1716,7 +1777,16 @@ pub fn build_detector_by_name(name: &str) -> std::io::Result<DetectorKind> {
 /// (`yunet` / `mtcnn` / `hog`)。这些字符串只用于展示与聚合,不经过本列表
 /// 校验 —— `aggregate_algo_stats` 按原始字符串分桶,原样返回,绝不 panic。
 pub fn available_algos() -> &'static [&'static str] {
-    &["haar", "cnn", "luminance"]
+    // 单一来源:与 DetectorKind::KIND_* 常量对齐,新增算法时只
+    // 改 enum + 这里一处数组,避免手维护两份字符串列表导致漂移
+    // (历史上 haar / cnn / luminance 的 kind_name 字面量与本列表
+    // 各自维护,偶尔漏改就会出现 set_algo_override 接受但 build_detector
+    // 不识别的 bug)。
+    &[
+        DetectorKind::KIND_HAAR,
+        DetectorKind::KIND_CNN,
+        DetectorKind::KIND_LUMINANCE,
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -1929,6 +1999,7 @@ mod tests {
             queued_jobs: AtomicU64::new(0),
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            gallery_cache: Mutex::new(None),
         };
         // 3 个 queued(permit 不消费):前 2 个 OK,第 3 个 429。
         assert!(reg.create(JobKind::Stream, "a".into()).is_ok());
@@ -1971,6 +2042,7 @@ mod tests {
             queued_jobs: AtomicU64::new(0),
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            gallery_cache: Mutex::new(None),
         };
         let job = reg.create(JobKind::Stream, "t".into()).unwrap();
         let id = job.id.clone();
@@ -2060,6 +2132,7 @@ mod tests {
             queued_jobs: AtomicU64::new(0),
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            gallery_cache: Mutex::new(None),
         };
         let job = reg.create(JobKind::Stream, "long".into()).unwrap();
         let id = job.id.clone();
@@ -2135,6 +2208,7 @@ mod tests {
             queued_jobs: AtomicU64::new(0),
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            gallery_cache: Mutex::new(None),
         };
         let key = "jobs/test-s3down/original.bin";
         let body = b"hello-s3-down".to_vec();
