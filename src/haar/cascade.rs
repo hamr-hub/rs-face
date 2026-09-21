@@ -641,18 +641,7 @@ impl Cascade {
                 };
                 let f: &HaarFeature = &self.features[f_idx];
                 let raw = if inbounds {
-                    cache.get_or_eval_inbounds(
-                        f_idx,
-                        f,
-                        ii,
-                        ri,
-                        x,
-                        y,
-                        ww,
-                        wh,
-                        ii_w,
-                        ii_h,
-                    )
+                    cache.get_or_eval_inbounds(f_idx, f, ii, ri, x, y, ww, wh, ii_w, ii_h)
                 } else {
                     cache.get_or_eval(
                         w.feature_index as usize,
@@ -889,8 +878,7 @@ impl Cascade {
         for stage in &mut self.stages {
             // Build the parallel `Vec<usize>` of feature indices. Stored
             // as `usize` (not raw pointers) so Cascade remains Send + Sync.
-            let mut idxs: Vec<usize> =
-                Vec::with_capacity(stage.weak_features.len());
+            let mut idxs: Vec<usize> = Vec::with_capacity(stage.weak_features.len());
             for w in &stage.weak_features {
                 // feature_index was either loaded from a validated .rfcf
                 // stream (checked at parse time) or supplied by
@@ -1003,6 +991,7 @@ mod tests {
         });
         c.stages.push(Stage {
             stage_threshold: 0.0,
+            effective_threshold: 0.0,
             weak_features: vec![WeakFeature {
                 feature_index: 0,
                 threshold: 1.0,
@@ -1010,6 +999,7 @@ mod tests {
                 left_val: 1.0,
                 right_val: -1.0,
             }],
+            feature_indices: None,
         });
         let mut buf: Vec<u8> = Vec::new();
         c.save_to_writer(&mut buf).unwrap();

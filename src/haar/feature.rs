@@ -222,9 +222,20 @@ impl HaarFeature {
                 (rx, ry, rw, rh)
             };
             let sum_f64: f64 = if is_tilted {
-                // Tilted rectangles are signed (45° diamond; the result
-                // can be negative), so keep this in i64.
-                ri.tilted_rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as f64
+                // Tilted corners fan out left by `rh` and down by `rw+rh`.
+                // The window is in-bounds but the rotated corners can still
+                // overhang near the image rim — fall back to the checked
+                // variant (whose zero-border clip matches the padded table
+                // OpenCV computes). Interior windows stay on the unchecked
+                // fast path.
+                let tilted_inbounds = rx >= rh && rx + rw <= ii_w && ry + rw + rh <= ii_h;
+                if tilted_inbounds {
+                    // SAFETY: documented above; rotated corners are inside
+                    // the table.
+                    ri.tilted_rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as f64
+                } else {
+                    ii.tilted_rect_sum(ri, rx, ry, rx + rw, ry + rh) as f64
+                }
             } else if ii_is_wide {
                 ii.rect_sum_unchecked(rx, ry, rx + rw, ry + rh) as f64
             } else {
