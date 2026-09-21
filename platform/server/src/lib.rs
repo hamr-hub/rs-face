@@ -5,8 +5,12 @@
 pub mod api;
 pub mod cache;
 pub mod config;
+pub mod error_codes;
 pub mod jobs;
 pub mod metrics;
 pub mod persist;
+pub mod rate_limit;
+pub mod retry;
 pub mod s3;
+pub mod slow_log;
 pub mod zip;

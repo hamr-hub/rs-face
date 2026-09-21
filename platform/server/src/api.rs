@@ -1295,10 +1295,11 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
                 match stream_field_to_staging(&state.cfg, field, max_bytes).await {
                     Ok(p) => staged_path = Some(p),
                     Err(StagingError::TooLarge { len }) => {
-                        return error_response(
+                        return error_response_with(
                             StatusCode::PAYLOAD_TOO_LARGE,
                             crate::error_codes::UPLOAD_TOO_LARGE,
                             &format!("upload too large: {} bytes (max {} bytes)", len, max_bytes),
+                            None,
                         );
                     }
                     Err(StagingError::Io(e)) => {
@@ -1917,10 +1918,11 @@ async fn media(
     // 提示,避免前端误用 `/media/inline%3A%2F%2F...` 拿到空 404 后不知道
     // 是配置问题还是数据问题。
     if cleaned.starts_with("inline://") || key.starts_with("inline://") {
-        return error_response(
+        return error_response_with(
             StatusCode::GONE,
             crate::error_codes::MEDIA_GONE,
             "inline:// keys must be fetched via SSE replay (look for `inline` field in frame events)",
+            Some("look for `inline` field in frame events"),
         );
     }
 
@@ -2333,6 +2335,28 @@ fn error_response(code: StatusCode, msg: &str) -> Response {
     error_response_with(code, final_code, msg, None)
 }
 
+fn error_response_with(
+    code: StatusCode,
+    error_code: &str,
+    msg: &str,
+    hint: Option<&str>,
+) -> Response {
+    let mut body = serde_json::json!({
+        "error": msg,            // 旧契约,前端读取用
+        "error_code": error_code, // 新契约,机器可读
+    });
+    if let Some(h) = hint {
+        body["error_hint"] = serde_json::Value::String(h.to_string());
+    }
+    (code, Json(body)).into_response()
+}
+
+/// `std::io::Write` 适配器,把每段字节送进 `tokio::sync::mpsc::Sender`。
+/// 用于 streaming zip body:后台线程同步 `write`,前端异步收。
+struct ChannelWriter<'a> {
+    tx: &'a tokio::sync::mpsc::Sender<std::io::Result<Vec<u8>>>,
+}
+
 impl std::io::Write for ChannelWriter<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let len = buf.len();
@@ -2346,10 +2370,6 @@ impl std::io::Write for ChannelWriter<'_> {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
-}
-
-fn error_response(code: StatusCode, msg: &str) -> Response {
-    (code, Json(serde_json::json!({"error": msg}))).into_response()
 }
 
 /// `JobRegistry::create()` 已成功、但任务在进入 `run_job` 之前就失败时的统一
