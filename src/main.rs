@@ -695,6 +695,13 @@ fn run_cnn_pipeline(
         stride: cfg.detector.window_stride,
         confidence_threshold: cfg.min_score.max(0.5),
         max_size: cfg.detector.max_size,
+        // Keep the historical 24×24 output here so the standalone
+        // `rs-face --cnn` CLI matches its previous behaviour. The
+        // golden-eval harness in tests/golden_eval.rs uses
+        // `expand_to_w/_h = 50` to compensate for the bundled template
+        // weights' small receptive field (see cnn/mod.rs docs).
+        expand_to_w: 0,
+        expand_to_h: 0,
     };
     let det = match weights_path {
         Some(p) => match CnnWeights::load(p) {
