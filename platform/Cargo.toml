@@ -19,7 +19,7 @@ path = "server/src/lib.rs"
 rsface = { package = "rs-face", path = ".." }
 
 # Web 服务
-axum = { version = "0.8", features = ["multipart"] }
+axum = { version = "0.8", features = ["multipart", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "time", "fs", "process", "io-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["io"] }

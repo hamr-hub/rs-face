@@ -241,6 +241,10 @@ pub struct JobRegistry {
     /// 不需要更细粒度(读路径只 clone Arc)。
     pub gallery_cache:
         Mutex<Option<(std::path::PathBuf, std::time::SystemTime, Arc<crate::recognition::GalleryBundle>)>>,
+    /// Persistent gallery state (DB-backed persons + faces). Powers
+    /// /api/persons and /api/identify. Hydrated from PG on startup;
+    /// writes go straight to PG (the in-memory cache is rebuilt lazily).
+    pub gallery: Arc<crate::gallery::GalleryState>,
 }
 
 /// 终态判断:done/cancelled/error 视为已结束,queued/running 仍在跑。
@@ -2000,6 +2004,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
             gallery_cache: Mutex::new(None),
+            gallery: std::sync::Arc::new(crate::gallery::GalleryState::empty_for_tests(42, Default::default())),
         };
         // 3 个 queued(permit 不消费):前 2 个 OK,第 3 个 429。
         assert!(reg.create(JobKind::Stream, "a".into()).is_ok());
@@ -2043,6 +2048,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
             gallery_cache: Mutex::new(None),
+            gallery: std::sync::Arc::new(crate::gallery::GalleryState::empty_for_tests(42, Default::default())),
         };
         let job = reg.create(JobKind::Stream, "t".into()).unwrap();
         let id = job.id.clone();
@@ -2133,6 +2139,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
             gallery_cache: Mutex::new(None),
+            gallery: std::sync::Arc::new(crate::gallery::GalleryState::empty_for_tests(42, Default::default())),
         };
         let job = reg.create(JobKind::Stream, "long".into()).unwrap();
         let id = job.id.clone();
@@ -2209,6 +2216,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
             gallery_cache: Mutex::new(None),
+            gallery: std::sync::Arc::new(crate::gallery::GalleryState::empty_for_tests(42, Default::default())),
         };
         let key = "jobs/test-s3down/original.bin";
         let body = b"hello-s3-down".to_vec();

@@ -57,6 +57,7 @@ async fn boot_registry_for_test() -> (
         started_at: std::time::Instant::now(),
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         gallery_cache: std::sync::Mutex::new(None),
+        gallery: std::sync::Arc::new(rsface_platform::gallery::GalleryState::empty_for_tests(42, Default::default())),
     });
     // 注册 shutdown 信号让测试结束时不挂死。
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();

@@ -109,6 +109,36 @@ pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
         .route("/api/telemetry/recent", get(telemetry_recent))
         .route("/media/{*key}", get(media))
         .route("/{file}", get(static_file))
+        // Persistent person / face gallery (closed loop). The
+        // handlers live in `gallery_handlers` and read the same
+        // `Arc<JobRegistry>` we already pass to the rest of the router.
+        .route("/api/persons", get(super::gallery_handlers::list_persons))
+        .route("/api/persons", post(super::gallery_handlers::create_person))
+        .route("/api/persons/{id}", get(super::gallery_handlers::get_person))
+        .route(
+            "/api/persons/{id}",
+            axum::routing::delete(super::gallery_handlers::archive_person),
+        )
+        .route(
+            "/api/persons/{id}/faces",
+            post(super::gallery_handlers::enroll_face).layer(DefaultBodyLimit::max(img_limit)),
+        )
+        .route(
+            "/api/persons/{id}/faces-list",
+            get(super::gallery_handlers::list_faces),
+        )
+        .route(
+            "/api/faces/{id}",
+            axum::routing::delete(super::gallery_handlers::delete_face),
+        )
+        .route(
+            "/api/identify",
+            post(super::gallery_handlers::identify_image).layer(DefaultBodyLimit::max(img_limit)),
+        )
+        .route(
+            "/api/verify",
+            post(super::gallery_handlers::verify_image).layer(DefaultBodyLimit::max(img_limit)),
+        )
         .layer(axum::middleware::from_fn(move |req, next| {
             cors_middleware(req, next, cors_origin.clone())
         }))
@@ -2529,12 +2559,12 @@ impl std::io::Write for ChannelWriter<'_> {
 /// - `media_gone`    — 410,inline:// key 误用 /media 路径
 /// - `internal`      — 500,服务端异常
 /// - `cascade_missing` — 500,haar 算法但 cascade 文件缺失
-fn error_response(code: StatusCode, msg: &str) -> Response {
+pub fn error_response(code: StatusCode, msg: &str) -> Response {
     error_response_with(code, "internal", msg, None)
 }
 
 /// 同 error_response,但显式带 `error_code`(机器可读) + 可选 `error_hint`。
-fn error_response_with(
+pub fn error_response_with(
     code: StatusCode,
     error_code: &str,
     msg: &str,

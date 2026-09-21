@@ -85,6 +85,26 @@ pub struct Config {
     /// 注册人脸画廊目录(每个子目录一个身份,内含该人的 pgm/ppm/png)。
     /// 存在时 /recognize 接口用它构建多个识别器并输出共识身份。
     pub gallery_dir: PathBuf,
+    /// Random seed used to initialise the in-tree zero-dep EmbedNet
+    /// used by the persistent gallery. Two servers booted with the same
+    /// seed produce comparable cosine rankings (the weights themselves
+    /// are NOT pretrained, but the embedding space is deterministic
+    /// per-seed, so a probe embedding stays comparable across processes).
+    pub gallery_seed: u64,
+    /// Cosine threshold above which the persistent gallery accepts a
+    /// match. See [`rsface::embedding::MatchConfig`].
+    pub gallery_match_threshold: f32,
+    /// Minimum cosine margin between the best and the runner-up match.
+    /// `0.0` disables the check (always pick the top-ranked label).
+    pub gallery_match_min_margin: f32,
+}
+
+impl Config {
+    pub fn gallery_match_config(&self) -> rsface::embedding::MatchConfig {
+        rsface::embedding::MatchConfig::default()
+            .with_threshold(self.gallery_match_threshold)
+            .with_min_margin(self.gallery_match_min_margin)
+    }
 }
 
 impl Config {
@@ -171,6 +191,15 @@ impl Config {
             },
             available_parallelism: ap,
             gallery_dir: PathBuf::from(env_or("RSFACE_GALLERY_DIR", "gallery")),
+            gallery_seed: env_or("RSFACE_GALLERY_SEED", "0x5fa1")
+                .parse::<u64>()
+                .unwrap_or(0x5fa1),
+            gallery_match_threshold: env_or("RSFACE_GALLERY_MATCH_THRESHOLD", "0.30")
+                .parse::<f32>()
+                .unwrap_or(0.30),
+            gallery_match_min_margin: env_or("RSFACE_GALLERY_MATCH_MIN_MARGIN", "0.0")
+                .parse::<f32>()
+                .unwrap_or(0.0),
         }
     }
 }

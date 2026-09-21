@@ -5,6 +5,8 @@
 pub mod api;
 pub mod cache;
 pub mod config;
+pub mod gallery;
+pub mod gallery_handlers;
 pub mod jobs;
 pub mod metrics;
 pub mod persist;
