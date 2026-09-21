@@ -396,9 +396,15 @@ impl JobRegistry {
     }
 
     /// 标记 job 为已归档(侧栏默认隐藏但仍在内存/DB 中)。
+    /// 内存标志翻转 + DB 列同步落库,确保重启后归档状态一致。
     pub fn set_archived(&self, id: &str, archived: bool) -> bool {
         if let Some(j) = self.jobs.lock().unwrap().get(id).cloned() {
             *j.archived.lock().unwrap_or_else(|e| e.into_inner()) = archived;
+            let db = self.db.clone();
+            let id_db = id.to_string();
+            tokio::spawn(async move {
+                db.set_archived(&id_db, archived).await;
+            });
             true
         } else {
             false

@@ -789,7 +789,9 @@ async fn compare_algos(
     // 2) 拿到 job 对应的原始媒体字节(S3 优先,失败回退到 local media dir)。
     let job = match state.get(&id) {
         Some(j) => j,
-        None => return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None),
+        None => {
+            return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None)
+        }
     };
     let media_key = job
         .original_media_key
@@ -1198,7 +1200,12 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         if let Some(p) = staged_path {
             let _ = tokio::fs::remove_file(p).await;
         }
-        return error_response_with(StatusCode::BAD_REQUEST, "missing_field", "missing 'file' field", None);
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            "missing_field",
+            "missing 'file' field",
+            None,
+        );
     };
     let Some(staged) = staged_path else {
         return error_response(StatusCode::BAD_REQUEST, "empty upload");

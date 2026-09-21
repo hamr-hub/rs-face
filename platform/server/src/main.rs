@@ -115,7 +115,9 @@ async fn main() {
         // 之前把它们标 error,避免前端永远看到"卡在 running"。
         // 阈值 5 分钟(>heartbeat 30s 间隔 × 10,确保正常 job 不会被误伤)。
         match db.reap_orphans(300).await {
-            Some(n) if n > 0 => println!("[rsface-platform] reaped {n} orphaned job(s) from previous run"),
+            Some(n) if n > 0 => {
+                println!("[rsface-platform] reaped {n} orphaned job(s) from previous run")
+            }
             Some(_) => {} // 0 跳过日志
             None => eprintln!("[rsface-platform] WARN: orphan reap skipped (DB pool unavailable)"),
         }

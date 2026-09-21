@@ -293,13 +293,11 @@ impl Db {
         let Some(pool) = &self.pool else {
             return;
         };
-        let _ = sqlx::query(
-            "UPDATE jobs SET archived=$2, updated_at=now() WHERE id=$1",
-        )
-        .bind(id)
-        .bind(archived)
-        .execute(pool)
-        .await;
+        let _ = sqlx::query("UPDATE jobs SET archived=$2, updated_at=now() WHERE id=$1")
+            .bind(id)
+            .bind(archived)
+            .execute(pool)
+            .await;
     }
 
     /// 设置错误码(API `error_code` 字段):与 `error` 文本共存,
@@ -312,13 +310,11 @@ impl Db {
         let Some(pool) = &self.pool else {
             return;
         };
-        let _ = sqlx::query(
-            "UPDATE jobs SET error_code=$2, updated_at=now() WHERE id=$1",
-        )
-        .bind(id)
-        .bind(code)
-        .execute(pool)
-        .await;
+        let _ = sqlx::query("UPDATE jobs SET error_code=$2, updated_at=now() WHERE id=$1")
+            .bind(id)
+            .bind(code)
+            .execute(pool)
+            .await;
     }
 
     /// 孤儿任务回收:扫描所有 `status IN ('queued','running')` 且
@@ -878,7 +874,9 @@ mod tests {
         assert_eq!(init.len(), 7);
         let telemetry = split_sql_statements(include_str!("../../migrations/0002_telemetry.sql"));
         assert_eq!(telemetry.len(), 1);
-        let health = split_sql_statements(include_str!("../../migrations/0003_jobs_health_columns.sql"));
+        let health = split_sql_statements(include_str!(
+            "../../migrations/0003_jobs_health_columns.sql"
+        ));
         // 5 列 ALTER + 5 索引 CREATE = 10 top-level statements
         // (started_at / heartbeat_at / updated_at / archived / error_code;
         //  BRIN × 2 + status B-tree + archived 组合 + error_code B-tree)
