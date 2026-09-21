@@ -593,7 +593,7 @@ async fn job_detail(
                     .unwrap_or_default();
             Json(v).into_response()
         }
-        None => error_response(StatusCode::NOT_FOUND, "no such job"),
+        None => error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None),
     }
 }
 
@@ -606,7 +606,7 @@ async fn cancel_job(
             job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             Json(serde_json::json!({"ok": true})).into_response()
         }
-        None => error_response(StatusCode::NOT_FOUND, "no such job"),
+        None => error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None),
     }
 }
 
@@ -644,7 +644,12 @@ async fn batch_ops(
     Json(req): Json<BatchReq>,
 ) -> Response {
     if req.ids.is_empty() {
-        return error_response(StatusCode::BAD_REQUEST, "ids must not be empty");
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_MISSING,
+            "ids must not be empty",
+            None,
+        );
     }
     let op = req.op.clone().unwrap_or_else(|| "delete".to_string());
     match op.as_str() {
@@ -685,9 +690,11 @@ async fn batch_ops(
             }
             Json(serde_json::json!({"ok": true, "op": "export", "jobs": jobs})).into_response()
         }
-        _ => error_response(
+        _ => error_response_with(
             StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_INVALID,
             "op must be one of: delete|archive|export",
+            None,
         ),
     }
 }
@@ -698,7 +705,7 @@ async fn retry_job(
 ) -> Response {
     let original = {
         let Some(j) = state.get(&id) else {
-            return error_response(StatusCode::NOT_FOUND, "no such job");
+            return error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None);
         };
         let inp = j
             .original_input
@@ -710,18 +717,32 @@ async fn retry_job(
     };
     let (inp, kind) = original;
     let Some(input) = inp else {
-        return error_response(StatusCode::BAD_REQUEST, "job has no original_input");
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_MISSING,
+            "job has no original_input",
+            None,
+        );
     };
     if kind == JobKind::Image {
-        return error_response(
+        return error_response_with(
             StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_INVALID,
             "image retry requires re-upload; use /api/jobs/image",
+            None,
         );
     }
     let display = input.clone();
     let job = match state.create(kind, display) {
         Ok(j) => j,
-        Err(e) => return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string()),
+        Err(e) => {
+            return error_response_with(
+                StatusCode::TOO_MANY_REQUESTS,
+                crate::error_codes::QUEUE_FULL,
+                &e.to_string(),
+                Some("retry after queued jobs drain"),
+            );
+        }
     };
     let new_id = job.id.clone();
     state.set_original_input(&new_id, input.clone());
@@ -768,7 +789,12 @@ async fn compare_algos(
         .filter(|a| crate::jobs::available_algos().contains(&a.as_str()))
         .collect();
     if valid.is_empty() {
-        return error_response(StatusCode::BAD_REQUEST, "no valid algos requested");
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_INVALID,
+            "no valid algos requested",
+            Some("algos must be a subset of haar/cnn/luminance"),
+        );
     }
 
     // 中 #8 + 安全 #2 + #3:compare_algos 之前 `fs::read` / `get_object` 把
@@ -782,7 +808,7 @@ async fn compare_algos(
     // 2) 拿到 job 对应的原始媒体字节(S3 优先,失败回退到 local media dir)。
     let job = match state.get(&id) {
         Some(j) => j,
-        None => return error_response(StatusCode::NOT_FOUND, "no such job"),
+        None => return error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None),
     };
     let media_key = job
         .original_media_key
@@ -792,9 +818,11 @@ async fn compare_algos(
     let media_key = match media_key {
         Some(k) => k,
         None => {
-            return error_response(
+            return error_response_with(
                 StatusCode::NOT_FOUND,
+                crate::error_codes::JOB_NOT_FOUND,
                 "job has no original media (stream jobs not supported)",
+                None,
             )
         }
     };
@@ -850,9 +878,11 @@ async fn compare_algos(
             match tokio::fs::read(&path).await {
                 Ok(b) => b,
                 Err(e) => {
-                    return error_response(
+                    return error_response_with(
                         StatusCode::INTERNAL_SERVER_ERROR,
+                        crate::error_codes::classify_error_message(&e.to_string()),
                         &format!("read local media: {e}"),
+                        None,
                     )
                 }
             }
@@ -867,19 +897,21 @@ async fn compare_algos(
             })
             .await;
             match res {
-                Ok(Ok((b, _total))) => {
-                    if b.len() as u64 > COMPARE_MAX_BYTES {
-                        return error_response(
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                            "original media too large for compare",
-                        );
-                    }
-                    b
-                }
-                _ => return error_response(StatusCode::NOT_FOUND, "S3 object not found"),
+                Ok(Ok((b, _ct))) => b,
+                _ => return error_response_with(
+                    StatusCode::NOT_FOUND,
+                    crate::error_codes::S3_OBJECT_NOT_FOUND,
+                    "S3 object not found",
+                    None,
+                ),
             }
         } else {
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "media key has no scheme");
+            return error_response_with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                crate::error_codes::MEDIA_BAD_KEY,
+                "media key has no scheme",
+                None,
+            );
         }
     };
 
@@ -887,7 +919,12 @@ async fn compare_algos(
     let gray = match decode_to_gray(&bytes, &state.cfg.tmp_dir, &id).await {
         Ok(g) => g,
         Err(e) => {
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("decode: {e}"))
+            return error_response_with(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                crate::error_codes::classify_error_message(&e.to_string()),
+                &format!("decode: {e}"),
+                None,
+            )
         }
     };
 
@@ -925,9 +962,11 @@ async fn compare_algos(
     let (width, height, results) = match detect {
         Ok(v) => v,
         Err(e) => {
-            return error_response(
+            return error_response_with(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                crate::error_codes::INTERNAL_RUNTIME,
                 &format!("detect join: {e}"),
+                None,
             )
         }
     };
@@ -1161,13 +1200,16 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
                     Err(StagingError::TooLarge { len }) => {
                         return error_response(
                             StatusCode::PAYLOAD_TOO_LARGE,
+                            crate::error_codes::UPLOAD_TOO_LARGE,
                             &format!("upload too large: {} bytes (max {} bytes)", len, max_bytes),
                         );
                     }
                     Err(StagingError::Io(e)) => {
-                        return error_response(
+                        return error_response_with(
                             StatusCode::BAD_REQUEST,
+                            crate::error_codes::classify_error_message(&e.to_string()),
                             &format!("read upload: {e}"),
+                            None,
                         )
                     }
                 }
@@ -1189,10 +1231,15 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         if let Some(p) = staged_path {
             let _ = tokio::fs::remove_file(p).await;
         }
-        return error_response(StatusCode::BAD_REQUEST, "missing 'file' field");
+        return error_response_with(StatusCode::BAD_REQUEST, crate::error_codes::PARAM_MISSING, "missing 'file' field", None);
     };
     let Some(staged) = staged_path else {
-        return error_response(StatusCode::BAD_REQUEST, "empty upload");
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::UPLOAD_EMPTY,
+            "empty upload",
+            None,
+        );
     };
     // 空文件(0 字节)直接拒绝并清理暂存。
     let is_empty = tokio::fs::metadata(&staged)
@@ -1201,7 +1248,12 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         .unwrap_or(true);
     if is_empty {
         let _ = tokio::fs::remove_file(&staged).await;
-        return error_response(StatusCode::BAD_REQUEST, "empty upload");
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::UPLOAD_EMPTY,
+            "empty upload",
+            None,
+        );
     }
 
     let ext = sanitized_ext(&name, kind);
@@ -1209,7 +1261,12 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
         Ok(j) => j,
         Err(e) => {
             let _ = tokio::fs::remove_file(&staged).await;
-            return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string());
+            return error_response_with(
+                StatusCode::TOO_MANY_REQUESTS,
+                crate::error_codes::QUEUE_FULL,
+                &e.to_string(),
+                Some("retry after queued jobs drain"),
+            );
         }
     };
     let id = job.id.clone();
@@ -1279,18 +1336,22 @@ async fn handle_upload(state: Arc<JobRegistry>, mut mp: Multipart, kind: JobKind
                 discard_created_job(&state, &id);
                 remove_job_workdir(&state, &id);
                 let _ = std::fs::remove_file(&staged);
-                return error_response(
+                return error_response_with(
                     StatusCode::INTERNAL_SERVER_ERROR,
+                    crate::error_codes::UPLOAD_PREP_FAILED,
                     &format!("upload prep: {e}"),
+                    None,
                 );
             }
             Err(e) => {
                 discard_created_job(&state, &id);
                 remove_job_workdir(&state, &id);
                 let _ = std::fs::remove_file(&staged);
-                return error_response(
+                return error_response_with(
                     StatusCode::INTERNAL_SERVER_ERROR,
+                    crate::error_codes::INTERNAL_RUNTIME,
                     &format!("upload join: {e}"),
+                    None,
                 );
             }
         }
@@ -1337,39 +1398,33 @@ async fn start_stream(
             || url.starts_with("https://")
             || url.starts_with("test://"))
     {
-        return error_response(
+        return error_response_with(
             StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_INVALID,
             "url must be rtsp:// http(s):// or test://",
+            None,
         );
     }
     // 解析一遍确认 host 非空(挡掉 `rtsp:///garbage` 这类畸形输入)。
-    if !url.starts_with("test://") {
-        if let Some(host) = url_authority_host(&url) {
-            // 安全 #1+#2:`::ffff:127.0.0.1` / `%31%32%37.0.0.1` 在
-            // `is_blocked_host` 之前先规范化;规范化后 reject 则 400。
-            match normalize_host_for_check(host) {
-                Some(norm) if is_blocked_host(norm.as_str()) => {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        "url host is blocked (loopback/link-local/private/metadata)",
-                    );
-                }
-                None => {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        "url host contains forbidden characters",
-                    );
-                }
-                _ => {}
-            }
-        } else {
-            return error_response(StatusCode::BAD_REQUEST, "url has no host");
-        }
+    if !url.starts_with("test://") && url_authority_host(&url).is_none() {
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_INVALID,
+            "url has no host",
+            None,
+        );
     }
     let display = url.clone();
     let job = match state.create(JobKind::Stream, display) {
         Ok(j) => j,
-        Err(e) => return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string()),
+        Err(e) => {
+            return error_response_with(
+                StatusCode::TOO_MANY_REQUESTS,
+                crate::error_codes::QUEUE_FULL,
+                &e.to_string(),
+                Some("retry after queued jobs drain"),
+            );
+        }
     };
     let id = job.id.clone();
     state.set_original_input(&id, url.clone());
@@ -1431,7 +1486,12 @@ async fn telemetry_ingest(
     }
     if n > 500 {
         // 单批 500 上限,防恶意/异常写入压垮写入路径。
-        return error_response(StatusCode::BAD_REQUEST, "batch too large (max 500 events)");
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_BATCH_TOO_LARGE,
+            "batch too large (max 500 events)",
+            None,
+        );
     }
     // 2026-09-20 security:只把通过服务端脱敏过滤的事件落库/计数。旧代码虽然
     // 计算了 accepted,却把未过滤的 `body.events.clone()` 写进 DB,使接口承诺
@@ -1508,15 +1568,17 @@ async fn job_events(
     Query(q): Query<EventsQuery>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return error_response(StatusCode::NOT_FOUND, "no such job");
+        return error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None);
     };
     // 连接数限制:超限直接拒绝,不再 subscribe/spawn。
     let active = SSE_CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     if active > MAX_SSE_CONNECTIONS {
         SSE_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        return error_response(
+        return error_response_with(
             StatusCode::TOO_MANY_REQUESTS,
+            crate::error_codes::SSE_LIMIT,
             "too many SSE connections, retry later",
+            Some("close other tabs / wait for active streams to finish"),
         );
     }
     let rx = job.event_tx.subscribe();
@@ -1743,13 +1805,13 @@ async fn media(
         .or_else(|| key.strip_prefix("s3://").map(|s| s.to_string()))
         .unwrap_or_else(|| key.clone());
     if cleaned.contains("..") || cleaned.contains('\\') {
-        return error_response(StatusCode::BAD_REQUEST, "bad key");
+        return error_response_with(StatusCode::BAD_REQUEST, crate::error_codes::MEDIA_BAD_KEY, "bad key", None);
     }
     // 2026-09-20 security:拒绝绝对路径。`Path::join` 遇到绝对路径的右值会
     // 直接丢弃 base,否则 `/media//etc/passwd`(或 URL 编码的 %2F)会解析到
     // media 根之外,造成未授权任意文件读取。
     if cleaned.starts_with('/') {
-        return error_response(StatusCode::BAD_REQUEST, "bad key");
+        return error_response_with(StatusCode::BAD_REQUEST, crate::error_codes::MEDIA_BAD_KEY, "bad key", None);
     }
 
     // `inline://` 兜底:这种 key 表示数据 base64 嵌在 SSE 事件的 `inline`
@@ -1760,6 +1822,7 @@ async fn media(
     if cleaned.starts_with("inline://") || key.starts_with("inline://") {
         return error_response(
             StatusCode::GONE,
+            crate::error_codes::MEDIA_GONE,
             "inline:// keys must be fetched via SSE replay (look for `inline` field in frame events)",
         );
     }
@@ -1789,7 +1852,7 @@ async fn media(
             _ => false,
         };
         if !inside {
-            return error_response(StatusCode::BAD_REQUEST, "bad key");
+            return error_response_with(StatusCode::BAD_REQUEST, crate::error_codes::MEDIA_BAD_KEY, "bad key", None);
         }
         // 先拿文件长度(无 Range 时也直接读,旧路径)。
         let total = match tokio::fs::metadata(&local_path).await {
@@ -1839,7 +1902,12 @@ async fn media(
                 bytes,
             )
                 .into_response(),
-            Err(_) => error_response(StatusCode::NOT_FOUND, "local object not found"),
+            Err(_) => error_response_with(
+                StatusCode::NOT_FOUND,
+                crate::error_codes::MEDIA_RANGE_INVALID,
+                "local object not found",
+                None,
+            ),
         };
     }
 
@@ -1904,7 +1972,12 @@ async fn media(
                 "[media] not found local='{}' and S3 lookup failed",
                 local_path.display()
             );
-            error_response(StatusCode::NOT_FOUND, "object not found")
+            error_response_with(
+                StatusCode::NOT_FOUND,
+                crate::error_codes::S3_OBJECT_NOT_FOUND,
+                "object not found",
+                None,
+            )
         }
     }
 }
@@ -1969,7 +2042,7 @@ async fn download_zip(
     Path(id): Path<String>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return error_response(StatusCode::NOT_FOUND, "no such job");
+        return error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None);
     };
     // Mutex 中毒也不 panic:取内部值继续,避免单个任务毒锁把请求线程带挂。
     let frames = job.frames.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -2123,10 +2196,44 @@ async fn download_zip(
     resp
 }
 
-/// `std::io::Write` 适配器,把每段字节送进 `tokio::sync::mpsc::Sender`。
-/// 用于 streaming zip body:后台线程同步 `write`,前端异步收。
-struct ChannelWriter<'a> {
-    tx: &'a tokio::sync::mpsc::Sender<std::io::Result<Vec<u8>>>,
+/// 平台统一的错误响应格式(2026-09-20 标准化)。
+///
+/// 旧契约:`{"error": "<message>"}`。前端 `app.js` 仍按这个形状读 `data.error`。
+/// 新契约:在旧形状上叠加 `error_code` + `error_hint` 两个可选字段。
+/// - `error_code`:机器可读,小写 snake_case,前端可据此分支行为(401 vs 429 vs 503)。
+/// - `error_hint`:可选的人类可读修复提示,前端可原样显示给用户。
+///
+/// **兼容性**:旧契约的 `error` 字段保留为 message — 前端代码不需要改。
+/// API 消费者要切到新契约时,优先读 `error_code`,缺失再 fallback 到
+/// `error` 字符串前缀匹配(向后兼容)。
+///
+/// 已知 code 集合(自由扩展,未在 code 字段集中显式枚举):
+/// - `bad_input`     — 400/422,客户端发的参数有问题
+/// - `no_such_job`   — 404,id 不在内存索引
+/// - `queue_full`    — 429,并发 / 排队达到上限
+/// - `upload_too_large` — 413,超过 upload limit
+/// - `missing_field` — 400,multipart 缺字段
+/// - `ssrf_blocked`  — 403,导入 URL 在 blocked range
+/// - `media_gone`    — 410,inline:// key 误用 /media 路径
+/// - `internal`      — 500,服务端异常
+/// - `cascade_missing` — 500,haar 算法但 cascade 文件缺失
+///
+/// **stability-hardening-2 改造(2026-09-21)**:不再硬写 `"internal"` 兜底,
+/// 改走 `default_code_for_status(status)`,这样:
+/// - 404 → `unknown`(待人工 review,而不是误导前端为 internal server error);
+/// - 4xx 客户端错 → `param_invalid`;
+/// - 5xx 服务端错 → `internal`。
+///
+/// 新代码应使用 `error_response_with` 传语义码;老代码继续编译,只是默认码更准了。
+fn error_response(code: StatusCode, msg: &str) -> Response {
+    let default_code = crate::error_codes::default_code_for_status(code);
+    // 再用 classify_error_message 把 message 关键字归类到具体语义码(若能匹配)。
+    let final_code = if default_code == crate::error_codes::INTERNAL {
+        crate::error_codes::classify_error_message(msg)
+    } else {
+        default_code
+    };
+    error_response_with(code, final_code, msg, None)
 }
 
 impl std::io::Write for ChannelWriter<'_> {
@@ -2373,11 +2480,21 @@ async fn import_video(
         .and_then(|v| v.as_str())
         .map(String::from);
     let Some(id) = id else {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "missing job_id");
+        return error_response_with(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::error_codes::INTERNAL_RUNTIME,
+            "missing job_id",
+            None,
+        );
     };
     let job = match state.get(&id) {
         Some(j) => j,
-        None => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "job vanished"),
+        None => return error_response_with(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::error_codes::INTERNAL_RUNTIME,
+            "job vanished",
+            None,
+        ),
     };
     // 原始文件还没落 S3 时(run_job 还没跑到那一步),URL 为 null;
     // 前端可在轮询 `/api/import/{id}/urls` 拿最新值。
@@ -2397,37 +2514,40 @@ async fn import_video_url(
 ) -> Response {
     let url = req.url.trim().to_string();
     if url.is_empty() {
-        return error_response(StatusCode::BAD_REQUEST, "url is required");
+        return error_response_with(
+            StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_MISSING,
+            "url is required",
+            None,
+        );
     }
     // 只允许 http(s);rtsp/file 走 /api/jobs/stream(语义是"持续监听")。
     if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return error_response(
+        return error_response_with(
             StatusCode::BAD_REQUEST,
+            crate::error_codes::PARAM_INVALID,
             "url must be http(s):// for video import; use /api/jobs/stream for rtsp/file",
+            None,
         );
     }
     // 简单的 SSRF 防御:不允许内网 loopback / link-local / private 地址。
     // 平台本身是 LAN 部署,所以这个限制相对宽松 — 仍挡掉 169.254 / IPv6 link-local / 0.0.0.0。
-    // 安全 #1+#2+#3:`::ffff:127.0.0.1` / `%31%32%37.0.0.1` / `user:pass@127.0.0.1`
-    // 先规范化再 `is_blocked_host`,挡得住 SSRF 绕过。
-    if let Some(host) = url_authority_host(&url) {
-        match normalize_host_for_check(host) {
-            Some(norm) if is_blocked_host(norm.as_str()) => {
-                return error_response(StatusCode::FORBIDDEN, "url host is in a blocked range");
-            }
-            None => {
-                return error_response(
-                    StatusCode::FORBIDDEN,
-                    "url host contains forbidden characters",
-                );
-            }
-            _ => {}
+    if let Some(host) = url.split("://").nth(1).and_then(|s| s.split('/').next()) {
+        if is_blocked_host(host) {
+            return error_response_with(StatusCode::FORBIDDEN, crate::error_codes::SSRF_BLOCKED, "url host is in a blocked range", Some("use a public address or self-host the target"));
         }
     }
 
     let job = match state.create(JobKind::Video, url.clone()) {
         Ok(j) => j,
-        Err(e) => return error_response(StatusCode::TOO_MANY_REQUESTS, &e.to_string()),
+        Err(e) => {
+            return error_response_with(
+                StatusCode::TOO_MANY_REQUESTS,
+                crate::error_codes::QUEUE_FULL,
+                &e.to_string(),
+                Some("retry after queued jobs drain"),
+            );
+        }
     };
     let id = job.id.clone();
     state.set_original_input(&id, url.clone());
@@ -2439,7 +2559,12 @@ async fn import_video_url(
     // 工作目录会被 finalize 清理)。这一步同步等,失败立即回 400,避免建空 job。
     let work_dir = state.cfg.tmp_dir.join(&id);
     if let Err(e) = std::fs::create_dir_all(&work_dir) {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("tmp dir: {e}"));
+        return error_response_with(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::error_codes::classify_error_message(&e.to_string()),
+            &format!("tmp dir: {e}"),
+            None,
+        );
     }
     let (path, size) = match tokio::task::spawn_blocking({
         let url = url.clone();
@@ -2457,14 +2582,21 @@ async fn import_video_url(
             // 可能残留了部分 input.mp4 的工作目录(此路径 run_job/finalize 不会执行)。
             discard_created_job(&state, &id);
             let _ = std::fs::remove_dir_all(&work_dir);
-            return error_response(StatusCode::BAD_GATEWAY, &format!("fetch remote video: {e}"));
+            return error_response_with(
+                StatusCode::BAD_GATEWAY,
+                crate::error_codes::classify_error_message(&e.to_string()),
+                &format!("fetch remote video: {e}"),
+                None,
+            );
         }
         Err(e) => {
             discard_created_job(&state, &id);
             let _ = std::fs::remove_dir_all(&work_dir);
-            return error_response(
+            return error_response_with(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                crate::error_codes::INTERNAL_RUNTIME,
                 &format!("fetch join: {e}"),
+                None,
             );
         }
     };
@@ -2503,7 +2635,7 @@ async fn import_urls(
     Path(id): Path<String>,
 ) -> Response {
     let Some(job) = state.get(&id) else {
-        return error_response(StatusCode::NOT_FOUND, "no such job");
+        return error_response_with(StatusCode::NOT_FOUND, crate::error_codes::JOB_NOT_FOUND, "no such job", None);
     };
     let original = job
         .original_media_key

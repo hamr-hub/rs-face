@@ -5,6 +5,7 @@
 mod api;
 mod cache;
 mod config;
+mod error_codes;
 mod jobs;
 mod metrics;
 mod persist;
