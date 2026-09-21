@@ -251,17 +251,13 @@ pub fn read_png(r: &mut dyn Read) -> std::io::Result<(usize, usize, u8, Vec<u8>)
     let (w, h, ctype, _depth) =
         ihdr.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing IHDR"))?;
 
-    // Decompress zlib: skip 2-byte header, then DEFLATE.
-    if compressed.len() < 6 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "compressed data too short",
-        ));
-    }
-    let zlib_body = &compressed[2..compressed.len() - 4];
+    // Decompress all IDAT payloads as one zlib stream. The previous
+    // implementation only handled DEFLATE "stored" (uncompressed) blocks and
+    // rejected the fixed/dynamic Huffman blocks every real PNG uses.
+    use flate2::read::ZlibDecoder;
+    let mut dec = ZlibDecoder::new(compressed.as_slice());
     let mut raw = Vec::new();
-    let mut br = BitReader::new(zlib_body);
-    inflate_stored(&mut br, &mut raw)?;
+    std::io::Read::read_to_end(&mut dec, &mut raw)?;
 
     let bpp = match ctype {
         0 => 1,
