@@ -71,6 +71,17 @@ impl GalleryState {
         self.liveness.is_some()
     }
 
+    /// Run the liveness check for one detection; `None` when no backend is
+    /// loaded or no verdict could be produced.
+    pub fn check_liveness(&self, rgb: &RgbImage, det: &Detection) -> Option<LivenessVerdict> {
+        self.liveness.as_ref().and_then(|live| live.check(rgb, det))
+    }
+
+    /// Whether spoof detections should be treated as blocked (enforcement).
+    pub fn liveness_enforce(&self) -> bool {
+        self.liveness_enforce
+    }
+
     /// Minimal empty instance, mainly for integration tests that build a
     /// JobRegistry by hand (no DB / no async): in-memory gallery, seeded
     /// EmbedNet, no pool. Not used by production startup.

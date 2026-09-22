@@ -683,6 +683,8 @@ impl Db {
                 w: r.get::<i32, _>("w") as usize,
                 h: r.get::<i32, _>("h") as usize,
                 score: r.get("score"),
+                liveness: None,
+                blocked: false,
             })
             .collect()
     }
