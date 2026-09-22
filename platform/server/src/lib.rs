@@ -8,6 +8,7 @@ pub mod config;
 pub mod gallery;
 pub mod gallery_handlers;
 pub mod jobs;
+pub mod liveness;
 pub mod metrics;
 pub mod persist;
 pub mod recognition;
