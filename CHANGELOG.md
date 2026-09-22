@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `liveness_check` command-line tool
+- **New feature-gated bin `liveness_check` runs silent anti-spoofing on one
+  image without the server.** It decodes PNG/JPG/PPM, finds the largest face
+  with SCRFD-10G, runs the two-model MiniFASNet check (with
+  `--min-real-score` and optional `--quality-gate`) and prints the verdict
+  plus quality statistics (`sharpness`, `high_freq_ratio`). Exit code is `0`
+  when the largest face is accepted live, `1` on spoof/error and `2` on bad
+  arguments, so it composes in a shell. Built on the pure-Rust `tract-backend`
+  (no C++ toolchain); verified end-to-end on the lena fixture (real_score
+  `0.997`, exit `0`) and on the missing-file / no-argument error paths.
+
 ### Changed — liveness verdicts carry quality measurements
 - **Each liveness verdict now includes a `quality` snapshot of the
   native-resolution crop.** Quality is measured on every check (not just

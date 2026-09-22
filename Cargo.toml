@@ -106,6 +106,13 @@ name = "prep_lbph_crops"
 path = "src/bin/prep_lbph_crops.rs"
 required-features = ["ort-backend"]
 
+# CLI silent liveness check; uses the pure-Rust tract backend (same choice as
+# the platform), so it needs no C++ toolchain.
+[[bin]]
+name = "liveness_check"
+path = "src/bin/liveness_check.rs"
+required-features = ["tract-backend"]
+
 [[bin]]
 name = "rs_face_detect"
 path = "src/bin/rs_face_detect.rs"
