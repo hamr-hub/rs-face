@@ -292,6 +292,11 @@ pub mod video_id;
 #[cfg(feature = "pipeline")]
 pub mod batch;
 
+// Runtime-free silent face-anti-spoofing core (crop/preprocess/softmax/
+// decision). Holds no inference dependency, so it ships in the default
+// zero-dep build; the ONNX-backed `liveness_detector` below does the forward.
+pub mod liveness;
+
 // ---------------------------------------------------------------------------
 // Opt-in industrial ONNX stack (SCRFD detector + ArcFace recogniser).
 // ---------------------------------------------------------------------------
@@ -301,8 +306,6 @@ pub mod align;
 pub mod arcface;
 #[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
 pub mod arcface_recognizer;
-#[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
-pub mod liveness;
 #[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
 pub mod liveness_detector;
 #[cfg(any(feature = "ort-backend", feature = "tract-backend"))]
