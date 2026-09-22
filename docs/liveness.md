@@ -123,6 +123,15 @@ the `faces` table (NULL when liveness did not run for that face), so
 threshold calibration can aggregate data across jobs and server restarts
 rather than only observing live API responses.
 
+Migration `0008_face_verdict.sql` additionally stores the face's verdict
+(`is_real`, nullable, plus `blocked`) so each stored signal row is labelled by
+what the classifier decided. The read-only endpoint
+`GET /api/liveness/quality-summary` aggregates the stored rows grouped by
+verdict — sample count and mean of each signal for `real` vs `spoof` — giving
+the distributions from which to read a separating threshold, across jobs and
+restarts. It returns an empty `groups` list when there is no database pool or
+no stored verdicts.
+
 ## Temporal voting
 
 For video / live-stream jobs, a face can additionally be required to look real
