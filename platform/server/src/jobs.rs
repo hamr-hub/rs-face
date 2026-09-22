@@ -96,6 +96,10 @@ pub struct JobStats {
     pub frames_processed: u64,
     pub frames_with_face: u64,
     pub total_detections: u64,
+    /// Detections judged non-real by liveness (spoof_detections).
+    pub spoof_detections: u64,
+    /// Detections blocked under liveness enforcement.
+    pub blocked_detections: u64,
     pub elapsed_ms: u64,
     /// 当前 job 使用的算法(haar/cnn/luminance;历史数据里也可能出现已下线的
     /// yunet/mtcnn/hog,展示与聚合时原样保留)。
@@ -992,6 +996,8 @@ impl JobRegistry {
             _frames_since_reopen += 1;
             let detections = detector.detect(&frame.gray);
             let has_face = !detections.is_empty();
+            let mut frame_spoof = 0u64;
+            let mut frame_blocked = 0u64;
             let keepalive = job.kind == JobKind::Stream
                 && frame_idx.is_multiple_of(self.cfg.stream_keepalive_period.max(1));
 
@@ -1028,6 +1034,12 @@ impl JobRegistry {
                     let live = self.gallery.check_liveness(&base, d);
                     let blocked = self.gallery.liveness_enforce()
                         && live.as_ref().is_some_and(|v| !v.is_real);
+                    if live.as_ref().is_some_and(|v| !v.is_real) {
+                        frame_spoof += 1;
+                    }
+                    if blocked {
+                        frame_blocked += 1;
+                    }
                     verdicts.push((live, blocked));
                 }
                 if has_face || job.kind == JobKind::Image || keepalive {
@@ -1115,6 +1127,8 @@ impl JobRegistry {
                     st.frames_with_face += 1;
                 }
                 st.total_detections += detections.len() as u64;
+                st.spoof_detections += frame_spoof;
+                st.blocked_detections += frame_blocked;
             }
             // 周期性把 stats 写回 DB(每 30 帧)
             if frame_idx.is_multiple_of(30) {
