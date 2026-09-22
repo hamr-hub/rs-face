@@ -123,9 +123,10 @@ fn liveness_far_frr_against_synthesised_attacks() {
         paper_out.probs[2]
     );
 
-    // (3) screen-replay attack: mild blur + slight chroma shift (typical
-    // Moiré from re-shooting a screen).
-    let screen = blur_and_chroma_shift(&img, 1.5, (4, -3, 2));
+    // (3) screen-replay attack: mild blur + slight chroma shift + a fine
+    // LCD pixel-grid / moiré overlay — the high-frequency lattice that
+    // distinguishes a re-shot screen from a live face.
+    let screen = overlay_screen_grid(&blur_and_chroma_shift(&img, 1.5, (4, -3, 2)));
     let screen_out = det.check(&screen, &face).unwrap();
     println!(
         "screen: is_real={} label={} real_score={:.4} probs={:.3}/{:.3}/{:.3}",
@@ -252,6 +253,35 @@ fn chroma_shift(img: &RgbImage, shift: (i16, i16, i16)) -> RgbImage {
             dst[base] = (src[base] as i16 + dr).clamp(0, 255) as u8;
             dst[base + 1] = (src[base + 1] as i16 + dg).clamp(0, 255) as u8;
             dst[base + 2] = (src[base + 2] as i16 + db).clamp(0, 255) as u8;
+        }
+    }
+    out
+}
+
+/// Overlay a fine LCD pixel lattice plus a low-frequency moiré beat.
+///
+/// Models the cue a re-shot screen adds: a regular sub-pixel grid (a dark
+/// line every few pixels) and a slower brightness beat where the grid mixes
+/// with the camera sampling. Applied multiplicatively to luma.
+fn overlay_screen_grid(img: &RgbImage) -> RgbImage {
+    let (w, h) = (img.width(), img.height());
+    let mut out = RgbImage::new(w, h);
+    const GRID: i32 = 3;
+    for y in 0..h {
+        let src = img.row(y);
+        let dst = out.row_mut(y);
+        for x in 0..w {
+            let on_grid = (x as i32 % GRID == 0) || (y as i32 % GRID == 0);
+            // Slow diagonal moiré beat in [0, 1].
+            let phase = ((x as f32 + y as f32) * 0.42).sin() * 0.5 + 0.5;
+            let mut gain = 1.0f32 - phase * 0.16;
+            if on_grid {
+                gain *= 0.55;
+            }
+            let base = x * 3;
+            for c in 0..3 {
+                dst[base + c] = (src[base + c] as f32 * gain).clamp(0.0, 255.0) as u8;
+            }
         }
     }
     out
