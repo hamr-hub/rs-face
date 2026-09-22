@@ -1054,8 +1054,12 @@ impl JobRegistry {
                     Vec::with_capacity(detections.len());
                 for (idx, d) in detections.iter().enumerate() {
                     let live = self.gallery.check_liveness(&base, d);
-                    let mut blocked = self.gallery.liveness_enforce()
-                        && live.as_ref().is_some_and(|v| !v.is_real);
+                    let enforce = self.gallery.liveness_enforce();
+                    let mut blocked = crate::liveness::enforce_blocks(
+                        enforce,
+                        self.gallery.has_liveness(),
+                        live.as_ref().map(|v| v.is_real),
+                    );
                     if use_temporal {
                         // Feed this track's streak and gate enforcement on
                         // fail-closed temporal confirmation.

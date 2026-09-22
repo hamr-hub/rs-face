@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — liveness enforcement is fail-closed on error
+- **A missing liveness verdict now blocks under enforcement, in both
+  `/api/verify` and video/stream jobs.** Previously the gate only blocked
+  on an explicit non-real verdict, so when a backend was loaded but a check
+  returned nothing — no face box, an inference error, or a poisoned shared
+  lock — the detection was allowed through (fail-open). The shared
+  `liveness::enforce_blocks` rule now requires a positive real verdict and
+  treats `None` as spoof, so an attacker cannot trigger an error to slip
+  past the gate. Enforcement off or no backend loaded keeps the old
+  informational behaviour. Four unit tests cover real/spoof/missing and
+  the no-enforcement/no-backend cases; documented in `docs/liveness.md`.
+
 ### Added — silent-liveness hardening
 - **Face-crop quality gate (`src/quality.rs`).** MiniFASNet leans on
   high-frequency detail in a well-sized, in-focus crop, yet still emits

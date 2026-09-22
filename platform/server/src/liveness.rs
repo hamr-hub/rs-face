@@ -23,6 +23,21 @@ pub struct LivenessVerdict {
     pub label: String,
 }
 
+/// Decide whether liveness enforcement blocks a detection.
+///
+/// The gate is fail-closed: when enforcement is on and a backend is loaded,
+/// only a confirmed real verdict passes. A missing verdict (no face box,
+/// inference error or poisoned lock) blocks just like an explicit spoof
+/// verdict, so an attacker cannot trigger an error to slip through. When
+/// enforcement is off or no backend is loaded, nothing is blocked.
+pub(crate) fn enforce_blocks(
+    enforce: bool,
+    has_backend: bool,
+    is_real: Option<bool>,
+) -> bool {
+    enforce && has_backend && !matches!(is_real, Some(true))
+}
+
 /// Handle to an optional liveness backend.
 ///
 /// The feature-gated build stores a real detector; the zero-dep build is a
@@ -123,5 +138,33 @@ impl Liveness {
     #[cfg(not(feature = "liveness"))]
     fn run_check(&self, _rgb: &RgbImage, _det: &Detection) -> Option<LivenessVerdict> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::enforce_blocks;
+
+    #[test]
+    fn real_verdict_passes_under_enforcement() {
+        assert!(!enforce_blocks(true, true, Some(true)));
+    }
+
+    #[test]
+    fn explicit_spoof_is_blocked() {
+        assert!(enforce_blocks(true, true, Some(false)));
+    }
+
+    #[test]
+    fn missing_verdict_is_fail_closed() {
+        // Backend loaded but the check errored / produced no face box.
+        assert!(enforce_blocks(true, true, None));
+    }
+
+    #[test]
+    fn no_enforcement_or_no_backend_never_blocks() {
+        assert!(!enforce_blocks(false, true, Some(false)));
+        assert!(!enforce_blocks(true, false, Some(false)));
+        assert!(!enforce_blocks(true, false, None));
     }
 }

@@ -426,7 +426,13 @@ pub async fn verify_image(
     let liveness = largest
         .as_ref()
         .and_then(|det| state.gallery.check_liveness(&rgb, det));
-    let blocked = state.gallery.liveness_enforce() && liveness.as_ref().is_some_and(|v| !v.is_real);
+    // Fail-closed: under enforcement, a missing verdict (no face box or an
+    // inference error) blocks just like an explicit spoof verdict.
+    let blocked = crate::liveness::enforce_blocks(
+        state.gallery.liveness_enforce(),
+        state.gallery.has_liveness(),
+        liveness.as_ref().map(|v| v.is_real),
+    );
     let threshold = state.gallery.cfg().threshold;
     match state.gallery.verify(&gray, &label).await {
         Some(sim) => Json(VerifyResult {
