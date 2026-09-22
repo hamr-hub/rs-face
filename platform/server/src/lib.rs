@@ -3,6 +3,7 @@
 //! 全部业务逻辑都在这里。
 
 pub mod api;
+pub mod arcface;
 pub mod cache;
 pub mod config;
 pub mod gallery;
@@ -14,4 +15,5 @@ pub mod persist;
 pub mod rate_limit;
 pub mod recognition;
 pub mod s3;
+pub mod scrfd;
 pub mod zip;

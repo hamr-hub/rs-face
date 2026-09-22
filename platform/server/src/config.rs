@@ -1,6 +1,44 @@
 //! 环境变量配置。所有项都有可在 docker-compose 中覆盖的默认值。
 
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// Force-selection for the ArcFace pipeline's ONNX backend.
+///
+/// `auto` defers to the compiled-in preference (`ort` over `tract`); the
+/// other variants pin the choice explicitly so an operator can stay on a
+/// pure-Rust CPU path or force the libonnxruntime-backed GPU path when both
+/// are available.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArcFaceBackend {
+    Auto,
+    Ort,
+    Tract,
+}
+
+impl ArcFaceBackend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ArcFaceBackend::Auto => "auto",
+            ArcFaceBackend::Ort => "ort",
+            ArcFaceBackend::Tract => "tract",
+        }
+    }
+}
+
+impl FromStr for ArcFaceBackend {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Ok(ArcFaceBackend::Auto),
+            "ort" => Ok(ArcFaceBackend::Ort),
+            "tract" => Ok(ArcFaceBackend::Tract),
+            other => Err(format!(
+                "RSFACE_ARCFACE_BACKEND={other:?} (expected auto|ort|tract)"
+            )),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -117,6 +155,38 @@ pub struct Config {
     /// runs — fail-closed protection against low-quality replays/prints.
     #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
     pub liveness_quality_gate: bool,
+    /// Directory holding the SCRFD 10G (5-keypoint) ONNX graph for
+    /// face detection + landmarks. The platform uses this when ArcFace
+    /// recognition is enabled — bare box detectors are useless for the
+    /// alignment that ArcFace demands.
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub arcface_models_dir: PathBuf,
+    /// When true (and the SCRFD + ArcFace ONNX graphs both load),
+    /// `/identify` and `/verify` use the SCRFD→ArcFace pipeline instead of
+    /// the in-tree random-init EmbedNet (which discriminates well within
+    /// a session but cannot ship real accuracy). Defaults to on when the
+    /// graphs are present, off when missing.
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub arcface_enabled: bool,
+    /// Force the ArcFace backend selection.
+    /// `auto` (default) picks the first compiled backend (ort over tract).
+    /// `tract` is pure Rust, CPU-only; `ort` requires `libonnxruntime.so`
+    /// (host install or vendored copy).
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub arcface_backend: ArcFaceBackend,
+    /// When the ArcFace pipeline is unavailable (graphs missing, malformed,
+    /// no backend compiled in), keep using the random-init EmbedNet instead
+    /// of failing the request. Off = hard fail at startup so the operator
+    /// notices; default on.
+    pub arcface_soft_fallback: bool,
+    /// Path to the SCRFD 10G graph file. `None` means
+    /// `{arcface_models_dir}/det_10g.onnx`.
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub scrfd_weights: Option<PathBuf>,
+    /// Path to the ArcFace R50 graph file. `None` means
+    /// `{arcface_models_dir}/w600k_r50.onnx`.
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub arcface_weights: Option<PathBuf>,
     /// Number of consecutive real frames a tracked face needs before it is
     /// confirmed live in video/stream jobs. `1` keeps the plain per-frame
     /// behaviour; higher values add fail-closed temporal defence.
@@ -236,6 +306,14 @@ impl Config {
                 .parse::<usize>()
                 .unwrap_or(1)
                 .max(1),
+            arcface_models_dir: PathBuf::from(env_or("RSFACE_ARCFACE_MODELS_DIR", "models")),
+            arcface_enabled: env_bool("RSFACE_ARCFACE_ENABLED", true),
+            arcface_backend: env_or("RSFACE_ARCFACE_BACKEND", "auto")
+                .parse::<ArcFaceBackend>()
+                .unwrap_or(ArcFaceBackend::Auto),
+            arcface_soft_fallback: env_bool("RSFACE_ARCFACE_SOFT_FALLBACK", true),
+            scrfd_weights: optional_path("RSFACE_SCRFD_WEIGHTS"),
+            arcface_weights: optional_path("RSFACE_ARCFACE_WEIGHTS"),
         }
     }
 }
