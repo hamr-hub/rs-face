@@ -233,7 +233,9 @@ mod tests {
     #[tokio::test]
     async fn first_request_allowed_with_full_bucket() {
         let rl = RateLimiter::new();
-        let d = rl.check("test", "1.1.1.1", policy_post().0, policy_post().1).await;
+        let d = rl
+            .check("test", "1.1.1.1", policy_post().0, policy_post().1)
+            .await;
         assert!(d.allowed);
         assert_eq!(d.remaining, 59);
     }

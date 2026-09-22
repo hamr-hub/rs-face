@@ -190,7 +190,10 @@ async fn rate_limit_middleware(
         let mut resp = error_response_with(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
-            &format!("rate limit exceeded for {ip}; try again in {}s", decision.retry_after_secs),
+            &format!(
+                "rate limit exceeded for {ip}; try again in {}s",
+                decision.retry_after_secs
+            ),
             Some("slow down request rate or distribute across IPs"),
         );
         let headers = resp.headers_mut();

@@ -11,8 +11,8 @@ mod jobs;
 mod liveness;
 mod metrics;
 mod persist;
-mod recognition;
 mod rate_limit;
+mod recognition;
 mod s3;
 mod zip;
 
@@ -202,9 +202,9 @@ async fn main() {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server error");
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("server error");
 
     tracing::info!("[rsface-platform] http drained, signalling jobs to stop");
     state.begin_shutdown();
