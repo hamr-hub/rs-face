@@ -3,6 +3,7 @@
 //! rsface-platform = rsface core(SDK)+ Web API + 任务引擎 + S3(rustfs)存储。
 
 mod api;
+mod arcface;
 mod cache;
 mod config;
 mod gallery;
@@ -14,6 +15,7 @@ mod persist;
 mod rate_limit;
 mod recognition;
 mod s3;
+mod scrfd;
 mod zip;
 
 use std::collections::HashMap;

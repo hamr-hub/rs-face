@@ -434,7 +434,7 @@ pub async fn verify_image(
         liveness.as_ref().map(|v| v.is_real),
     );
     let threshold = state.gallery.cfg().threshold;
-    match state.gallery.verify(&gray, &label).await {
+    match state.gallery.verify(&rgb, &gray, &label).await {
         Some(sim) => Json(VerifyResult {
             label,
             matched: sim >= threshold && !blocked,
