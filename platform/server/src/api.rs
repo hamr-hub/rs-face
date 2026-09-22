@@ -78,6 +78,7 @@ pub fn router(
         .route("/api/health", get(health))
         .route("/api/health/deep", get(health_deep))
         .route("/api/config", get(config_info))
+        .route("/api/liveness/quality-summary", get(liveness_quality_summary))
         .route("/api/metrics", get(metrics))
         .route("/metrics", get(prometheus_metrics))
         .route("/api/jobs", get(list_jobs))
@@ -675,6 +676,16 @@ async fn job_stats(State((state, caches)): State<(Arc<JobRegistry>, ResponseCach
     let bytes = serde_json::to_vec(&body).unwrap_or_default();
     caches.jobs_stats_json.put(bytes.clone());
     cached_json_response(bytes)
+}
+
+/// `GET /api/liveness/quality-summary`: per-verdict aggregate of the stored
+/// face quality signals, used to pick replay thresholds. Read-only; returns
+/// an empty summary when no pool is configured or no verdicts are stored.
+async fn liveness_quality_summary(
+    State((state, _)): State<(Arc<JobRegistry>, ResponseCaches)>,
+) -> Json<serde_json::Value> {
+    let rows = state.db.liveness_quality_summary().await;
+    Json(serde_json::json!({ "groups": rows }))
 }
 
 /// `GET /api/metrics`:平台实时指标(前端 KPI 栏每 2s 轮询)。

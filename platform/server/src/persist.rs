@@ -23,6 +23,19 @@ pub struct TelemetryEvent {
     pub path: Option<String>,
 }
 
+/// One row of the liveness calibration summary: aggregate signals for all
+/// faces sharing a verdict (`real` / `spoof`). Signal means are optional
+/// because a group may contain rows stored before those columns existed.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct QualitySummaryRow {
+    pub verdict: String,
+    pub samples: u64,
+    pub sharpness: Option<f32>,
+    pub mean_brightness: Option<f32>,
+    pub clipped_ratio: Option<f32>,
+    pub high_freq_ratio: Option<f32>,
+}
+
 #[derive(Clone)]
 pub struct Db {
     pub pool: Option<PgPool>, // None 时降级为不持久化
@@ -121,6 +134,10 @@ impl Db {
             (
                 "0007_face_quality.sql",
                 include_str!("../../migrations/0007_face_quality.sql"),
+            ),
+            (
+                "0008_face_verdict.sql",
+                include_str!("../../migrations/0008_face_verdict.sql"),
             ),
         ];
         let mut applied = 0u64;
@@ -468,10 +485,12 @@ impl Db {
         .execute(pool).await;
         for (i, face) in f.faces.iter().enumerate() {
             let quality = face.liveness.as_ref().and_then(|v| v.quality.as_ref());
+            let is_real = face.liveness.as_ref().map(|v| v.is_real);
             let _ = sqlx::query(
                 "INSERT INTO faces (job_id, frame_idx, face_idx, key, x, y, w, h, score,
-                                    sharpness, mean_brightness, clipped_ratio, high_freq_ratio)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING",
+                                    sharpness, mean_brightness, clipped_ratio, high_freq_ratio,
+                                    is_real, blocked)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT DO NOTHING",
             )
             .bind(job_id)
             .bind(f.index as i64)
@@ -486,6 +505,8 @@ impl Db {
             .bind(quality.map(|q| q.mean_brightness))
             .bind(quality.map(|q| q.clipped_ratio))
             .bind(quality.map(|q| q.high_freq_ratio))
+            .bind(is_real)
+            .bind(face.blocked)
             .execute(pool)
             .await;
         }
@@ -546,6 +567,8 @@ impl Db {
         let mut mean_brightness = Vec::with_capacity(total_faces);
         let mut clipped_ratio = Vec::with_capacity(total_faces);
         let mut high_freq_ratio = Vec::with_capacity(total_faces);
+        let mut is_real: Vec<Option<bool>> = Vec::with_capacity(total_faces);
+        let mut blocked = Vec::with_capacity(total_faces);
         for f in frames {
             for (i, face) in f.faces.iter().enumerate() {
                 let quality = face.liveness.as_ref().and_then(|v| v.quality.as_ref());
@@ -561,21 +584,77 @@ impl Db {
                 mean_brightness.push(quality.map(|q| q.mean_brightness));
                 clipped_ratio.push(quality.map(|q| q.clipped_ratio));
                 high_freq_ratio.push(quality.map(|q| q.high_freq_ratio));
+                is_real.push(face.liveness.as_ref().map(|v| v.is_real));
+                blocked.push(face.blocked);
             }
         }
         if let Err(e) = sqlx::query(
             "INSERT INTO faces (job_id, frame_idx, face_idx, key, x, y, w, h, score,
-                                sharpness, mean_brightness, clipped_ratio, high_freq_ratio)
+                                sharpness, mean_brightness, clipped_ratio, high_freq_ratio,
+                                is_real, blocked)
              SELECT $1, * FROM UNNEST($2::bigint[], $3::int[], $4::text[], $5::int[], $6::int[], $7::int[], $8::int[], $9::real[],
-                                      $10::real[], $11::real[], $12::real[], $13::real[])
+                                      $10::real[], $11::real[], $12::real[], $13::real[],
+                                      $14::bool[], $15::bool[])
              ON CONFLICT DO NOTHING"
         )
         .bind(job_id).bind(&fidx).bind(&face_idx).bind(&key)
         .bind(&x).bind(&y).bind(&w).bind(&h).bind(&score)
         .bind(&sharpness).bind(&mean_brightness).bind(&clipped_ratio).bind(&high_freq_ratio)
+        .bind(&is_real).bind(&blocked)
         .execute(pool).await
         {
             tracing::warn!("[persist] add_frames_batch faces failed: {e}");
+        }
+    }
+
+    /// Aggregate liveness quality signals grouped by the real/spoof verdict.
+    ///
+    /// This is the calibration summary: for faces on which liveness ran, it
+    /// returns one row per verdict group (`real` vs `spoof`) with the sample
+    /// count and the mean of each stored signal, so a threshold can be picked
+    /// where the two groups' distributions separate. Faces without a verdict
+    /// (`is_real IS NULL`) are excluded. Returns an empty vec with no pool.
+    pub async fn liveness_quality_summary(&self) -> Vec<QualitySummaryRow> {
+        let Some(pool) = &self.pool else {
+            return Vec::new();
+        };
+        let result = sqlx::query(
+            "SELECT
+                CASE WHEN is_real THEN 'real' ELSE 'spoof' END AS verdict,
+                COUNT(*)::bigint AS samples,
+                AVG(sharpness)       AS sharpness,
+                AVG(mean_brightness) AS mean_brightness,
+                AVG(clipped_ratio)   AS clipped_ratio,
+                AVG(high_freq_ratio) AS high_freq_ratio
+             FROM faces
+             WHERE is_real IS NOT NULL
+             GROUP BY is_real
+             ORDER BY is_real DESC",
+        )
+        .fetch_all(pool)
+        .await;
+        match result {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|r| QualitySummaryRow {
+                    verdict: r.get("verdict"),
+                    samples: r.get::<i64, _>("samples") as u64,
+                    sharpness: r.get::<Option<f64>, _>("sharpness").map(|v| v as f32),
+                    mean_brightness: r
+                        .get::<Option<f64>, _>("mean_brightness")
+                        .map(|v| v as f32),
+                    clipped_ratio: r
+                        .get::<Option<f64>, _>("clipped_ratio")
+                        .map(|v| v as f32),
+                    high_freq_ratio: r
+                        .get::<Option<f64>, _>("high_freq_ratio")
+                        .map(|v| v as f32),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!("[persist] liveness_quality_summary failed: {e}");
+                Vec::new()
+            }
         }
     }
 

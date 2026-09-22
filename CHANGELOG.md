@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — verdict labels and calibration summary endpoint
+- **Stored face rows now carry the liveness verdict, and a read-only
+  aggregation endpoint serves the calibration summary.** Migration
+  `0008_face_verdict.sql` adds a nullable `is_real` column plus `blocked` to
+  the `faces` table (NULL when liveness did not run), populated by both the
+  single and batched inserts. New
+  `GET /api/liveness/quality-summary` groups stored faces by verdict and
+  returns each group's sample count and mean `sharpness` /
+  `mean_brightness` / `clipped_ratio` / `high_freq_ratio`, so a replay
+  threshold can be read from where the `real` and `spoof` distributions
+  separate, aggregated across jobs and restarts. Returns an empty `groups`
+  list with no pool or no stored verdicts; blocking behaviour is unchanged.
+
 ### Added — persist per-face quality signals for threshold calibration
 - **The four liveness quality measurements are now stored on the `faces`
   table.** Migration `0007_face_quality.sql` adds nullable
