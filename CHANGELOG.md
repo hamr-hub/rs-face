@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — liveness verdicts carry quality measurements
+- **Each liveness verdict now includes a `quality` snapshot of the
+  native-resolution crop.** Quality is measured on every check (not just
+  when the quality gate blocks) and attached to the core
+  `LivenessOutcome::quality`; the platform serialises it per face as
+  `liveness.quality` (`sharpness`, `mean_brightness`, `clipped_ratio`,
+  `high_freq_ratio`, crop size) via a new `QualitySnapshot`. This lets the
+  replay signals be collected alongside real/spoof verdicts for threshold
+  calibration, instead of only being observable in-process. The blocking
+  behaviour is unchanged: gating still requires
+  `RSFACE_LIVENESS_QUALITY_GATE=true`, and the informational signals never
+  block on their own.
+
 ### Added — high-frequency replay signal in the quality report
 - **`QualityReport::high_freq_ratio`** measures the share of interior
   signal energy in fine detail: the mean-squared residual of the crop

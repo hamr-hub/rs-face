@@ -21,6 +21,34 @@ pub struct LivenessVerdict {
     pub is_real: bool,
     pub real_score: f32,
     pub label: String,
+    /// Native-crop quality measurements used to collect replay signals
+    /// (focus/exposure/clipping/high-frequency) for threshold calibration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<QualitySnapshot>,
+}
+
+/// Serializable subset of the core quality report returned per face.
+#[derive(Clone, Debug, Serialize)]
+pub struct QualitySnapshot {
+    pub width: usize,
+    pub height: usize,
+    pub sharpness: f32,
+    pub mean_brightness: f32,
+    pub clipped_ratio: f32,
+    pub high_freq_ratio: f32,
+}
+
+impl From<&rsface::quality::QualityReport> for QualitySnapshot {
+    fn from(q: &rsface::quality::QualityReport) -> Self {
+        Self {
+            width: q.width,
+            height: q.height,
+            sharpness: q.sharpness,
+            mean_brightness: q.mean_brightness,
+            clipped_ratio: q.clipped_ratio,
+            high_freq_ratio: q.high_freq_ratio,
+        }
+    }
 }
 
 /// Decide whether liveness enforcement blocks a detection.
@@ -132,6 +160,7 @@ impl Liveness {
             is_real: outcome.is_real,
             real_score: outcome.real_score,
             label: outcome.label().to_string(),
+            quality: outcome.quality.as_ref().map(QualitySnapshot::from),
         })
     }
 

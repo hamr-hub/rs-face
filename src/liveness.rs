@@ -177,6 +177,11 @@ pub struct LivenessOutcome {
     pub probs: [f32; NUM_CLASSES],
     /// Winning class index.
     pub class: usize,
+    /// Measured native-crop quality statistics when the detector computed
+    /// them (`sharpness`, `high_freq_ratio`, exposure, clipping). Surfaced so
+    /// callers can collect the signals alongside each verdict for threshold
+    /// calibration; `None` for outcomes built without a quality measurement.
+    pub quality: Option<crate::quality::QualityReport>,
 }
 
 impl LivenessOutcome {
@@ -235,6 +240,7 @@ pub fn decide(rows: &[[f32; NUM_CLASSES]], config: &LivenessConfig) -> Option<Li
         real_score,
         probs: avg,
         class,
+        quality: None,
     })
 }
 

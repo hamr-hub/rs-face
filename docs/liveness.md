@@ -111,6 +111,12 @@ preset. Enable with `RSFACE_LIVENESS_QUALITY_GATE=true`. A rejected crop is
 reported with label `low quality` and is treated exactly like a spoof verdict
 under enforcement.
 
+The statistics are measured on **every** check (whether or not gating is on)
+and ride along on the verdict: in the platform JSON each face's `liveness`
+object carries a `quality` snapshot (`sharpness`, `mean_brightness`,
+`clipped_ratio`, `high_freq_ratio`, crop size), so the replay signals can be
+collected alongside real verdicts to calibrate thresholds.
+
 ## Temporal voting
 
 For video / live-stream jobs, a face can additionally be required to look real
