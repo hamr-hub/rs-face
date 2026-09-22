@@ -467,10 +467,7 @@ impl Db {
         .bind(&f.annotated_key).bind(&f.original_key)
         .execute(pool).await;
         for (i, face) in f.faces.iter().enumerate() {
-            let quality = face
-                .liveness
-                .as_ref()
-                .and_then(|v| v.quality.as_ref());
+            let quality = face.liveness.as_ref().and_then(|v| v.quality.as_ref());
             let _ = sqlx::query(
                 "INSERT INTO faces (job_id, frame_idx, face_idx, key, x, y, w, h, score,
                                     sharpness, mean_brightness, clipped_ratio, high_freq_ratio)
@@ -551,10 +548,7 @@ impl Db {
         let mut high_freq_ratio = Vec::with_capacity(total_faces);
         for f in frames {
             for (i, face) in f.faces.iter().enumerate() {
-                let quality = face
-                    .liveness
-                    .as_ref()
-                    .and_then(|v| v.quality.as_ref());
+                let quality = face.liveness.as_ref().and_then(|v| v.quality.as_ref());
                 fidx.push(f.index as i64);
                 face_idx.push(i as i32);
                 key.push(face.key.clone());
