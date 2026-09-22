@@ -946,13 +946,19 @@ impl JobRegistry {
             && self.gallery.has_liveness()
             && matches!(job.kind, JobKind::Video | JobKind::Stream);
         let mut face_tracker = rsface::tracker::FaceTracker::default();
+        // Per-track streak paired with the frame it was last seen, so tracks
+        // that leave the frame can be pruned instead of accumulating for the
+        // whole (possibly endless) live stream.
         let mut temporal_votes: std::collections::HashMap<
             u32,
-            rsface::liveness::TemporalVote,
+            (rsface::liveness::TemporalVote, u64),
         > = std::collections::HashMap::new();
         let temporal_cfg = rsface::liveness::TemporalConfig {
             required_frames: temporal_n,
         };
+        // Drop a streak after this many frames unseen; comfortably above the
+        // tracker's `max_age` so a briefly occluded face is not forgotten.
+        let temporal_retire_after = 60u64;
         // 批量 DB 写缓冲(20 帧一批;cancel/done 路径都会 flush)。
         let mut db_pending: Vec<FrameResult> = Vec::new();
         // 已产出的人脸裁剪总数(跨帧累计)。旧实现每帧都 lock frames 把
@@ -1064,16 +1070,29 @@ impl JobRegistry {
                         // Feed this track's streak and gate enforcement on
                         // fail-closed temporal confirmation.
                         let track_id = tracked.get(idx).map(|t| t.id).unwrap_or(0);
-                        let vote = temporal_votes
+                        let entry = temporal_votes
                             .entry(track_id)
-                            .or_insert_with(|| rsface::liveness::TemporalVote::new(&temporal_cfg));
-                        vote.observe(
+                            .or_insert_with(|| {
+                                (
+                                    rsface::liveness::TemporalVote::new(&temporal_cfg),
+                                    frame.index,
+                                )
+                            });
+                        entry.1 = frame.index;
+                        entry.0.observe(
                             live.as_ref().is_some_and(|v| v.is_real),
                             live.as_ref().map(|v| v.real_score).unwrap_or(0.0),
                         );
-                        if !vote.confirmed() {
+                        if !entry.0.confirmed() {
                             // Still warming up: not a confirmed live face.
                             blocked = self.gallery.liveness_enforce();
+                        }
+                        // Periodically prune streaks of tracks that left the
+                        // frame so a long stream's memory stays bounded.
+                        if frame.index.is_multiple_of(temporal_retire_after) {
+                            temporal_votes.retain(|_, (_, last)| {
+                                streak_alive(*last, frame.index, temporal_retire_after)
+                            });
                         }
                     }
                     if live.as_ref().is_some_and(|v| !v.is_real) {
@@ -1354,6 +1373,12 @@ fn frame_rgb(frame: &Frame) -> RgbImage {
         Some(rgb) => clone_rgb(rgb),
         None => RgbImage::from_gray(&frame.gray),
     }
+}
+
+/// Whether a temporal streak is still retained given the frame it was last
+/// seen on. A track unseen for `retire_after` frames or more is pruned.
+fn streak_alive(last_seen: u64, current: u64, retire_after: u64) -> bool {
+    current.saturating_sub(last_seen) < retire_after
 }
 
 fn clone_rgb(src: &RgbImage) -> RgbImage {
@@ -2098,6 +2123,15 @@ mod tests {
     fn agg_empty_input_yields_empty_map() {
         let agg = aggregate_algo_stats(&[]);
         assert!(agg.is_empty());
+    }
+
+    #[test]
+    fn streak_retention_tracks_unseen_window() {
+        assert!(streak_alive(100, 100, 60), "seen this frame stays");
+        assert!(streak_alive(100, 140, 60), "recently seen stays");
+        assert!(!streak_alive(100, 160, 60), "exactly at the window is pruned");
+        assert!(!streak_alive(100, 200, 60), "long unseen is pruned");
+        assert!(streak_alive(200, 100, 60), "non-monotonic input never underflows");
     }
 
     /// 背压:queued 计数达到 max_queue_depth 时 create 返回 Err,
