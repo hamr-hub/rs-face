@@ -12,6 +12,7 @@ mod liveness;
 mod metrics;
 mod persist;
 mod recognition;
+mod rate_limit;
 mod s3;
 mod zip;
 
@@ -178,7 +179,8 @@ async fn main() {
         )),
     };
 
-    let app = api::router(state.clone(), caches);
+    let rate_limiter = Arc::new(rate_limit::RateLimiter::new());
+    let app = api::router(state.clone(), caches, rate_limiter);
 
     // 死锁 janitor:周期扫描 stale running 行。DB 不可用时 janitor 静默
     // 无害(reap_orphans + heartbeat 写入路径在 DB None 时早返回)。
@@ -196,7 +198,10 @@ async fn main() {
     //    下一个 frame 边界响应,长任务秒级退出,挂死的由 watchdog 超时兜底);
     // 3) 等 active 任务归零(上限 shutdown_grace_secs),给 fire-and-forget
     //    的 tokio::spawn DB 写入留出 flush 窗口,再退出进程。
-    axum::serve(listener, app)
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server error");

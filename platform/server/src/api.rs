@@ -62,13 +62,18 @@ pub struct ResponseCaches {
     pub jobs_stats_json: Arc<TtlCache>,
 }
 
-pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
+pub fn router(
+    state: Arc<JobRegistry>,
+    caches: ResponseCaches,
+    rate_limiter: Arc<crate::rate_limit::RateLimiter>,
+) -> Router {
     // 上传上限分层:图片(默认 50MB)/ 视频(默认 2GB)。
     // 全局不再用 1GB 统一限制;其它路由(JSON/SSE)走 axum 默认 2MB。
     let img_limit = state.cfg.upload_limit_image;
     let video_limit = state.cfg.upload_limit_video;
     let cors_origin = state.cfg.cors_allow_origin.clone();
     let caches_for_routes = caches.clone();
+    let rl_for_layer = rate_limiter.clone();
     Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
@@ -143,6 +148,9 @@ pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
             post(super::gallery_handlers::verify_image).layer(DefaultBodyLimit::max(img_limit)),
         )
         .layer(axum::middleware::from_fn(move |req, next| {
+            rate_limit_middleware(req, next, rl_for_layer.clone())
+        }))
+        .layer(axum::middleware::from_fn(move |req, next| {
             cors_middleware(req, next, cors_origin.clone())
         }))
         // gzip 压缩层(>~1KB 自动启用,小响应直接走透传)。
@@ -154,6 +162,81 @@ pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
             HeaderValue::from_static("public, max-age=600, stale-while-revalidate=86400"),
         ))
         .with_state((state, caches_for_routes))
+}
+
+/// per-IP 限流中间件。写路径（POST/DELETE `/api/jobs*`、`/api/import*`）
+/// 60/min；同路径 GET 600/min；SSE / 健康检查 / 静态资源不限流。
+/// 拒绝时返回 429 + Retry-After + `error_code=rate_limited`。
+async fn rate_limit_middleware(
+    req: axum::extract::Request,
+    next: Next,
+    limiter: Arc<crate::rate_limit::RateLimiter>,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let method = req.method().clone();
+    let (scope, capacity, refill) = match (method.as_str(), classify_route(&path)) {
+        ("POST", RouteKind::Limited) | ("DELETE", RouteKind::Limited) => ("write", 60u32, 1.0f64),
+        ("GET", RouteKind::Limited) => ("read", 600u32, 10.0f64),
+        _ => return next.run(req).await,
+    };
+    let ip = crate::rate_limit::ip_from_request(
+        req.extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0),
+        req.headers(),
+    );
+    let decision = limiter.check(scope, &ip, capacity, refill).await;
+    if !decision.allowed {
+        let mut resp = error_response_with(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            &format!("rate limit exceeded for {ip}; try again in {}s", decision.retry_after_secs),
+            Some("slow down request rate or distribute across IPs"),
+        );
+        let headers = resp.headers_mut();
+        headers.insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_str(&decision.retry_after_secs.to_string())
+                .unwrap_or(HeaderValue::from_static("1")),
+        );
+        headers.insert(
+            axum::http::HeaderName::from_static("x-ratelimit-limit"),
+            HeaderValue::from_str(&capacity.to_string()).unwrap_or(HeaderValue::from_static("60")),
+        );
+        headers.insert(
+            axum::http::HeaderName::from_static("x-ratelimit-remaining"),
+            HeaderValue::from_static("0"),
+        );
+        return resp;
+    }
+    let mut resp = next.run(req).await;
+    let headers = resp.headers_mut();
+    headers.insert(
+        axum::http::HeaderName::from_static("x-ratelimit-limit"),
+        HeaderValue::from_str(&capacity.to_string()).unwrap_or(HeaderValue::from_static("60")),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static("x-ratelimit-remaining"),
+        HeaderValue::from_str(&decision.remaining.to_string())
+            .unwrap_or(HeaderValue::from_static("0")),
+    );
+    resp
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum RouteKind {
+    Limited,
+    Other,
+}
+
+fn classify_route(path: &str) -> RouteKind {
+    if path.ends_with("/events") {
+        return RouteKind::Other;
+    }
+    if path.starts_with("/api/jobs") || path.starts_with("/api/import") {
+        return RouteKind::Limited;
+    }
+    RouteKind::Other
 }
 
 /// 可选 CORS 中间件:`CORS_ALLOW_ORIGIN` 非空时启用(默认空 = 同源部署,
