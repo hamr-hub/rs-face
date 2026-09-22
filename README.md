@@ -269,6 +269,18 @@ out/
 }
 ```
 
+### Helper binaries
+
+Feature-gated tools ship alongside the detector:
+
+```sh
+tools/fetch_models.sh
+# silent anti-spoofing on one image (SCRFD face + two-model MiniFASNet);
+# exit 0 live / 1 spoof or error / 2 bad arguments
+cargo run --release --features tract-backend --bin liveness_check -- \
+    --models models photo.jpg
+```
+
 ## Examples
 
 Every example is `cargo run --example <name>` — no ffmpeg, no model download
