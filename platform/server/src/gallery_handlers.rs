@@ -348,6 +348,10 @@ pub struct VerifyResult {
     pub matched: bool,
     pub similarity: f32,
     pub threshold: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<crate::liveness::LivenessVerdict>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
 }
 
 pub async fn verify_image(
@@ -410,13 +414,23 @@ pub async fn verify_image(
         Some(g) => g,
         None => return classify_enroll_err("decode_failed"),
     };
+    let rgb = decode_rgb(&bytes).unwrap_or_else(|| rsface::image::RgbImage::from_gray(&gray));
+    // Liveness needs a face box: run Haar and take the largest detection.
+    let detector = build_detector("haar", &state.cfg.cascade_path);
+    let largest = detector.and_then(|d| largest_detection(&d.detect(&gray)));
+    let liveness = largest
+        .as_ref()
+        .and_then(|det| state.gallery.check_liveness(&rgb, det));
+    let blocked = state.gallery.liveness_enforce() && liveness.as_ref().is_some_and(|v| !v.is_real);
     let threshold = state.gallery.cfg().threshold;
     match state.gallery.verify(&gray, &label).await {
         Some(sim) => Json(VerifyResult {
             label,
-            matched: sim >= threshold,
+            matched: sim >= threshold && !blocked,
             similarity: sim,
             threshold,
+            liveness,
+            blocked,
         })
         .into_response(),
         None => error_response_with(
@@ -470,6 +484,11 @@ fn decode_rgb(bytes: &[u8]) -> Option<rsface::image::RgbImage> {
         return Some(rgb);
     }
     decode_gray(bytes).map(|g| rsface::image::RgbImage::from_gray(&g))
+}
+
+/// Pick the largest-area detection (used to locate one face for liveness).
+fn largest_detection(dets: &[rsface::face::Detection]) -> Option<rsface::face::Detection> {
+    dets.iter().max_by_key(|d| d.w.saturating_mul(d.h)).cloned()
 }
 
 fn build_detector(algo: &str, cascade_path: &std::path::Path) -> Option<DetectorKind> {
