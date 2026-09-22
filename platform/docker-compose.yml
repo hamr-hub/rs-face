@@ -124,12 +124,18 @@ services:
       # 跨域前端(留空 = 同源部署,不开 CORS)
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-}
       RSFACE_GALLERY_DIR: /var/rsface-gallery
+      # 静默活体(需以 --features liveness 构建镜像;模型见 tools/fetch_models.sh)
+      RSFACE_LIVENESS_ENABLED: ${RSFACE_LIVENESS_ENABLED:-false}
+      RSFACE_LIVENESS_MODELS_DIR: /var/rsface-models
+      RSFACE_LIVENESS_MIN_REAL_SCORE: ${RSFACE_LIVENESS_MIN_REAL_SCORE:-0.0}
     volumes:
       # bind mount 到 data/media/ (项目内,跟随代码可见)。
       - ../data/media:/var/rsface-media
       # 注册人脸画廊(每个子目录一个身份)。目录可为空:为空时
       # /recognize 返回 no_gallery,不影响检测类接口。
       - ../data/gallery:/var/rsface-gallery
+      # MiniFASNet 活体模型目录。可留空:liveness 关闭时不会被读取。
+      - ../data/models:/var/rsface-models
     healthcheck:
       # host 网络模式下容器内 wget 打自己端口(alpine 镜像没装 curl)。
       test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:20080/api/health >/dev/null 2>&1 || exit 1"]
