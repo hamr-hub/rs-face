@@ -88,9 +88,16 @@ models/*.caffemodel
 models/*.prototxt
 models/*.cfg
 models/*.names
+models/*.zip
 models/scrap*
 models/checkpoints*
 models/inspect*
+
+# Local secrets / environment overrides (the .env.example template stays tracked)
+platform/.env
+
+# Nested Cargo build output for standalone tool crates under tools/
+tools/*/target/
 
 # ---- Local tooling / OS junk ----
 .meta.yaml
