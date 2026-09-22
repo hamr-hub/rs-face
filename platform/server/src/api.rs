@@ -78,7 +78,10 @@ pub fn router(
         .route("/api/health", get(health))
         .route("/api/health/deep", get(health_deep))
         .route("/api/config", get(config_info))
-        .route("/api/liveness/quality-summary", get(liveness_quality_summary))
+        .route(
+            "/api/liveness/quality-summary",
+            get(liveness_quality_summary),
+        )
         .route("/api/metrics", get(metrics))
         .route("/metrics", get(prometheus_metrics))
         .route("/api/jobs", get(list_jobs))
