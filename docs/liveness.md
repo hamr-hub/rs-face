@@ -126,6 +126,17 @@ confidence than any single frame.
   blocked boxes are drawn red, normal boxes green, and each `FaceEntry` carries
   its verdict.
 
+### Fail-closed on error
+
+Under enforcement (`RSFACE_LIVENESS_ENFORCE=true`) the gate needs a positive
+real verdict; a **missing** verdict is treated as a spoof verdict. When the
+liveness backend is loaded but a check returns nothing — no face box found,
+an inference error, or a poisoned shared lock — both `/api/verify` and the
+video/stream jobs block the detection rather than letting it through. This
+prevents an attacker from triggering an error to slip past the gate. When
+enforcement is off the verdict stays purely informational, and with no
+backend loaded nothing is ever blocked.
+
 ### Metrics
 
 Per-job `JobStats` records `spoof_detections` and `blocked_detections`; the
