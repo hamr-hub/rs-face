@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — e2e liveness screen attack carries an LCD-grid cue
+- **The synthesised screen-replay sample in `liveness_e2e` now overlays a
+  fine LCD pixel lattice plus a moiré beat.** The previous sample only
+  applied mild blur and a tiny chroma shift, so it carried no replay texture
+  and MiniFASNet correctly still judged it real (0.98), making the test's
+  "screen must not pass" assertion fail rather than testing a real cue. The
+  new `overlay_screen_grid` helper drives the sample to the screen class
+  (real 0.17 / screen 0.83) while the untouched face stays 0.997; the suite
+  reports FAR 0.00.
+
 ### Added — `liveness_check` command-line tool
 - **New feature-gated bin `liveness_check` runs silent anti-spoofing on one
   image without the server.** It decodes PNG/JPG/PPM, finds the largest face
