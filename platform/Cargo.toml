@@ -48,8 +48,18 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["e
 [features]
 # Default build stays lean (pure-Haar, no ONNX runtime). Enable `liveness`
 # to pull in rs-face's pure-Rust tract ONNX backend for MiniFASNet anti-spoofing.
-default = []
-liveness = ["rsface/tract-backend"]
+# The platform server always ships the ONNX stack in the deployed image and
+# its GalleryState is built around SCRFD + ArcFace + liveness, so make those
+# part of the default feature (the core rs-face crate stays zero-dep; this
+# only affects the platform, which already depends on axum/sqlx/tokio).
+# A bare-Haar build is still possible with `--no-default-features`.
+default = ["liveness", "arcface"]
+# ArcFace/SCRFD recognition needs an ONNX backend (tract). The two wrappers
+# (server/src/{arcface,scrfd}.rs) are cfg-gated on this feature.
+arcface = ["rsface/tract-backend"]
+# Liveness uses the same tract backend; enabling it also brings ArcFace since
+# both ship in the deployed image and share the backend.
+liveness = ["rsface/tract-backend", "arcface"]
 
 [dev-dependencies]
 # Integration tests also exercise rs-face types directly (decoding, Detection).
