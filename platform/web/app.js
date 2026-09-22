@@ -2541,7 +2541,7 @@ const hashRouter = (() => {
       preview.open(r.id);
     }
   }
-  return { bind, setJob, clear, parse };
+  return { bind, setJob, clear, parse, maybeOpen };
 })();
 
 document.addEventListener('DOMContentLoaded', init);

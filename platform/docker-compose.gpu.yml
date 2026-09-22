@@ -115,6 +115,9 @@ services:
       LOCAL_MEDIA_DIR: /var/rsface-media
       # 走 cuda-backend(cudarc + NVRTC),不走 OpenCL(Jetson 驱动不发 OpenCL ICD)。
       RSFACE_USE_GPU: ${RSFACE_USE_GPU:-1}
+      # filesystem face gallery(每个子目录一个身份)→ host data/gallery/。
+      # /api/jobs/{id}/recognize 走的是这条;JS-only 方案走 PG(persons/person_faces)。
+      RSFACE_GALLERY_DIR: ${RSFACE_GALLERY_DIR:-/var/rsface-gallery}
       # 4 并发(Orin 默认显存 / 算力可支撑),对齐老 GPU compose 设。
       MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-4}
       # 背压 + 超时(与 CPU 版对齐)。
@@ -151,4 +154,7 @@ services:
       # bind mount 到 data/media/(项目内,跟随代码)。容器内 uid=1000
       # 对应 host hyx(uid 1000),bind mount 后目录天然是 1000:1000 可写。
       - ../data/media:/var/rsface-media
+      # bind mount 到 data/gallery/(LFW 70 个身份的 per-person 子目录),
+      # 让 /api/jobs/{id}/recognize 能加载 eigenface / fisherface / LBPH 模型。
+      - ../data/gallery:/var/rsface-gallery:ro
     restart: unless-stopped

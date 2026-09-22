@@ -7,9 +7,12 @@ use rsface::detector::{Detector, DetectorConfig};
 use rsface::face_detector::FaceDetector;
 use rsface::haar::bundled::bundled_frontalface_cascade;
 use rsface::haar::Cascade;
+use rsface::hog_face::{HogConfig, HogFaceDetector};
 use rsface::image::GrayImage;
+use rsface::lbp_face::{LbpConfig, LbpFaceDetector};
 use rsface::luminance_face::{LuminanceConfig, LuminanceFaceDetector};
 use rsface::pipeline::{Pipeline, PipelineConfig};
+use rsface::skin_face::{SkinConfig, SkinFaceDetector};
 use rsface::source;
 
 fn print_help() {
@@ -334,7 +337,16 @@ fn main() {
     // yunet / mtcnn / hog were placeholder detectors and have been removed;
     // scrfd / arcface names stay recognised so users get a precise fallback
     // message pointing at the ONNX feature-gated example rather than a typo hint.
-    let known: &[&str] = &["haar", "cnn", "luminance", "scrfd", "arcface"];
+    let known: &[&str] = &[
+        "haar",
+        "cnn",
+        "luminance",
+        "skin",
+        "lbp",
+        "hog",
+        "scrfd",
+        "arcface",
+    ];
     if !known.contains(&algo_name.as_str()) {
         let suggestion = did_you_mean(&algo_name, known);
         match suggestion {
@@ -554,6 +566,39 @@ fn main() {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("luminance pipeline error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "skin" => {
+            match run_with_detector(&mut *src, &out, &cfg, |img: &GrayImage| {
+                SkinFaceDetector::new(SkinConfig::default()).detect(img)
+            }) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("skin pipeline error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "lbp" => {
+            match run_with_detector(&mut *src, &out, &cfg, |img: &GrayImage| {
+                LbpFaceDetector::new(LbpConfig::default()).detect(img)
+            }) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("lbp pipeline error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "hog" => {
+            match run_with_detector(&mut *src, &out, &cfg, |img: &GrayImage| {
+                HogFaceDetector::new(HogConfig::default()).detect(img)
+            }) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("hog pipeline error: {}", e);
                     std::process::exit(1);
                 }
             }

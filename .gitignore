@@ -118,3 +118,4 @@ platform/scripts/web-shots.cjs
 # Intermediate screenshot / DOM artifact from the above tools
 platform/web/.__light.html
 /tmp/rsface-shots/
+platform/logs/

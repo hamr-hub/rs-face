@@ -241,6 +241,11 @@ pub mod pool;
 pub mod cnn;
 #[cfg(feature = "detector-luminance")]
 pub mod luminance_face;
+// 新增零依赖检测器（肤色带 / LBP 直方图 / HOG 线性模板）。各自独立、
+// 无外部依赖，始终编译；与 ensemble 的契约只用核心类型 Detection/iou。
+pub mod hog_face;
+pub mod lbp_face;
+pub mod skin_face;
 
 // Multi-algorithm ensemble fuser. No external deps and no detector
 // gate — `Detection` and `iou` are core types available in every
