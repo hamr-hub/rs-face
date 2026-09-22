@@ -104,6 +104,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests: 10 unit tests plus a real-weight end-to-end check
   (`tests/liveness_e2e.rs`) which classifies the Lena face as real with
   `real_score = 0.997`.
+- **Liveness enforcement across every entry point** — the optional platform
+  `liveness` feature runs MiniFASNet per detection: `POST /api/identify`
+  (1:N), `POST /api/verify` (1:1) and video/live-stream frames. With
+  `RSFACE_LIVENESS_ENFORCE=true`, non-real faces get no identity matches and
+  a `blocked` flag (blocked boxes draw red); enforcement never blocks a real
+  face. A `/verify` call without liveness no longer runs an unused Haar
+  detection.
+- **Per-job and global spoof totals** — `JobStats` records
+  `spoof_detections` / `blocked_detections` (migration `0006`) and the
+  metrics endpoint exports `rsface_spoof_detections_total` /
+  `rsface_blocked_detections_total`.
+- The runtime-free `liveness` core now ships in the default zero-dependency
+  build (its 11 unit tests run without a backend feature); only
+  `liveness_detector` remains ONNX-feature gated. See `docs/liveness.md`.
 
 ### Added — multi-algorithm ensemble fuser
 - **`src/ensemble.rs`** — `TaggedDetection` + `fuse()` greedy cluster
