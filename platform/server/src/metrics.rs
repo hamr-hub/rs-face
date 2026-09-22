@@ -42,6 +42,10 @@ pub struct PlatformMetrics {
     pub total_frames_with_face: u64,
     /// 累计检测数。
     pub total_detections: u64,
+    /// 累计假脸检测数(活体判定非真)。
+    pub total_spoof_detections: u64,
+    /// 累计强制拦截数。
+    pub total_blocked_detections: u64,
     /// 累计 GPU 跑过的 pyramid level 数(per-detector 累加)。
     pub total_gpu_levels: u64,
     /// 累计 CPU 跑过的 pyramid level 数。
@@ -91,6 +95,8 @@ impl PlatformMetrics {
         let mut total_frames = 0u64;
         let mut total_faces_frames = 0u64;
         let mut total_dets = 0u64;
+        let mut total_spoof = 0u64;
+        let mut total_blocked = 0u64;
         // GPU / cascade / fps 细项暂未在 `JobStats` 上建模,先填 0,
         // 后续 run_job 加字段时再回来打开这些求和(代码留了骨架,见
         // `total_gpu += st.gpu_levels` 那行注释掉的位置)。
@@ -120,6 +126,8 @@ impl PlatformMetrics {
             total_frames += st.frames_processed;
             total_faces_frames += st.frames_with_face;
             total_dets += st.total_detections;
+            total_spoof += st.spoof_detections;
+            total_blocked += st.blocked_detections;
             // 高级字段(JobStats 暂无),保留求和骨架:
             // total_gpu += st.gpu_levels;
             // total_cpu += st.cpu_levels;
@@ -170,6 +178,8 @@ impl PlatformMetrics {
             total_frames_processed: total_frames,
             total_frames_with_face: total_faces_frames,
             total_detections: total_dets,
+            total_spoof_detections: total_spoof,
+            total_blocked_detections: total_blocked,
             total_gpu_levels: total_gpu,
             total_cpu_levels: total_cpu,
             total_gpu_skipped_levels: total_skipped,
@@ -257,6 +267,20 @@ pub fn to_prometheus(m: &PlatformMetrics) -> String {
         "Total face detections",
         m,
         &|m| m.total_detections as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_spoof_detections_total",
+        "Total spoof (non-real) detections",
+        m,
+        &|m| m.total_spoof_detections as f64,
+    );
+    push_g(
+        &mut out,
+        "rsface_blocked_detections_total",
+        "Total detections blocked by liveness enforcement",
+        m,
+        &|m| m.total_blocked_detections as f64,
     );
     // 下列指标在 JSON 契约中保留(前端有降级展示),但尚未在 JobStats 上
     // 建模、恒为 0,不向 Prometheus 输出空序列:gpu/cpu_levels、
