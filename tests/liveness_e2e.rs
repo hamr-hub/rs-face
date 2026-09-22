@@ -43,6 +43,7 @@ fn detector() -> LivenessDetector {
         Some(&models::LIVENESS_MINIFASNET_V1SE),
         &SessionConfig::default(),
         LivenessConfig::default(),
+        rsface::quality::QualityConfig::default(),
     )
     .expect("LivenessDetector::open")
 }
