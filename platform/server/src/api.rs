@@ -47,7 +47,6 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
 use tower_http::compression::CompressionLayer;
-use tower_http::set_header::SetResponseHeaderLayer;
 
 /// 跨 handler 共享的 TTL 响应缓存。每条缓存可独立失效,粒度到端点。
 #[derive(Clone)]
@@ -155,13 +154,34 @@ pub fn router(
         }))
         // gzip 压缩层(>~1KB 自动启用,小响应直接走透传)。
         .layer(CompressionLayer::new())
-        // 静态资源缓存头:web/* 1h+stale-while-revalidate 24h,
-        // 让浏览器/CDN 把 /app.js / /style.css / 字体等强缓存。
-        .layer(SetResponseHeaderLayer::if_not_present(
-            axum::http::HeaderName::from_static("cache-control"),
-            HeaderValue::from_static("public, max-age=600, stale-while-revalidate=86400"),
-        ))
+        // 缓存策略按路径区分:静态资源(/、/{file})给 1h+stale-while-revalidate
+        // 24h 强缓存;/media/* 由其 handler 自行声明缓存;/api/* 动态接口必须
+        // no-store,否则浏览器会把任务 running 状态缓存住,轮询永远拿到旧值。
+        .layer(axum::middleware::from_fn(cache_control_middleware))
         .with_state((state, caches_for_routes))
+}
+
+/// 按路径注入 Cache-Control。之前用全局 `SetResponseHeaderLayer` 一刀切,
+/// 导致 `/api/jobs/{id}` 的动态响应也被强缓存 10 分钟:任务刚创建时响应是
+/// `running`,浏览器后续轮询直接命中缓存,页面永远停在 running。
+async fn cache_control_middleware(
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let mut resp = next.run(req).await;
+    // 已有缓存头(/media/* handler 自带)就尊重,不覆盖。
+    if resp.headers().contains_key(header::CACHE_CONTROL) {
+        return resp;
+    }
+    let value = if path.starts_with("/api/") {
+        HeaderValue::from_static("no-store")
+    } else {
+        // 静态入口 / 与 /{file}(app.js / style.css 等)。
+        HeaderValue::from_static("public, max-age=600, stale-while-revalidate=86400")
+    };
+    resp.headers_mut().insert(header::CACHE_CONTROL, value);
+    resp
 }
 
 /// per-IP 限流中间件。写路径（POST/DELETE `/api/jobs*`、`/api/import*`）
@@ -737,7 +757,10 @@ async fn job_detail(
                     .unwrap_or_default();
             Json(v).into_response()
         }
-        None => error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None),
+        None => match state.db.get_job(&id).await {
+            Some(job) => Json(job).into_response(),
+            None => error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None),
+        },
     }
 }
 
@@ -931,17 +954,26 @@ async fn compare_algos(
     const COMPARE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
     // 2) 拿到 job 对应的原始媒体字节(S3 优先,失败回退到 local media dir)。
-    let job = match state.get(&id) {
-        Some(j) => j,
-        None => {
-            return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None)
-        }
+    let live_job = state.get(&id);
+    let persisted_job = if live_job.is_none() {
+        state.db.get_job(&id).await
+    } else {
+        None
     };
-    let media_key = job
-        .original_media_key
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    if live_job.is_none() && persisted_job.is_none() {
+        return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None);
+    }
+    let media_key = if let Some(job) = &live_job {
+        job.original_media_key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    } else {
+        persisted_job
+            .as_ref()
+            .and_then(|job| job.get("original_key").and_then(|key| key.as_str()))
+            .map(str::to_string)
+    };
     let media_key = match media_key {
         Some(k) => k,
         None => {
@@ -1129,15 +1161,39 @@ async fn recognize_job(
         );
     }
 
-    let Some(job) = state.get(&id) else {
-        return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None);
+    let live_job = state.get(&id);
+    let persisted = if live_job.is_none() {
+        state.db.get_job(&id).await
+    } else {
+        None
     };
-    let Some(media_key) = job
-        .original_media_key
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    else {
+    if live_job.is_none() && persisted.is_none() {
+        return error_response_with(StatusCode::NOT_FOUND, "no_such_job", "no such job", None);
+    }
+    let kind_str = match &live_job {
+        Some(j) => match j.kind {
+            crate::jobs::JobKind::Image => "image",
+            crate::jobs::JobKind::Video => "video",
+            crate::jobs::JobKind::Stream => "stream",
+        }.to_string(),
+        None => persisted
+            .as_ref()
+            .and_then(|j| j.get("kind").and_then(|k| k.as_str()))
+            .unwrap_or("")
+            .to_string(),
+    };
+    let media_key = if let Some(job) = &live_job {
+        job.original_media_key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    } else {
+        persisted
+            .as_ref()
+            .and_then(|j| j.get("original_key").and_then(|k| k.as_str()))
+            .map(str::to_string)
+    };
+    let Some(media_key) = media_key else {
         return error_response_with(
             StatusCode::NOT_FOUND,
             "no_media",
@@ -1145,7 +1201,7 @@ async fn recognize_job(
             Some("re-upload the image and retry"),
         );
     };
-    if job.kind != crate::jobs::JobKind::Image {
+    if kind_str != "image" {
         return error_response_with(
             StatusCode::BAD_REQUEST,
             "not_image_job",
@@ -1251,8 +1307,9 @@ async fn recognize_job(
     }
 
     // per-job 缓存命中 → 直接返回(0 次检测、0 次识别)。
+    // 仅内存 live job 有缓存载体;历史 PG 任务直接计算。
     let cache_key = format!("{}|{}|{}", id, detector_name, media_key);
-    {
+    if let Some(job) = &live_job {
         let cache = job
             .recognize_cache
             .lock()
@@ -1304,7 +1361,7 @@ async fn recognize_job(
         "faces": faces,
     });
     // 写 per-job 缓存(下一次相同 (job_id, detector, media_key) 直接 hit)。
-    {
+    if let Some(job) = &live_job {
         let body_for_cache = body.clone();
         let mut cache = job
             .recognize_cache

@@ -196,4 +196,37 @@ mod tests {
         assert!(!enforce_blocks(true, false, Some(false)));
         assert!(!enforce_blocks(true, false, None));
     }
+
+    #[test]
+    fn quality_snapshot_serialises_the_calibration_contract() {
+        use rsface::image::GrayImage;
+        use rsface::quality::{assess, QualityConfig};
+
+        // A small textured gray crop so every field takes a real value.
+        let mut img = GrayImage::from_vec(vec![120u8; 40 * 40], 40, 40);
+        for y in (1..39).step_by(2) {
+            for x in (1..39).step_by(2) {
+                img.as_mut_slice()[y * 40 + x] = 200;
+            }
+        }
+        let report = assess(&img, &QualityConfig::default());
+        let snapshot = QualitySnapshot::from(&report);
+        let value = serde_json::to_value(&snapshot).expect("serialise");
+
+        // Lock the field names downstream calibration tooling depends on.
+        for field in [
+            "width",
+            "height",
+            "sharpness",
+            "mean_brightness",
+            "clipped_ratio",
+            "high_freq_ratio",
+        ] {
+            assert!(value.get(field).is_some(), "missing field `{field}`");
+        }
+        assert_eq!(value["width"], 40);
+        assert_eq!(value["height"], 40);
+        assert_eq!(value["sharpness"], snapshot.sharpness);
+        assert!(value["high_freq_ratio"].as_f64().unwrap() > 0.0);
+    }
 }

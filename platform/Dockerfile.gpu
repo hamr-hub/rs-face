@@ -20,7 +20,8 @@ COPY tests ./tests
 # 在 Jetson 上必须靠 cuda-backend 才走得到 GPU;OpenCL 在 Tegra 上永远 silent fail。
 # kernel 编译时用 sm_87 arch(Jetson Orin Ampere),cudarc 默认 compute_53
 # 在 Tegra driver 540 上 load_ptx 报 CUDA_ERROR_NOT_FOUND "named symbol not found"。
-RUN cargo build --release --features 'rsface/cuda-backend' --manifest-path platform/Cargo.toml
+# `liveness` 启用 MiniFASNet 活体检测(tract ONNX 后端)。
+RUN cargo build --release --features 'liveness rsface/cuda-backend' --manifest-path platform/Cargo.toml
 
 # ---- 运行时镜像:Ubuntu 24.04 + CUDA 12.6 + OpenCL ICD + ffmpeg ----
 # 必须用 Ubuntu 24.04(noble)以匹配 rust:1.97-slim 的 glibc 2.39;Ubuntu 22.04 只有 2.35。
@@ -47,6 +48,9 @@ COPY --from=build /build/platform/target/release/rsface-server /usr/local/bin/rs
 COPY platform/web /app/web
 # 级联权重在 src/weights/(随 core 嵌入式分发);容器内路径仍保持 /app/cascade.rfcf。
 COPY src/weights/haarcascade_frontalface_default.rfcf /app/cascade.rfcf
+# Note: MiniFASNet weights (models/*.onnx) are NOT baked into the image —
+# `models/` is in .dockerignore (GB-scale artifacts). Compose bind-mounts
+# the host directory into the container at /app/models.
 RUN mkdir -p /var/rsface-media /tmp/rsface-jobs \
     # 非 root 运行:rsface 用户(UID 10001)。NVIDIA 设备节点由
     # nvidia-container-cli 注入,权限走 video/render 组,普通用户可访问。
@@ -64,6 +68,10 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     TMP_DIR=/tmp/rsface-jobs \
     LOCAL_MEDIA_DIR=/var/rsface-media \
     RSFACE_USE_GPU=1 \
+    # MiniFASNet silent face-anti-spoofing models (built into the image).
+    # Operators can disable at runtime with RSFACE_LIVENESS_ENABLED=0.
+    RSFACE_LIVENESS_ENABLED=${RSFACE_LIVENESS_ENABLED:-1} \
+    RSFACE_LIVENESS_MODELS_DIR=/app/models \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     NVIDIA_VISIBLE_DEVICES=all
 

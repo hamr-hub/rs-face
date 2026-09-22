@@ -148,7 +148,7 @@ services:
     # 2G:足以跑 2 并发 haar/cnn + 2GB 上限的视频转码;OOM 时容器重启
     # (restart: unless-stopped)而不是拖垮宿主。
     mem_limit: ${SERVER_MEM_LIMIT:-2g}
-    memswap_limit: ${SERVER_MEMSWAP_LIMIT:-2g}
+    memswap_limit: ${SERVER_MEMSWAP_LIMIT:-4g}
     # docker stop 的宽限期要 ≥ SHUTDOWN_GRACE_SECS,让优雅停机跑完。
     stop_grace_period: ${SERVER_STOP_GRACE:-2m30s}
     restart: unless-stopped
