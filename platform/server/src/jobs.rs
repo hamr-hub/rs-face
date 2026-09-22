@@ -68,6 +68,12 @@ pub struct FaceEntry {
     pub w: usize,
     pub h: usize,
     pub score: f32,
+    /// Silent liveness verdict, present only when liveness is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<crate::liveness::LivenessVerdict>,
+    /// True when liveness enforcement blocks this detection.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -1011,10 +1017,25 @@ impl JobRegistry {
                 }
 
                 // 标注帧。
+                // Compute liveness once per detection; annotation colour and the
+                // face-crop entries below share these verdicts.
+                let mut verdicts: Vec<(Option<crate::liveness::LivenessVerdict>, bool)> =
+                    Vec::with_capacity(detections.len());
+                for d in &detections {
+                    let live = self.gallery.check_liveness(&base, d);
+                    let blocked = self.gallery.liveness_enforce()
+                        && live.as_ref().is_some_and(|v| !v.is_real);
+                    verdicts.push((live, blocked));
+                }
                 if has_face || job.kind == JobKind::Image || keepalive {
                     let mut annotated = clone_rgb(&base);
-                    for d in &detections {
-                        annotated.draw_rect(d.x, d.y, d.w, d.h, (0, 255, 96));
+                    for (d, (_, blocked)) in detections.iter().zip(verdicts.iter()) {
+                        let color = if *blocked {
+                            (255, 64, 64)
+                        } else {
+                            (0, 255, 96)
+                        };
+                        annotated.draw_rect(d.x, d.y, d.w, d.h, color);
                     }
                     let key = format!("jobs/{}/annotated/{:06}.png", job.id, frame.index);
                     if let Some(bytes) = encode_png(&annotated) {
@@ -1028,7 +1049,8 @@ impl JobRegistry {
 
                 // 人脸裁剪。
                 if has_face {
-                    for (i, d) in detections.iter().enumerate() {
+                    for (i, (d, (liveness, blocked))) in detections.iter().zip(verdicts).enumerate()
+                    {
                         if total_crops >= self.cfg.max_face_crops {
                             break;
                         }
@@ -1047,6 +1069,8 @@ impl JobRegistry {
                                     w: d.w,
                                     h: d.h,
                                     score: d.score,
+                                    liveness,
+                                    blocked,
                                 });
                                 total_crops += 1;
                             }
@@ -2185,6 +2209,8 @@ mod tests {
                     w: 1,
                     h: 1,
                     score: 1.0,
+                    liveness: None,
+                    blocked: false,
                 }],
             },
             FrameResult {
