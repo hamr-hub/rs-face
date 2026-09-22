@@ -118,6 +118,10 @@ impl Db {
                 "0006_liveness_stats.sql",
                 include_str!("../../migrations/0006_liveness_stats.sql"),
             ),
+            (
+                "0007_face_quality.sql",
+                include_str!("../../migrations/0007_face_quality.sql"),
+            ),
         ];
         let mut applied = 0u64;
         for (name, sql) in files {

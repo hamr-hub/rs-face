@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — persist per-face quality signals for threshold calibration
+- **The four liveness quality measurements are now stored on the `faces`
+  table.** Migration `0007_face_quality.sql` adds nullable
+  `sharpness` / `mean_brightness` / `clipped_ratio` / `high_freq_ratio`
+  columns (NULL when liveness did not run for that face), and both the
+  single-row and the batched (`UNNEST`) face inserts populate them from each
+  face's `liveness.quality` snapshot. Threshold calibration can now
+  aggregate replay signals across jobs and server restarts instead of only
+  observing live API responses; the migration is registered in the embedded
+  migrator. Blocking behaviour is unchanged.
+
 ### Changed — e2e liveness screen attack carries an LCD-grid cue
 - **The synthesised screen-replay sample in `liveness_e2e` now overlays a
   fine LCD pixel lattice plus a moiré beat.** The previous sample only
