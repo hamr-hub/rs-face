@@ -19,7 +19,7 @@
 
 use crate::api::error_response_with;
 use crate::api::ResponseCaches;
-use crate::gallery::{FaceEnroll, FaceMeta, GalleryState, Person, PersonCreate};
+use crate::gallery::{FaceEnroll, FaceMeta, Person, PersonCreate};
 use crate::jobs::{DetectorKind, JobRegistry};
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
@@ -56,10 +56,7 @@ pub struct PersonList {
     pub persons: Vec<Person>,
 }
 
-pub async fn get_person(
-    State((state, _)): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn get_person(State((state, _)): State<AppState>, Path(id): Path<String>) -> Response {
     match state.gallery.get_person(&id).await {
         Some(p) => Json(p).into_response(),
         None => error_response_with(
@@ -163,11 +160,7 @@ pub async fn enroll_face(
     }
     match state
         .gallery
-        .enroll_face(
-            &person_id,
-            &image_bytes,
-            FaceEnroll { bbox, source_key },
-        )
+        .enroll_face(&person_id, &image_bytes, FaceEnroll { bbox, source_key })
         .await
     {
         Ok(face) => Json(face).into_response(),
@@ -231,10 +224,7 @@ pub struct FaceList {
     pub faces: Vec<FaceMeta>,
 }
 
-pub async fn delete_face(
-    State((state, _)): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn delete_face(State((state, _)): State<AppState>, Path(id): Path<String>) -> Response {
     match state.gallery.delete_face(&id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) if e == "face_not_found" => error_response_with(
@@ -441,7 +431,7 @@ pub async fn verify_image(
 
 fn parse_bbox(s: &str) -> Option<[i32; 4]> {
     let parts: Vec<i32> = s
-        .split(|c: char| c == ',' || c == ' ' || c == ';')
+        .split([',', ' ', ';'])
         .filter_map(|t| t.parse::<i32>().ok())
         .collect();
     if parts.len() == 4 {
@@ -476,4 +466,3 @@ fn build_detector(algo: &str, cascade_path: &std::path::Path) -> Option<Detector
     let detector = rsface::detector::Detector::new(cascade, cfg);
     Some(DetectorKind::Haar(detector))
 }
-

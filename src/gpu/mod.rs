@@ -78,10 +78,7 @@ impl GpuIntegral {
     /// OpenCL) in a `GpuIntegral` so the existing detector call sites
     /// (`g.compute_dual(...)`, `g.variance_prefilter(...)`, ...) keep
     /// working without per-detector refactors.
-    pub fn from_backend(
-        backend: Box<dyn crate::gpu::backend::GpuBackend>,
-        info: GpuInfo,
-    ) -> Self {
+    pub fn from_backend(backend: Box<dyn crate::gpu::backend::GpuBackend>, info: GpuInfo) -> Self {
         Self {
             inner: GpuIntegralImpl::Backend(Arc::from(backend)),
         }
@@ -141,7 +138,8 @@ impl GpuIntegral {
                 ctx.variance_prefilter(img, win_w, win_h, stride, variance_threshold)
             },
             GpuIntegralImpl::Backend(b) => {
-                b.as_ref().variance_prefilter(img, win_w, win_h, stride, variance_threshold)
+                b.as_ref()
+                    .variance_prefilter(img, win_w, win_h, stride, variance_threshold)
             }
         }
     }

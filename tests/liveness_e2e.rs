@@ -26,7 +26,11 @@ fn models_dir() -> PathBuf {
 fn detector() -> LivenessDetector {
     let p_v2 = models_dir().join("2.7_80x80_MiniFASNetV2.onnx");
     let p_v1se = models_dir().join("4_0_0_80x80_MiniFASNetV1SE.onnx");
-    assert!(p_v2.exists(), "missing {}, run tools/fetch_models.sh first", p_v2.display());
+    assert!(
+        p_v2.exists(),
+        "missing {}, run tools/fetch_models.sh first",
+        p_v2.display()
+    );
     assert!(
         p_v1se.exists(),
         "missing {}, run tools/fetch_models.sh first",
@@ -140,8 +144,10 @@ fn liveness_far_frr_against_synthesised_attacks() {
     let thr_strict = 0.5_f32;
     let attacks = [paper_out.clone(), screen_out.clone()];
     let accepted = |o: &LivenessOutcome, t: f32| o.real_score >= t && o.label() == "real";
-    let far_loose = attacks.iter().filter(|o| accepted(o, thr_loose)).count() as f32 / attacks.len() as f32;
-    let far_strict = attacks.iter().filter(|o| accepted(o, thr_strict)).count() as f32 / attacks.len() as f32;
+    let far_loose =
+        attacks.iter().filter(|o| accepted(o, thr_loose)).count() as f32 / attacks.len() as f32;
+    let far_strict =
+        attacks.iter().filter(|o| accepted(o, thr_strict)).count() as f32 / attacks.len() as f32;
     let frr_loose = (!accepted(&real, thr_loose)) as i32 as f32;
     let frr_strict = (!accepted(&real, thr_strict)) as i32 as f32;
     println!(

@@ -8,14 +8,14 @@
 
 use crate::jobs::DetectorKind;
 use rsface::eigenface::{EigenfaceConfig, EigenfaceRecognizer};
+use rsface::ensemble::{fuse_recognitions, RecognitionFusionConfig, TaggedRecognition};
 use rsface::face::Detection;
+use rsface::fisherface::{FisherfaceConfig, FisherfaceRecognizer};
 use rsface::image::codec::{read_pgm, read_ppm};
 use rsface::image::png::decode_to_gray;
 use rsface::image::GrayImage;
 use rsface::lbph::{LbphConfig, LbphRecognizer};
-use rsface::fisherface::{FisherfaceConfig, FisherfaceRecognizer};
 use rsface::recognizer::{FaceRecognizer, Recognition};
-use rsface::ensemble::{fuse_recognitions, RecognitionFusionConfig, TaggedRecognition};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -107,8 +107,10 @@ impl GalleryBundle {
         });
 
         // Eigenfaces: needs at least two crops.
-        let eigen_samples: Vec<(&str, &GrayImage)> =
-            crops.iter().map(|(label, img)| (label.as_str(), img)).collect();
+        let eigen_samples: Vec<(&str, &GrayImage)> = crops
+            .iter()
+            .map(|(label, img)| (label.as_str(), img))
+            .collect();
         let eigen_config = EigenfaceConfig::default();
         if let Ok(recognizer) = EigenfaceRecognizer::train(eigen_config, eigen_samples) {
             recognizers.push(RecognizerEntry {
@@ -118,11 +120,12 @@ impl GalleryBundle {
         }
 
         // Fisherfaces: needs at least two classes and one repeat crop.
-        let fisher_samples: Vec<(&str, &GrayImage)> =
-            crops.iter().map(|(label, img)| (label.as_str(), img)).collect();
+        let fisher_samples: Vec<(&str, &GrayImage)> = crops
+            .iter()
+            .map(|(label, img)| (label.as_str(), img))
+            .collect();
         let fisher_config = FisherfaceConfig::default();
-        if let Ok(recognizer) = FisherfaceRecognizer::train(fisher_config, fisher_samples)
-        {
+        if let Ok(recognizer) = FisherfaceRecognizer::train(fisher_config, fisher_samples) {
             recognizers.push(RecognizerEntry {
                 threshold: fisher_config.max_distance,
                 recognizer: Box::new(recognizer),
@@ -169,7 +172,9 @@ pub struct RecognizerVoteDetail {
 
 fn vote_detail(recognition: &Recognition, source: &str) -> RecognizerVoteDetail {
     match recognition {
-        Recognition::Match { label, distance, .. } => RecognizerVoteDetail {
+        Recognition::Match {
+            label, distance, ..
+        } => RecognizerVoteDetail {
             source: source.to_string(),
             status: "match",
             label: Some(label.clone()),
@@ -239,7 +244,8 @@ pub fn recognize_faces(
             // &str, f32)> intermediate that allocated a heap tuple per
             // recognizer per face.
             let mut tagged: Vec<TaggedRecognition> = Vec::with_capacity(gallery.recognizers.len());
-            let mut recognizers: Vec<RecognizerVoteDetail> = Vec::with_capacity(gallery.recognizers.len());
+            let mut recognizers: Vec<RecognizerVoteDetail> =
+                Vec::with_capacity(gallery.recognizers.len());
             for entry in &gallery.recognizers {
                 let recognition = entry.recognizer.identify_crop(&face_crop);
                 let source = entry.recognizer.name();

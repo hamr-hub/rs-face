@@ -9,7 +9,8 @@
 //! The ordering matches [`crate::face::landmark`], so
 //! [`FivePointLandmarks::to_face_landmarks`] is a zero-cost conversion into
 //! the [`crate::face::Landmarks`] consumed by
-//! [`crate::align::estimate_arcface_transform`] / [`crate::align::norm_crop`].
+//! `crate::align::estimate_arcface_transform` / `crate::align::norm_crop`
+//! (both behind the `ort-backend`/`tract-backend` feature).
 //!
 //! ## Algorithm (zero-dep, ~no learned weights)
 //!
@@ -33,8 +34,8 @@
 //! geometric baseline — accurate enough for *alignment seeding* and demo
 //! overlays, not a replacement for a learned regressor on difficult poses
 //! (extreme yaw, occlusion, profile views). For those, use a SCRFD /
-//! RetinaFace / YuNet model via [`crate::scrfd_detector`] which already
-//! produces sub-pixel landmarks.
+//! RetinaFace / YuNet model via `crate::scrfd_detector` (feature-gated),
+//! which already produces sub-pixel landmarks.
 //!
 //! ## Why no `crate::integral`?
 //!
@@ -139,8 +140,8 @@ impl FivePointLandmarks {
     }
 
     /// Pack into the [`Landmarks`] array shape consumed by
-    /// [`crate::align::estimate_arcface_transform`] and
-    /// [`crate::align::norm_crop`].
+    /// `crate::align::estimate_arcface_transform` and
+    /// `crate::align::norm_crop` (ONNX-feature gated).
     pub fn to_face_landmarks(self) -> Landmarks {
         Landmarks {
             points: [

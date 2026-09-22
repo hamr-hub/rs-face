@@ -211,9 +211,10 @@ pub struct SessionConfig {
     ///
     /// Needed by the pure-Rust `tract` backend, whose optimiser cannot resolve a graph
     /// with dynamic axes and so must be told the shape at load time. Callers such as
-    /// [`crate::scrfd_detector::ScrfdDetector`] always know their own input resolution, so
-    /// they supply it here rather than forcing the backend to guess — a guess would
-    /// surface as an opaque shape error from deep inside tract.
+    /// `crate::scrfd_detector::ScrfdDetector` always know their own input
+    /// resolution, so they supply it here rather than forcing the backend to
+    /// guess — a guess would surface as an opaque shape error from deep inside
+    /// tract.
     ///
     /// `None` means "infer from the ModelSpec"; the `ort` backend ignores this entirely
     /// because ONNX Runtime resolves shapes at run time.
