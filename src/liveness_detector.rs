@@ -100,27 +100,27 @@ impl LivenessDetector {
     /// graph and softmax-normalises its logits. The rows are then averaged and
     /// rendered through [`LivenessConfig`].
     pub fn check(&self, img: &RgbImage, det: &Detection) -> Result<LivenessOutcome, OnnxError> {
-        // Quality gate first: measure on the native-resolution crop (not the
-        // 80×80 resize), so blur / tiny size / clipping are still visible. A
-        // poor crop is rejected fail-closed without spending a forward pass.
-        if self.quality.enabled {
-            let (qx, qy, qw, qh) = expanded_crop(img.width(), img.height(), det, CROP_SCALES[0]);
-            if qw == 0 || qh == 0 {
-                return Err(OnnxError::UnexpectedShape(
-                    "quality-gate crop is empty".into(),
-                ));
-            }
-            let native_crop = img.crop(qx, qy, qw, qh);
-            let gray = native_crop.to_gray();
-            let report = assess_quality(&gray, &self.quality);
-            if !report.acceptable {
-                return Ok(LivenessOutcome {
-                    is_real: false,
-                    real_score: 0.0,
-                    probs: [0.0; NUM_CLASSES],
-                    class: LOW_QUALITY_CLASS,
-                });
-            }
+        // Quality is always measured on the native-resolution crop (not the
+        // 80×80 resize) so blur / tiny size / clipping / moiré are still
+        // visible; the report rides along on the outcome for calibration.
+        let (qx, qy, qw, qh) = expanded_crop(img.width(), img.height(), det, CROP_SCALES[0]);
+        if qw == 0 || qh == 0 {
+            return Err(OnnxError::UnexpectedShape(
+                "liveness quality crop is empty".into(),
+            ));
+        }
+        let gray = img.crop(qx, qy, qw, qh).to_gray();
+        let report = assess_quality(&gray, &self.quality);
+        // Gating is optional: when enabled, a poor crop is rejected
+        // fail-closed without spending a forward pass.
+        if self.quality.enabled && !report.acceptable {
+            return Ok(LivenessOutcome {
+                is_real: false,
+                real_score: 0.0,
+                probs: [0.0; NUM_CLASSES],
+                class: LOW_QUALITY_CLASS,
+                quality: Some(report),
+            });
         }
 
         let mut rows = Vec::with_capacity(self.heads.len());
@@ -156,8 +156,10 @@ impl LivenessDetector {
                 .ok_or_else(|| OnnxError::UnexpectedShape("non-finite liveness logits".into()))?;
             rows.push(probs);
         }
-        decide(&rows, &self.config)
-            .ok_or_else(|| OnnxError::UnexpectedShape("could not fuse liveness rows".into()))
+        let mut outcome = decide(&rows, &self.config)
+            .ok_or_else(|| OnnxError::UnexpectedShape("could not fuse liveness rows".into()))?;
+        outcome.quality = Some(report);
+        Ok(outcome)
     }
 }
 
