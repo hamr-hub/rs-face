@@ -164,10 +164,7 @@ pub fn router(
 /// 按路径注入 Cache-Control。之前用全局 `SetResponseHeaderLayer` 一刀切,
 /// 导致 `/api/jobs/{id}` 的动态响应也被强缓存 10 分钟:任务刚创建时响应是
 /// `running`,浏览器后续轮询直接命中缓存,页面永远停在 running。
-async fn cache_control_middleware(
-    req: axum::extract::Request,
-    next: Next,
-) -> Response {
+async fn cache_control_middleware(req: axum::extract::Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let mut resp = next.run(req).await;
     // 已有缓存头(/media/* handler 自带)就尊重,不覆盖。
@@ -1175,7 +1172,8 @@ async fn recognize_job(
             crate::jobs::JobKind::Image => "image",
             crate::jobs::JobKind::Video => "video",
             crate::jobs::JobKind::Stream => "stream",
-        }.to_string(),
+        }
+        .to_string(),
         None => persisted
             .as_ref()
             .and_then(|j| j.get("kind").and_then(|k| k.as_str()))

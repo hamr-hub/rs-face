@@ -1070,14 +1070,12 @@ impl JobRegistry {
                         // Feed this track's streak and gate enforcement on
                         // fail-closed temporal confirmation.
                         let track_id = tracked.get(idx).map(|t| t.id).unwrap_or(0);
-                        let entry = temporal_votes
-                            .entry(track_id)
-                            .or_insert_with(|| {
-                                (
-                                    rsface::liveness::TemporalVote::new(&temporal_cfg),
-                                    frame.index,
-                                )
-                            });
+                        let entry = temporal_votes.entry(track_id).or_insert_with(|| {
+                            (
+                                rsface::liveness::TemporalVote::new(&temporal_cfg),
+                                frame.index,
+                            )
+                        });
                         entry.1 = frame.index;
                         entry.0.observe(
                             live.as_ref().is_some_and(|v| v.is_real),
@@ -2129,9 +2127,15 @@ mod tests {
     fn streak_retention_tracks_unseen_window() {
         assert!(streak_alive(100, 100, 60), "seen this frame stays");
         assert!(streak_alive(100, 140, 60), "recently seen stays");
-        assert!(!streak_alive(100, 160, 60), "exactly at the window is pruned");
+        assert!(
+            !streak_alive(100, 160, 60),
+            "exactly at the window is pruned"
+        );
         assert!(!streak_alive(100, 200, 60), "long unseen is pruned");
-        assert!(streak_alive(200, 100, 60), "non-monotonic input never underflows");
+        assert!(
+            streak_alive(200, 100, 60),
+            "non-monotonic input never underflows"
+        );
     }
 
     /// 背压:queued 计数达到 max_queue_depth 时 create 返回 Err,

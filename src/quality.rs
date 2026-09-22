@@ -248,7 +248,9 @@ pub fn assess(gray: &GrayImage, cfg: &QualityConfig) -> QualityReport {
         high_freq_ratio,
         acceptable: true,
     };
-    report.acceptable = cfg.enabled && report.issues(cfg).is_empty() || !cfg.enabled;
+    // When quality gating is disabled everything is acceptable; otherwise it
+    // is acceptable only with no issues.
+    report.acceptable = !cfg.enabled || report.issues(cfg).is_empty();
     report
 }
 

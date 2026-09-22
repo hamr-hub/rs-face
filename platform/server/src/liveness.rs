@@ -58,11 +58,7 @@ impl From<&rsface::quality::QualityReport> for QualitySnapshot {
 /// inference error or poisoned lock) blocks just like an explicit spoof
 /// verdict, so an attacker cannot trigger an error to slip through. When
 /// enforcement is off or no backend is loaded, nothing is blocked.
-pub(crate) fn enforce_blocks(
-    enforce: bool,
-    has_backend: bool,
-    is_real: Option<bool>,
-) -> bool {
+pub(crate) fn enforce_blocks(enforce: bool, has_backend: bool, is_real: Option<bool>) -> bool {
     enforce && has_backend && !matches!(is_real, Some(true))
 }
 
