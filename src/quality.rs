@@ -112,6 +112,12 @@ pub struct QualityReport {
     pub mean_brightness: f32,
     /// Fraction `[0, 1]` of pixels clipped to `0`/`255`.
     pub clipped_ratio: f32,
+    /// Fraction `[0, 1]` of interior signal energy that lives in fine detail:
+    /// the mean-squared residual of the crop against a 3×3 box blur, divided
+    /// by its luma variance. Smooth skin is low; a screen's pixel grid / moiré
+    /// raises it. **Informational only** — not part of the blocking gate until
+    /// calibrated, since an untested threshold would false-reject real faces.
+    pub high_freq_ratio: f32,
     /// `true` when every enabled check passes (or the gate is disabled).
     pub acceptable: bool,
 }
@@ -191,12 +197,55 @@ pub fn assess(gray: &GrayImage, cfg: &QualityConfig) -> QualityReport {
         sharpness = (sum_sq / n - mean * mean).max(0.0);
     }
 
+    // High-frequency ratio: residual of each interior pixel against a 3×3 box
+    // blur (the local mean including itself), averaged and normalised by the
+    // interior luma variance. Bounded to `[0, 1]`. Needs a 1-pixel border.
+    let mut high_freq_ratio = 0.0f32;
+    let interior_pts = width.saturating_sub(2) * height.saturating_sub(2);
+    if interior_pts > 0 {
+        let mut resid_sq_sum: f64 = 0.0;
+        let mut luma_mean: f64 = 0.0;
+        for y in 1..height - 1 {
+            let row = y * width;
+            for x in 1..width - 1 {
+                let mut local: i32 = px[row + x] as i32;
+                local += px[row + x - 1] as i32 + px[row + x + 1] as i32;
+                local += px[row - width + x] as i32 + px[row + width + x] as i32;
+                local += px[row - width + x - 1] as i32
+                    + px[row - width + x + 1] as i32
+                    + px[row + width + x - 1] as i32
+                    + px[row + width + x + 1] as i32;
+                // Blurred value times 9; residual = v*9 - blur_sum.
+                let residual = px[row + x] as i32 * 9 - local;
+                resid_sq_sum += (residual as f64) * (residual as f64);
+                luma_mean += px[row + x] as f64;
+            }
+        }
+        let count = interior_pts as f64;
+        luma_mean /= count;
+        let mut var: f64 = 0.0;
+        for y in 1..height - 1 {
+            let row = y * width;
+            for x in 1..width - 1 {
+                let d = px[row + x] as f64 - luma_mean;
+                var += d * d;
+            }
+        }
+        if var > 1e-9 {
+            // Residual carries a factor of 9 from the integer blur; convert to
+            // the actual per-pixel residual and normalise energy.
+            let normalized = resid_sq_sum / (81.0 * var);
+            high_freq_ratio = normalized.clamp(0.0, 1.0) as f32;
+        }
+    }
+
     let mut report = QualityReport {
         width,
         height,
         sharpness,
         mean_brightness,
         clipped_ratio,
+        high_freq_ratio,
         acceptable: true,
     };
     report.acceptable = cfg.enabled && report.issues(cfg).is_empty() || !cfg.enabled;
@@ -322,5 +371,31 @@ mod tests {
         let r = assess(&g, &QualityConfig::strict());
         assert_eq!(r.sharpness, 0.0);
         assert!(!r.acceptable);
+    }
+
+    #[test]
+    fn high_freq_is_low_for_smooth_and_high_for_fine_grid() {
+        // Uniform mid-gray skin: zero residual, ratio 0.
+        let smooth = GrayImage::from_vec(vec![130u8; 60 * 60], 60, 60);
+        let sr = assess(&smooth, &QualityConfig::default());
+        assert_eq!(sr.high_freq_ratio, 0.0, "flat region has no fine detail");
+
+        // 1-pixel alternating grid: every point is a strong residual.
+        let grid = assess(&checker(60, 60), &QualityConfig::default());
+        assert!(
+            grid.high_freq_ratio > 0.4,
+            "fine grid carries most energy in detail, got {}",
+            grid.high_freq_ratio
+        );
+
+        // The metric is informational and never changes the gate verdict.
+        let disabled = assess(&checker(60, 60), &QualityConfig::default());
+        assert!(disabled.acceptable, "high freq alone does not block");
+    }
+
+    #[test]
+    fn high_freq_is_bounded_for_gradients() {
+        let ramp = assess(&gradient(60, 60), &QualityConfig::default());
+        assert!((0.0..=1.0).contains(&ramp.high_freq_ratio));
     }
 }

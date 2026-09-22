@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — high-frequency replay signal in the quality report
+- **`QualityReport::high_freq_ratio`** measures the share of interior
+  signal energy in fine detail: the mean-squared residual of the crop
+  against a 3×3 box blur, normalised by its luma variance. Smooth skin is
+  low while a screen's pixel grid and moiré patterns raise it, giving an
+  observable signal for replay attacks alongside the existing sharpness
+  check. It is informational only and never blocks, so an uncalibrated
+  threshold cannot false-reject detailed real faces; collect it per crop
+  to calibrate a gate later. Two unit tests cover the smooth/grid contrast
+  and the `[0, 1]` bound.
+
 ### Fixed — bounded memory for long streams' temporal votes
 - **Per-track liveness streaks are now pruned once a track leaves the
   frame.** Each temporal vote records the frame it was last seen on; on
