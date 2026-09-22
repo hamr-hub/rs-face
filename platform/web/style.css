@@ -1027,6 +1027,12 @@ body {
 .dash-section { margin-top: 16px; }
 .dash-section h3 { margin: 0 0 8px; font-size: 12px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: .5px; }
 .dash-bars { display: flex; flex-direction: column; gap: 6px; }
+.dash-liveness .dl-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.dash-liveness .dl-label, .dash-liveness .dl-head { text-align: left; font-weight: 600; padding: 4px 8px; color: var(--fg-dim); }
+.dash-liveness .dl-cell { padding: 4px 8px; font-family: ui-monospace, monospace; }
+.dash-liveness .is-real { color: #1f9d57; }
+.dash-liveness .is-spoof { color: #d64545; }
+.dash-liveness .dl-n { margin-left: 6px; font-weight: 400; opacity: .7; }
 .dash-bar-row { display: flex; align-items: center; gap: 10px; font-size: 11px; }
 .dash-bar-label { width: 80px; color: var(--fg-dim); font-family: ui-monospace, monospace; }
 .dash-bar {

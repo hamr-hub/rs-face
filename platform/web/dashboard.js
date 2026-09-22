@@ -108,6 +108,43 @@ const dashboard = (() => {
     }
   }
 
+  /** 活体标定:按真脸/假脸分组的信号均值(无 DB / 无判定时降级)。 */
+  async function renderLiveness() {
+    const sec = utils.$('#dash-liveness-section');
+    const wrap = utils.$('#dash-liveness');
+    if (!sec || !wrap) return;
+    let groups = [];
+    try {
+      const r = await fetch('/api/liveness/quality-summary');
+      const data = r.ok ? await r.json() : null;
+      groups = (data && Array.isArray(data.groups)) ? data.groups : [];
+    } catch {
+      groups = [];
+    }
+    if (!groups.length) {
+      wrap.innerHTML = '<div class="hint">暂无判定数据(启用活体并完成任务后累积)</div>';
+      return;
+    }
+    const signals = [
+      ['sharpness', '清晰度'],
+      ['mean_brightness', '平均亮度'],
+      ['clipped_ratio', '裁切占比'],
+      ['high_freq_ratio', '高频占比'],
+    ];
+    const fmt = v => (v === null || v === undefined) ? '—' : Number(v).toFixed(3);
+    const rows = signals.map(([key, label]) => {
+      const cells = groups.map(g =>
+        `<td class="dl-cell ${g.verdict === 'real' ? 'is-real' : 'is-spoof'}">${fmt(g[key])}</td>`
+      ).join('');
+      return `<tr><th class="dl-label">${label}</th>${cells}</tr>`;
+    }).join('');
+    const head = groups.map(g =>
+      `<th class="dl-head ${g.verdict === 'real' ? 'is-real' : 'is-spoof'}">${g.verdict === 'real' ? '真脸' : '假脸'}<span class="dl-n">n=${g.samples}</span></th>`
+    ).join('');
+    wrap.innerHTML =
+      `<table class="dl-table"><thead><tr><th></th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
   async function open() {
     utils.$('#modal-dashboard').classList.remove('hidden');
     utils.$('#dash-stats').innerHTML = '<div class="hint">加载中…</div>';
@@ -117,6 +154,8 @@ const dashboard = (() => {
       utils.$('#dash-meta').textContent = `数据源:内存 + 历史(/api/jobs 合并 PG) · 任务总数 ${d.total} · 刷新于 ${new Date().toLocaleTimeString()}`;
       // 埋点摘要独立加载(无 DB 也不阻塞主面板)
       renderTelemetry();
+      // 活体标定独立加载(无 DB / 无判定时降级)
+      renderLiveness();
     } catch (e) {
       utils.$('#dash-stats').innerHTML = '<div class="hint">加载失败: ' + utils.escapeHtml(e.message) + '</div>';
     }
