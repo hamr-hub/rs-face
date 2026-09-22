@@ -28,15 +28,19 @@
 //! ArcFace-backed gallery: [`Embedding::cosine`] returns `None` on dim
 //! mismatch rather than comparing a prefix, so a 512-d probe simply skips
 //! them and the matcher returns `NoCandidates` until the operator
-//! re-enrolls those identities. [`migrate_drop_legacy_faces`] hard-deletes
-//! `dim != 512` rows the first time an ArcFace-backed server boots.
+//! re-enrolls those identities. The startup `migrate_drop_legacy_faces` step
+//! hard-deletes `dim != 512` rows the first time an ArcFace-backed server
+//! boots.
 //!
 //! The DB schema lives in `migrations/0005_persons.sql`.
 
+#[cfg(feature = "arcface")]
 use crate::arcface::ArcFace;
 use crate::jobs::DetectorKind;
+#[cfg(feature = "arcface")]
 use crate::liveness::{Liveness, LivenessVerdict};
 use crate::persist::Db;
+#[cfg(feature = "arcface")]
 use crate::scrfd::Scrfd;
 use rsface::embedding::{Embedding, Gallery, MatchConfig};
 use rsface::embednet::EmbedNet;
@@ -65,7 +69,10 @@ pub const LEGACY_EMBEDNET_DIM: usize = 128;
 #[derive(Clone)]
 enum EmbedderKind {
     /// InsightFace ArcFace w600k_r50 + SCRFD-10G. Production pipeline.
-    ArcFace { arcface: Arc<ArcFace>, scrfd: Arc<Scrfd> },
+    ArcFace {
+        arcface: Arc<ArcFace>,
+        scrfd: Arc<Scrfd>,
+    },
     /// Random-init EmbedNet (128-d) used only when ArcFace graphs are
     /// unavailable AND `RSFACE_ARCFACE_SOFT_FALLBACK=true`.
     Legacy(Arc<EmbedNet>),
@@ -119,17 +126,17 @@ impl GalleryState {
         let embedder = match EmbedderKind::try_open_arcface(cfg).await {
             Ok(kind) => kind,
             Err(e) => {
-                    if cfg.arcface_soft_fallback {
-                        tracing::warn!(
-                            "[arcface] pipeline unavailable: {e} — falling back to EmbedNet \
+                if cfg.arcface_soft_fallback {
+                    tracing::warn!(
+                        "[arcface] pipeline unavailable: {e} — falling back to EmbedNet \
                              (RSFACE_ARCFACE_SOFT_FALLBACK=true). 128-d embeddings will be \
                              written for new faces; this server has no real accuracy."
-                        );
-                        EmbedderKind::Legacy(Arc::new(EmbedNet::new(cfg.gallery_seed)))
-                    } else {
-                        panic!("[arcface] pipeline unavailable and soft-fallback disabled: {e}");
-                    }
+                    );
+                    EmbedderKind::Legacy(Arc::new(EmbedNet::new(cfg.gallery_seed)))
+                } else {
+                    panic!("[arcface] pipeline unavailable and soft-fallback disabled: {e}");
                 }
+            }
         };
         Self {
             gallery: Arc::new(RwLock::new(gallery)),
@@ -255,13 +262,12 @@ impl GalleryState {
                     .into_iter()
                     .map(|fd| {
                         let legacy = legacy_box_from_face(&fd);
-                        let liveness =
-                            self
-                                .liveness
-                                .as_ref()
-                                .and_then(|live| live.check(rgb, &legacy));
-                        let blocked = self.liveness_enforce
-                            && liveness.as_ref().is_some_and(|v| !v.is_real);
+                        let liveness = self
+                            .liveness
+                            .as_ref()
+                            .and_then(|live| live.check(rgb, &legacy));
+                        let blocked =
+                            self.liveness_enforce && liveness.as_ref().is_some_and(|v| !v.is_real);
                         let ranked = if blocked {
                             Vec::new()
                         } else if let Some(_landmarks) = fd.landmarks {
@@ -273,16 +279,9 @@ impl GalleryState {
                                 h: legacy.h,
                                 score: fd.score,
                             };
-                            rank_for_det(
-                                &self.embedder,
-                                rgb,
-                                gray,
-                                &det_for_rank,
-                                &[fd],
-                                |emb| {
-                                    gallery.rank(emb).into_iter().take(top_k).collect()
-                                },
-                            )
+                            rank_for_det(&self.embedder, rgb, gray, &det_for_rank, &[fd], |emb| {
+                                gallery.rank(emb).into_iter().take(top_k).collect()
+                            })
                             .unwrap_or_default()
                         } else {
                             // SCRFD returned a face with no keypoints (rare;
@@ -302,21 +301,18 @@ impl GalleryState {
             EmbedderKind::Legacy(_) => legacy_dets
                 .into_iter()
                 .map(|det| {
-                    let liveness =
-                        self.liveness.as_ref().and_then(|live| live.check(rgb, &det));
-                    let blocked = self.liveness_enforce
-                        && liveness.as_ref().is_some_and(|v| !v.is_real);
+                    let liveness = self
+                        .liveness
+                        .as_ref()
+                        .and_then(|live| live.check(rgb, &det));
+                    let blocked =
+                        self.liveness_enforce && liveness.as_ref().is_some_and(|v| !v.is_real);
                     let ranked = if blocked {
                         Vec::new()
                     } else {
-                        rank_for_det(
-                            &self.embedder,
-                            rgb,
-                            gray,
-                            &det,
-                            &[],
-                            |emb| gallery.rank(emb).into_iter().take(top_k).collect(),
-                        )
+                        rank_for_det(&self.embedder, rgb, gray, &det, &[], |emb| {
+                            gallery.rank(emb).into_iter().take(top_k).collect()
+                        })
                         .unwrap_or_default()
                     };
                     RankedFace {
@@ -367,11 +363,12 @@ impl GalleryState {
 impl EmbedderKind {
     /// Try to open SCRFD + ArcFace. `Err` is the "graphs missing or wrong"
     /// signal — the caller decides whether that's fatal.
+    #[cfg(feature = "arcface")]
     async fn try_open_arcface(cfg: &crate::config::Config) -> Result<Self, String> {
         let arcface = ArcFace::open(cfg)?
             .ok_or_else(|| "ArcFace weights missing or unreadable".to_string())?;
-        let scrfd = Scrfd::open(cfg)?
-            .ok_or_else(|| "SCRFD weights missing or unreadable".to_string())?;
+        let scrfd =
+            Scrfd::open(cfg)?.ok_or_else(|| "SCRFD weights missing or unreadable".to_string())?;
         if !arcface.is_standard_dim() {
             return Err(format!(
                 "ArcFace graph at {} is not 512-d; only the standard w600k_r50 \
@@ -399,6 +396,7 @@ impl EmbedderKind {
 /// Strict on first boot of an upgraded server. The dry-run setting
 /// `RSFACE_ARCFACE_SKIP_MIGRATION=1` skips the deletion (and leaves the
 /// legacy rows visible to anyone querying the DB directly).
+#[cfg(feature = "arcface")]
 async fn migrate_drop_legacy_faces(db: &Db) -> Result<(), String> {
     let pool = db.pool.as_ref().ok_or_else(|| "DB disabled".to_string())?;
     let deleted = sqlx::query("DELETE FROM person_faces WHERE dim != $1")
@@ -635,9 +633,9 @@ impl GalleryState {
             .map_err(|e| format!("lookup person: {e}"))?
             .ok_or_else(|| "person_not_found".to_string())?;
 
-        let gray = decode_to_gray_or_gray(image_bytes).ok_or_else(|| "decode_failed".to_string())?;
-        let rgb = decode_rgb_or_rgb(image_bytes)
-            .unwrap_or_else(|| RgbImage::from_gray(&gray));
+        let gray =
+            decode_to_gray_or_gray(image_bytes).ok_or_else(|| "decode_failed".to_string())?;
+        let rgb = decode_rgb_or_rgb(image_bytes).unwrap_or_else(|| RgbImage::from_gray(&gray));
 
         // Embedding path branches on the active pipeline:
         //   * ArcFace  → SCRFD gives us a 5-landmark face; align + embed.
@@ -646,9 +644,9 @@ impl GalleryState {
         // we used, so the persisted bbox_x/y/w/h + quality stay meaningful.
         let (embedding, face_box) = match &self.embedder {
             EmbedderKind::ArcFace { arcface, scrfd } => {
-                let scrfd_dets = scrfd.detect(&rgb).map_err(|e| {
-                    format!("SCRFD inference failed during enroll: {e:?}")
-                })?;
+                let scrfd_dets = scrfd
+                    .detect(&rgb)
+                    .map_err(|e| format!("SCRFD inference failed during enroll: {e:?}"))?;
                 if scrfd_dets.is_empty() {
                     return Err("no_face".to_string());
                 }
@@ -694,7 +692,9 @@ impl GalleryState {
                     Some([x, y, w, h]) => detections
                         .iter()
                         .find(|d| {
-                            d.x == x as usize && d.y == y as usize && d.w == w as usize
+                            d.x == x as usize
+                                && d.y == y as usize
+                                && d.w == w as usize
                                 && d.h == h as usize
                         })
                         .cloned()
@@ -702,9 +702,7 @@ impl GalleryState {
                     None => pick_largest(&detections),
                 };
                 let crop = crop_gray(&gray, &det);
-                let emb = net
-                    .embed(&crop)
-                    .ok_or_else(|| "embed_failed".to_string())?;
+                let emb = net.embed(&crop).ok_or_else(|| "embed_failed".to_string())?;
                 (emb, det)
             }
         };
@@ -943,7 +941,9 @@ fn embed_via_active(
     match embedder {
         EmbedderKind::ArcFace { arcface, .. } => {
             let landmarks = pick_landmarks_for(scrfd_dets, det)?;
-            arcface.embed(rgb, &landmarks).and_then(|v| vec_to_embedding(v.as_slice()))
+            arcface
+                .embed(rgb, &landmarks)
+                .and_then(|v| vec_to_embedding(v.as_slice()))
         }
         EmbedderKind::Legacy(net) => {
             let crop = crop_gray(gray, det);
@@ -956,17 +956,12 @@ fn embed_via_active(
 /// box has the highest IoU with it, and return its landmarks. Returns
 /// `None` when SCRFD did not produce any face, the legacy box is way off
 /// grid, or the matched SCRFD box has no keypoint head.
-fn pick_landmarks_for(
-    scrfd_dets: &[FaceDetection],
-    legacy: &Detection,
-) -> Option<Landmarks> {
-    let best = scrfd_dets
-        .iter()
-        .max_by(|a, b| {
-            iou_face_detection(a, legacy)
-                .partial_cmp(&iou_face_detection(b, legacy))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })?;
+fn pick_landmarks_for(scrfd_dets: &[FaceDetection], legacy: &Detection) -> Option<Landmarks> {
+    let best = scrfd_dets.iter().max_by(|a, b| {
+        iou_face_detection(a, legacy)
+            .partial_cmp(&iou_face_detection(b, legacy))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
     if iou_face_detection(best, legacy) < 0.05 {
         return None; // legacy box matches nothing — likely a phantom detect
     }
@@ -1018,7 +1013,13 @@ fn legacy_box_from_face(fd: &FaceDetection) -> Detection {
     let y = fd.y1.max(0.0).round() as usize;
     let w = (fd.x2 - fd.x1).max(0.0).round() as usize;
     let h = (fd.y2 - fd.y1).max(0.0).round() as usize;
-    Detection { x, y, w, h, score: fd.score }
+    Detection {
+        x,
+        y,
+        w,
+        h,
+        score: fd.score,
+    }
 }
 
 /// Largest by area among SCRFD `FaceDetection`s.

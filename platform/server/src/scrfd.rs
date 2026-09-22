@@ -48,9 +48,8 @@ impl Scrfd {
             ArcFaceBackend::Tract => SessionConfig::default().with_backend(Backend::Tract),
         };
         let path = resolve_scrfd_path(cfg);
-        let spec = models::find("scrfd_10g_kps").ok_or_else(|| {
-            "SCRFD 10G spec missing from rsface::models::REGISTRY".to_string()
-        })?;
+        let spec = models::find("scrfd_10g_kps")
+            .ok_or_else(|| "SCRFD 10G spec missing from rsface::models::REGISTRY".to_string())?;
         match ScrfdDetector::open(&path, Some(spec), &session_cfg, ScrfdConfig::default()) {
             Ok(det) => {
                 tracing::info!(
