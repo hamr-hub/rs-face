@@ -24,10 +24,11 @@ use crate::face::Detection;
 use crate::image::RgbImage;
 use crate::liveness::{
     self, decide, expanded_crop, preprocess_bgr, softmax, LivenessConfig, LivenessOutcome,
-    CROP_SCALES, INPUT, NUM_CLASSES,
+    CROP_SCALES, INPUT, LOW_QUALITY_CLASS, NUM_CLASSES,
 };
 use crate::models::{ModelKind, ModelSpec};
 use crate::onnx::{open_session, Inference, OnnxError, SessionConfig};
+use crate::quality::{assess as assess_quality, QualityConfig};
 use std::path::Path;
 
 /// One loaded MiniFASNet graph paired with its crop scale.
@@ -40,6 +41,7 @@ struct Head {
 pub struct LivenessDetector {
     heads: Vec<Head>,
     config: LivenessConfig,
+    quality: QualityConfig,
 }
 
 impl LivenessDetector {
@@ -56,12 +58,17 @@ impl LivenessDetector {
         spec_v1se: Option<&ModelSpec>,
         session_cfg: &SessionConfig,
         config: LivenessConfig,
+        quality: QualityConfig,
     ) -> Result<Self, OnnxError> {
         let heads = vec![
             open_head(path_v2, spec_v2, session_cfg, CROP_SCALES[0])?,
             open_head(path_v1se, spec_v1se, session_cfg, CROP_SCALES[1])?,
         ];
-        Ok(Self { heads, config })
+        Ok(Self {
+            heads,
+            config,
+            quality,
+        })
     }
 
     /// Load a single-model detector (one crop scale).
@@ -71,9 +78,14 @@ impl LivenessDetector {
         session_cfg: &SessionConfig,
         scale: f32,
         config: LivenessConfig,
+        quality: QualityConfig,
     ) -> Result<Self, OnnxError> {
         let heads = vec![open_head(path, spec, session_cfg, scale)?];
-        Ok(Self { heads, config })
+        Ok(Self {
+            heads,
+            config,
+            quality,
+        })
     }
 
     /// Number of models fused for each decision.
@@ -88,6 +100,29 @@ impl LivenessDetector {
     /// graph and softmax-normalises its logits. The rows are then averaged and
     /// rendered through [`LivenessConfig`].
     pub fn check(&self, img: &RgbImage, det: &Detection) -> Result<LivenessOutcome, OnnxError> {
+        // Quality gate first: measure on the native-resolution crop (not the
+        // 80×80 resize), so blur / tiny size / clipping are still visible. A
+        // poor crop is rejected fail-closed without spending a forward pass.
+        if self.quality.enabled {
+            let (qx, qy, qw, qh) = expanded_crop(img.width(), img.height(), det, CROP_SCALES[0]);
+            if qw == 0 || qh == 0 {
+                return Err(OnnxError::UnexpectedShape(
+                    "quality-gate crop is empty".into(),
+                ));
+            }
+            let native_crop = img.crop(qx, qy, qw, qh);
+            let gray = native_crop.to_gray();
+            let report = assess_quality(&gray, &self.quality);
+            if !report.acceptable {
+                return Ok(LivenessOutcome {
+                    is_real: false,
+                    real_score: 0.0,
+                    probs: [0.0; NUM_CLASSES],
+                    class: LOW_QUALITY_CLASS,
+                });
+            }
+        }
+
         let mut rows = Vec::with_capacity(self.heads.len());
         for head in &self.heads {
             let (cx, cy, cw, ch) = expanded_crop(img.width(), img.height(), det, head.scale);

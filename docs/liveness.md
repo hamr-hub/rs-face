@@ -78,6 +78,43 @@ Configuration (environment):
 | `RSFACE_LIVENESS_MODELS_DIR` | `models` | directory with the two ONNX graphs |
 | `RSFACE_LIVENESS_MIN_REAL_SCORE` | `0.0` | min real probability to accept (raise toward `0.5` for a stricter gate) |
 | `RSFACE_LIVENESS_ENFORCE` | `false` | non-real faces get no identity matches |
+| `RSFACE_LIVENESS_QUALITY_GATE` | `false` | reject tiny/blurry/badly exposed/clipped crops before the classifier runs |
+| `RSFACE_LIVENESS_TEMPORAL_FRAMES` | `1` | consecutive real frames required in video/stream jobs (`>1` adds temporal defence) |
+
+## Quality gate
+
+MiniFASNet relies on high-frequency detail in a reasonably sized, in-focus
+crop. A tiny, heavily blurred, badly exposed or contrast-clipped crop has
+already lost the cues that separate live from spoof — yet the network still
+emits three confident logits from the wrong distribution. The optional
+quality gate measures the crop on the **native resolution** (before the
+`80×80` resize) and rejects it fail-closed:
+
+- **sharpness** — variance of the 4-neighbour Laplacian (the same focus
+  statistic as OpenCV's `Laplacian(...).var()`);
+- **resolution** — minimum crop edge, so distant small faces are not scored
+  from an up-sample;
+- **brightness** — mean luma bounded to reject dark/washed-out frames;
+- **clipping** — fraction of pixels pinned to `0`/`255`, which spikes on
+  clipped phone replays and contrast-crushed prints.
+
+The logic lives in the runtime-free `src/quality.rs` and ships in the default
+zero-dependency build; thresholds come from the `QualityConfig::strict()`
+preset. Enable with `RSFACE_LIVENESS_QUALITY_GATE=true`. A rejected crop is
+reported with label `low quality` and is treated exactly like a spoof verdict
+under enforcement.
+
+## Temporal voting
+
+For video / live-stream jobs, a face can additionally be required to look real
+on N **consecutive** frames. Faces are associated frame to frame with the
+core `FaceTracker`; each track keeps a sliding `TemporalVote` window, and a
+single non-real frame resets the streak. The gate is fail-closed — during the
+warm-up the track is not confirmed, so a short clip carrying only one good
+frame can never pass enforcement. Set `RSFACE_LIVENESS_TEMPORAL_FRAMES=3` (the
+upstream live-stream recommendation) to enable; `1` keeps the plain per-frame
+behaviour. The averaged real score over the streak also gives a steadier
+confidence than any single frame.
 
 ### Covered entry points
 

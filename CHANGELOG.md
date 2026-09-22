@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — silent-liveness hardening
+- **Face-crop quality gate (`src/quality.rs`).** MiniFASNet leans on
+  high-frequency detail in a well-sized, in-focus crop, yet still emits
+  confident logits for tiny, blurred, badly exposed or clipped crops from
+  the wrong distribution. The new runtime-free gate measures sharpness
+  (variance of the 4-neighbour Laplacian, matching OpenCV's
+  `Laplacian(...).var()`), minimum crop edge, mean brightness and the
+  fraction of pixels clipped to `0`/`255`, and rejects a poor crop
+  fail-closed before the classifier runs. It ships in the default
+  zero-dependency build (off unless enabled) and is turned on for the
+  platform with `RSFACE_LIVENESS_QUALITY_GATE=true`; a rejected crop is
+  reported with the `low quality` label and treated as spoof under
+  enforcement. Eight unit tests cover each signal.
+- **Multi-frame temporal voting for video/stream jobs.** Faces are
+  associated across frames with the core `FaceTracker`, and each track
+  keeps a sliding `TemporalVote` requiring N consecutive real frames; any
+  non-real frame resets the streak. The gate is fail-closed during
+  warm-up, so a short clip with one good frame cannot pass enforcement.
+  Configured via `RSFACE_LIVENESS_TEMPORAL_FRAMES` (`1` keeps the plain
+  per-frame behaviour; the upstream live-stream recommendation is `3`).
+  Five unit tests cover streak, reset, windowing and warm-up.
+- `docs/liveness.md` documents both controls with the full environment
+  table, the measured statistics and the fail-closed semantics.
+
 ### Added — multi-recogniser identity consensus
 - **`POST /api/jobs/{id}/recognize` exposes weighted-vote face identity
   in the web UI.** The endpoint takes an uploaded image job, runs the

@@ -1,12 +1,12 @@
 //! Silent face liveness — pure pre-processing and decision logic.
 //!
 //! This module is the runtime-free numerical core of the MiniVision
-//! Silent-Face-Anti-Spoofing integration (Apache-2.0). Like [`crate::scrfd`]
-//! and [`crate::arcface`], it holds no reference to any inference backend:
+//! Silent-Face-Anti-Spoofing integration (Apache-2.0). Like `crate::scrfd`
+//! and `crate::arcface`, it holds no reference to any inference backend:
 //! the crop-expansion, NCHW build, softmax and the two-model fusion decision
 //! live here as plain functions over slices, so the parts most likely to hide
 //! a silent security bug are unit-testable without a model file. The ONNX
-//! wiring lives in [`crate::liveness_detector`].
+//! wiring lives in `crate::liveness_detector`.
 //!
 //! # What the models actually expect
 //!
@@ -186,10 +186,18 @@ impl LivenessOutcome {
             0 => "printed photo",
             1 => "real face",
             2 => "screen replay",
+            // Sentinel produced by the quality gate (never by `decide`):
+            // the crop was too poor to classify and was rejected fail-closed.
+            LOW_QUALITY_CLASS => "low quality",
             _ => "unknown",
         }
     }
 }
+
+/// Pseudo-class marking a crop rejected by the quality gate rather than by
+/// the classifier. Kept outside `0..NUM_CLASSES` so it can never be confused
+/// with a real model output.
+pub const LOW_QUALITY_CLASS: usize = NUM_CLASSES;
 
 /// Fuse per-model softmax outputs by averaging and render the decision.
 ///
@@ -228,6 +236,90 @@ pub fn decide(rows: &[[f32; NUM_CLASSES]], config: &LivenessConfig) -> Option<Li
         probs: avg,
         class,
     })
+}
+
+/// Multi-frame temporal voting configuration.
+///
+/// A single frame can be fooled by a momentarily convincing replay; asking
+/// for several *consecutive* real verdicts is the cheapest temporal defence
+/// and is how the upstream project recommends driving a live stream. The
+/// gate is **fail-closed**: until enough frames have been observed, the face
+/// is not confirmed, so a clipped/too-short clip can never slip through with
+/// only one good frame.
+#[derive(Clone, Debug)]
+pub struct TemporalConfig {
+    /// Consecutive real frames required before a face is confirmed.
+    ///
+    /// `1` reproduces the plain per-frame behaviour (no temporal gate).
+    pub required_frames: usize,
+}
+
+impl Default for TemporalConfig {
+    fn default() -> Self {
+        Self { required_frames: 1 }
+    }
+}
+
+/// Sliding window of consecutive per-frame liveness verdicts for one track.
+///
+/// Feed it frame by frame with [`TemporalVote::observe`]; a single non-real
+/// frame resets the streak. Read [`TemporalVote::confirmed`] for the
+/// fail-closed decision and [`TemporalVote::mean_real_score`] for a steadier
+/// confidence than any one frame provides.
+#[derive(Clone, Debug, Default)]
+pub struct TemporalVote {
+    required_frames: usize,
+    streak: Vec<(bool, f32)>,
+}
+
+impl TemporalVote {
+    /// Construct a vote gate. `required == 0` is treated as `1` so the gate
+    /// always has a meaningful threshold.
+    pub fn new(config: &TemporalConfig) -> Self {
+        Self {
+            required_frames: config.required_frames.max(1),
+            streak: Vec::new(),
+        }
+    }
+
+    /// Record one frame's verdict.
+    ///
+    /// A non-real frame breaks the consecutive-real streak (the window is
+    /// cleared); a real frame appends its real-class probability.
+    pub fn observe(&mut self, is_real: bool, real_score: f32) {
+        if !is_real {
+            self.streak.clear();
+            return;
+        }
+        if self.streak.len() >= self.required_frames {
+            self.streak.remove(0);
+        }
+        self.streak.push((true, real_score));
+    }
+
+    /// Number of consecutive real frames currently held.
+    pub fn consecutive_real(&self) -> usize {
+        self.streak.len()
+    }
+
+    /// Fail-closed confirmation: `true` only once at least
+    /// [`TemporalConfig::required_frames`] consecutive frames were real.
+    pub fn confirmed(&self) -> bool {
+        self.streak.len() >= self.required_frames
+    }
+
+    /// Mean real-class probability over the current streak (`0.0` when empty).
+    pub fn mean_real_score(&self) -> f32 {
+        if self.streak.is_empty() {
+            return 0.0;
+        }
+        self.streak.iter().map(|(_, s)| s).sum::<f32>() / self.streak.len() as f32
+    }
+
+    /// Drop all history (e.g. when the track leaves the frame).
+    pub fn reset(&mut self) {
+        self.streak.clear();
+    }
 }
 
 #[cfg(test)]
@@ -370,5 +462,55 @@ mod tests {
     fn decide_rejects_empty_and_bad_rows() {
         assert!(decide(&[], &LivenessConfig::default()).is_none());
         assert!(decide(&[[0.0, f32::NAN, 0.0]], &LivenessConfig::default()).is_none());
+    }
+
+    #[test]
+    fn temporal_is_per_frame_with_single_requirement() {
+        let mut v = TemporalVote::new(&TemporalConfig { required_frames: 1 });
+        v.observe(true, 0.9);
+        assert!(v.confirmed());
+        assert_eq!(v.consecutive_real(), 1);
+        assert!((v.mean_real_score() - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn temporal_requires_consecutive_real_frames() {
+        let mut v = TemporalVote::new(&TemporalConfig { required_frames: 3 });
+        v.observe(true, 0.6);
+        assert!(!v.confirmed(), "fail-closed until 3 frames");
+        v.observe(true, 0.7);
+        assert!(!v.confirmed());
+        v.observe(true, 0.8);
+        assert!(v.confirmed(), "3 consecutive real frames confirm");
+        assert!((v.mean_real_score() - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn temporal_resets_on_any_spoof_frame() {
+        let mut v = TemporalVote::new(&TemporalConfig { required_frames: 3 });
+        v.observe(true, 0.8);
+        v.observe(true, 0.8);
+        v.observe(false, 0.1);
+        assert_eq!(v.consecutive_real(), 0);
+        assert!(!v.confirmed());
+        v.observe(true, 0.9);
+        assert_eq!(v.consecutive_real(), 1, "count restarts after reset");
+    }
+
+    #[test]
+    fn temporal_keeps_only_the_latest_window() {
+        let mut v = TemporalVote::new(&TemporalConfig { required_frames: 2 });
+        for _ in 0..5 {
+            v.observe(true, 0.9);
+        }
+        assert_eq!(v.consecutive_real(), 2, "window never exceeds required");
+        assert!(v.confirmed());
+    }
+
+    #[test]
+    fn temporal_zero_requirement_treated_as_one() {
+        let mut v = TemporalVote::new(&TemporalConfig { required_frames: 0 });
+        v.observe(true, 0.5);
+        assert!(v.confirmed());
     }
 }
