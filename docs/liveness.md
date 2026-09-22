@@ -97,6 +97,13 @@ quality gate measures the crop on the **native resolution** (before the
 - **brightness** — mean luma bounded to reject dark/washed-out frames;
 - **clipping** — fraction of pixels pinned to `0`/`255`, which spikes on
   clipped phone replays and contrast-crushed prints.
+- **high-frequency energy** (`high_freq_ratio`) — mean-squared residual
+  against a 3×3 box blur, normalised by luma variance. Smooth skin is low
+  while a screen's pixel grid and moiré patterns raise it, so it is a useful
+  replay signal. It is reported **informational only** and deliberately does
+  not block: an uncalibrated threshold would false-reject genuinely detailed
+  faces. Collect it per crop to calibrate a threshold (the v0.4 data loop)
+  before gating on it.
 
 The logic lives in the runtime-free `src/quality.rs` and ships in the default
 zero-dependency build; thresholds come from the `QualityConfig::strict()`
