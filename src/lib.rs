@@ -297,6 +297,11 @@ pub mod batch;
 // zero-dep build; the ONNX-backed `liveness_detector` below does the forward.
 pub mod liveness;
 
+// Runtime-free face-crop quality gate (focus/exposure/clipping/size),
+// used to reject unusable frames before trusting silent liveness. Like
+// `liveness`, ships in the default zero-dependency build.
+pub mod quality;
+
 // ---------------------------------------------------------------------------
 // Opt-in industrial ONNX stack (SCRFD detector + ArcFace recogniser).
 // ---------------------------------------------------------------------------

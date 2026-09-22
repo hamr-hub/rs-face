@@ -112,6 +112,16 @@ pub struct Config {
     /// just an informational field.
     #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
     pub liveness_enforce: bool,
+    /// When true (and liveness is enabled), a face crop that is too small,
+    /// blurry, badly exposed or clipped is rejected before the classifier
+    /// runs — fail-closed protection against low-quality replays/prints.
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub liveness_quality_gate: bool,
+    /// Number of consecutive real frames a tracked face needs before it is
+    /// confirmed live in video/stream jobs. `1` keeps the plain per-frame
+    /// behaviour; higher values add fail-closed temporal defence.
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub liveness_temporal_frames: usize,
 }
 
 impl Config {
@@ -221,6 +231,11 @@ impl Config {
                 .parse::<f32>()
                 .unwrap_or(0.0),
             liveness_enforce: env_bool("RSFACE_LIVENESS_ENFORCE", false),
+            liveness_quality_gate: env_bool("RSFACE_LIVENESS_QUALITY_GATE", false),
+            liveness_temporal_frames: env_or("RSFACE_LIVENESS_TEMPORAL_FRAMES", "1")
+                .parse::<usize>()
+                .unwrap_or(1)
+                .max(1),
         }
     }
 }

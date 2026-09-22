@@ -58,12 +58,18 @@ impl Liveness {
         use rsface::liveness_detector::LivenessDetector;
         use rsface::models::{LIVENESS_MINIFASNET_V1SE, LIVENESS_MINIFASNET_V2};
         use rsface::onnx::SessionConfig;
+        use rsface::quality::QualityConfig;
 
         let dir = &cfg.liveness_models_dir;
         let path_v2 = dir.join(LIVENESS_MINIFASNET_V2.file_name);
         let path_v1se = dir.join(LIVENESS_MINIFASNET_V1SE.file_name);
         let liveness_cfg = LivenessConfig {
             min_real_score: cfg.liveness_min_real_score,
+        };
+        let quality_cfg = if cfg.liveness_quality_gate {
+            QualityConfig::strict()
+        } else {
+            QualityConfig::default()
         };
         match LivenessDetector::open(
             &path_v2,
@@ -72,6 +78,7 @@ impl Liveness {
             Some(&LIVENESS_MINIFASNET_V1SE),
             &SessionConfig::default(),
             liveness_cfg,
+            quality_cfg,
         ) {
             Ok(detector) => {
                 tracing::info!(

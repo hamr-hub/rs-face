@@ -936,6 +936,23 @@ impl JobRegistry {
         };
         let mut frame_idx: u64 = 0;
         let mut _frames_since_reopen: u64 = 0;
+        // Temporal liveness gate (video/stream only): a face must be judged
+        // real on N consecutive frames before enforcement accepts it. Off by
+        // default (`liveness_temporal_frames == 1`) and only meaningful with
+        // a live liveness backend. Fail-closed: warm-up frames are not
+        // confirmed, so a short clip with one good frame cannot pass.
+        let temporal_n = self.cfg.liveness_temporal_frames;
+        let use_temporal = temporal_n > 1
+            && self.gallery.has_liveness()
+            && matches!(job.kind, JobKind::Video | JobKind::Stream);
+        let mut face_tracker = rsface::tracker::FaceTracker::default();
+        let mut temporal_votes: std::collections::HashMap<
+            u32,
+            rsface::liveness::TemporalVote,
+        > = std::collections::HashMap::new();
+        let temporal_cfg = rsface::liveness::TemporalConfig {
+            required_frames: temporal_n,
+        };
         // 批量 DB 写缓冲(20 帧一批;cancel/done 路径都会 flush)。
         let mut db_pending: Vec<FrameResult> = Vec::new();
         // 已产出的人脸裁剪总数(跨帧累计)。旧实现每帧都 lock frames 把
@@ -1028,12 +1045,33 @@ impl JobRegistry {
                 // 标注帧。
                 // Compute liveness once per detection; annotation colour and the
                 // face-crop entries below share these verdicts.
+                let tracked = if use_temporal {
+                    face_tracker.update(&detections)
+                } else {
+                    Vec::new()
+                };
                 let mut verdicts: Vec<(Option<crate::liveness::LivenessVerdict>, bool)> =
                     Vec::with_capacity(detections.len());
-                for d in &detections {
+                for (idx, d) in detections.iter().enumerate() {
                     let live = self.gallery.check_liveness(&base, d);
-                    let blocked = self.gallery.liveness_enforce()
+                    let mut blocked = self.gallery.liveness_enforce()
                         && live.as_ref().is_some_and(|v| !v.is_real);
+                    if use_temporal {
+                        // Feed this track's streak and gate enforcement on
+                        // fail-closed temporal confirmation.
+                        let track_id = tracked.get(idx).map(|t| t.id).unwrap_or(0);
+                        let vote = temporal_votes
+                            .entry(track_id)
+                            .or_insert_with(|| rsface::liveness::TemporalVote::new(&temporal_cfg));
+                        vote.observe(
+                            live.as_ref().is_some_and(|v| v.is_real),
+                            live.as_ref().map(|v| v.real_score).unwrap_or(0.0),
+                        );
+                        if !vote.confirmed() {
+                            // Still warming up: not a confirmed live face.
+                            blocked = self.gallery.liveness_enforce();
+                        }
+                    }
                     if live.as_ref().is_some_and(|v| !v.is_real) {
                         frame_spoof += 1;
                     }
