@@ -29,8 +29,11 @@ use rsface::cnn::{CnnConfig, CnnDetector, CnnWeights};
 use rsface::detector::{Detection, Detector, DetectorConfig};
 use rsface::face_detector::FaceDetector;
 use rsface::haar::Cascade;
+use rsface::hog_face::{HogConfig, HogFaceDetector};
 use rsface::image::{png::write_png_rgb, GrayImage, RgbImage};
+use rsface::lbp_face::{LbpConfig, LbpFaceDetector};
 use rsface::luminance_face::{LuminanceConfig, LuminanceFaceDetector};
+use rsface::skin_face::{SkinConfig, SkinFaceDetector};
 use rsface::source::{open as open_source, Frame};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -1630,6 +1633,9 @@ pub enum DetectorKind {
     Haar(Detector),
     Cnn(CnnDetector),
     Luminance(LuminanceFaceDetector),
+    Skin(SkinFaceDetector),
+    Lbp(LbpFaceDetector),
+    Hog(HogFaceDetector),
 }
 
 impl DetectorKind {
@@ -1658,6 +1664,9 @@ impl DetectorKind {
                     .collect()
             }
             DetectorKind::Luminance(d) => d.detect(gray),
+            DetectorKind::Skin(d) => d.detect(gray),
+            DetectorKind::Lbp(d) => d.detect(gray),
+            DetectorKind::Hog(d) => d.detect(gray),
         }
     }
 
@@ -1669,6 +1678,9 @@ impl DetectorKind {
             DetectorKind::Haar(_) => Self::KIND_HAAR,
             DetectorKind::Cnn(_) => Self::KIND_CNN,
             DetectorKind::Luminance(_) => Self::KIND_LUMINANCE,
+            DetectorKind::Skin(_) => Self::KIND_SKIN,
+            DetectorKind::Lbp(_) => Self::KIND_LBP,
+            DetectorKind::Hog(_) => Self::KIND_HOG,
         }
     }
 
@@ -1681,6 +1693,9 @@ impl DetectorKind {
     pub const KIND_HAAR: &'static str = "haar";
     pub const KIND_CNN: &'static str = "cnn";
     pub const KIND_LUMINANCE: &'static str = "luminance";
+    pub const KIND_SKIN: &'static str = "skin";
+    pub const KIND_LBP: &'static str = "lbp";
+    pub const KIND_HOG: &'static str = "hog";
 }
 
 /// 解析 `RSFACE_ALGO` 环境变量,未设置时按历史规则(cnn_weights 路径
@@ -1694,7 +1709,10 @@ fn select_algo_name(cfg: &Config) -> String {
         Some(name)
             if name == DetectorKind::KIND_HAAR
                 || name == DetectorKind::KIND_CNN
-                || name == DetectorKind::KIND_LUMINANCE =>
+                || name == DetectorKind::KIND_LUMINANCE
+                || name == DetectorKind::KIND_SKIN
+                || name == DetectorKind::KIND_LBP
+                || name == DetectorKind::KIND_HOG =>
         {
             from_env.unwrap()
         }
@@ -1768,6 +1786,15 @@ pub fn build_detector(cfg: &Config, override_algo: Option<&str>) -> std::io::Res
         DetectorKind::KIND_LUMINANCE => Ok(DetectorKind::Luminance(LuminanceFaceDetector::new(
             LuminanceConfig::default(),
         ))),
+        DetectorKind::KIND_SKIN => Ok(DetectorKind::Skin(SkinFaceDetector::new(
+            SkinConfig::default(),
+        ))),
+        DetectorKind::KIND_LBP => Ok(DetectorKind::Lbp(
+            LbpFaceDetector::new(LbpConfig::default()),
+        )),
+        DetectorKind::KIND_HOG => Ok(DetectorKind::Hog(
+            HogFaceDetector::new(HogConfig::default()),
+        )),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unsupported algo '{other}'"),
@@ -1797,6 +1824,15 @@ pub fn build_detector_by_name(name: &str) -> std::io::Result<DetectorKind> {
         DetectorKind::KIND_LUMINANCE => Ok(DetectorKind::Luminance(LuminanceFaceDetector::new(
             LuminanceConfig::default(),
         ))),
+        DetectorKind::KIND_SKIN => Ok(DetectorKind::Skin(SkinFaceDetector::new(
+            SkinConfig::default(),
+        ))),
+        DetectorKind::KIND_LBP => Ok(DetectorKind::Lbp(
+            LbpFaceDetector::new(LbpConfig::default()),
+        )),
+        DetectorKind::KIND_HOG => Ok(DetectorKind::Hog(
+            HogFaceDetector::new(HogConfig::default()),
+        )),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unsupported algo '{other}'"),
@@ -1819,6 +1855,9 @@ pub fn available_algos() -> &'static [&'static str] {
         DetectorKind::KIND_HAAR,
         DetectorKind::KIND_CNN,
         DetectorKind::KIND_LUMINANCE,
+        DetectorKind::KIND_SKIN,
+        DetectorKind::KIND_LBP,
+        DetectorKind::KIND_HOG,
     ]
 }
 
