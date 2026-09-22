@@ -463,9 +463,14 @@ impl Db {
         .bind(&f.annotated_key).bind(&f.original_key)
         .execute(pool).await;
         for (i, face) in f.faces.iter().enumerate() {
+            let quality = face
+                .liveness
+                .as_ref()
+                .and_then(|v| v.quality.as_ref());
             let _ = sqlx::query(
-                "INSERT INTO faces (job_id, frame_idx, face_idx, key, x, y, w, h, score)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",
+                "INSERT INTO faces (job_id, frame_idx, face_idx, key, x, y, w, h, score,
+                                    sharpness, mean_brightness, clipped_ratio, high_freq_ratio)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING",
             )
             .bind(job_id)
             .bind(f.index as i64)
@@ -476,6 +481,10 @@ impl Db {
             .bind(face.w as i32)
             .bind(face.h as i32)
             .bind(face.score)
+            .bind(quality.map(|q| q.sharpness))
+            .bind(quality.map(|q| q.mean_brightness))
+            .bind(quality.map(|q| q.clipped_ratio))
+            .bind(quality.map(|q| q.high_freq_ratio))
             .execute(pool)
             .await;
         }
@@ -532,8 +541,16 @@ impl Db {
         let mut w = Vec::with_capacity(total_faces);
         let mut h = Vec::with_capacity(total_faces);
         let mut score = Vec::with_capacity(total_faces);
+        let mut sharpness = Vec::with_capacity(total_faces);
+        let mut mean_brightness = Vec::with_capacity(total_faces);
+        let mut clipped_ratio = Vec::with_capacity(total_faces);
+        let mut high_freq_ratio = Vec::with_capacity(total_faces);
         for f in frames {
             for (i, face) in f.faces.iter().enumerate() {
+                let quality = face
+                    .liveness
+                    .as_ref()
+                    .and_then(|v| v.quality.as_ref());
                 fidx.push(f.index as i64);
                 face_idx.push(i as i32);
                 key.push(face.key.clone());
@@ -542,15 +559,22 @@ impl Db {
                 w.push(face.w as i32);
                 h.push(face.h as i32);
                 score.push(face.score);
+                sharpness.push(quality.map(|q| q.sharpness));
+                mean_brightness.push(quality.map(|q| q.mean_brightness));
+                clipped_ratio.push(quality.map(|q| q.clipped_ratio));
+                high_freq_ratio.push(quality.map(|q| q.high_freq_ratio));
             }
         }
         if let Err(e) = sqlx::query(
-            "INSERT INTO faces (job_id, frame_idx, face_idx, key, x, y, w, h, score)
-             SELECT $1, * FROM UNNEST($2::bigint[], $3::int[], $4::text[], $5::int[], $6::int[], $7::int[], $8::int[], $9::real[])
+            "INSERT INTO faces (job_id, frame_idx, face_idx, key, x, y, w, h, score,
+                                sharpness, mean_brightness, clipped_ratio, high_freq_ratio)
+             SELECT $1, * FROM UNNEST($2::bigint[], $3::int[], $4::text[], $5::int[], $6::int[], $7::int[], $8::int[], $9::real[],
+                                      $10::real[], $11::real[], $12::real[], $13::real[])
              ON CONFLICT DO NOTHING"
         )
         .bind(job_id).bind(&fidx).bind(&face_idx).bind(&key)
         .bind(&x).bind(&y).bind(&w).bind(&h).bind(&score)
+        .bind(&sharpness).bind(&mean_brightness).bind(&clipped_ratio).bind(&high_freq_ratio)
         .execute(pool).await
         {
             tracing::warn!("[persist] add_frames_batch faces failed: {e}");
