@@ -415,9 +415,14 @@ pub async fn verify_image(
         None => return classify_enroll_err("decode_failed"),
     };
     let rgb = decode_rgb(&bytes).unwrap_or_else(|| rsface::image::RgbImage::from_gray(&gray));
-    // Liveness needs a face box: run Haar and take the largest detection.
-    let detector = build_detector("haar", &state.cfg.cascade_path);
-    let largest = detector.and_then(|d| largest_detection(&d.detect(&gray)));
+    // Liveness needs a face box: only build/run Haar when a liveness backend
+    // is actually loaded, so a verify call without liveness pays no detection.
+    let largest = if state.gallery.has_liveness() {
+        build_detector("haar", &state.cfg.cascade_path)
+            .and_then(|d| largest_detection(&d.detect(&gray)))
+    } else {
+        None
+    };
     let liveness = largest
         .as_ref()
         .and_then(|det| state.gallery.check_liveness(&rgb, det));
