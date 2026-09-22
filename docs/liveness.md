@@ -117,6 +117,12 @@ object carries a `quality` snapshot (`sharpness`, `mean_brightness`,
 `clipped_ratio`, `high_freq_ratio`, crop size), so the replay signals can be
 collected alongside real verdicts to calibrate thresholds.
 
+These per-face measurements are also persisted by migration
+`0007_face_quality.sql`: the four signals are written to nullable columns on
+the `faces` table (NULL when liveness did not run for that face), so
+threshold calibration can aggregate data across jobs and server restarts
+rather than only observing live API responses.
+
 ## Temporal voting
 
 For video / live-stream jobs, a face can additionally be required to look real
