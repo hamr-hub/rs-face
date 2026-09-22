@@ -97,6 +97,16 @@ pub struct Config {
     /// Minimum cosine margin between the best and the runner-up match.
     /// `0.0` disables the check (always pick the top-ranked label).
     pub gallery_match_min_margin: f32,
+    /// Directory holding the MiniFASNet ONNX graphs (fetched via
+    /// tools/fetch_models.sh). Used only when liveness is enabled.
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub liveness_models_dir: PathBuf,
+    /// When true (and a backend feature is compiled in), /identify runs a
+    /// silent face-anti-spoofing check and reports a liveness verdict per face.
+    pub liveness_enabled: bool,
+    /// Minimum averaged real-class probability to accept a face as live.
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub liveness_min_real_score: f32,
 }
 
 impl Config {
@@ -200,12 +210,25 @@ impl Config {
             gallery_match_min_margin: env_or("RSFACE_GALLERY_MATCH_MIN_MARGIN", "0.0")
                 .parse::<f32>()
                 .unwrap_or(0.0),
+            liveness_models_dir: PathBuf::from(env_or("RSFACE_LIVENESS_MODELS_DIR", "models")),
+            liveness_enabled: env_bool("RSFACE_LIVENESS_ENABLED", false),
+            liveness_min_real_score: env_or("RSFACE_LIVENESS_MIN_REAL_SCORE", "0.0")
+                .parse::<f32>()
+                .unwrap_or(0.0),
         }
     }
 }
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Parse a boolean env var: `1/true/yes/on` (case-insensitive) enable it.
+fn env_bool(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(s) => matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => default,
+    }
 }
 
 /// 空字符串视作未配置,返回 None;否则返回 Some(PathBuf)。

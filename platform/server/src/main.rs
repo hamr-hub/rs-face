@@ -8,6 +8,7 @@ mod config;
 mod gallery;
 mod gallery_handlers;
 mod jobs;
+mod liveness;
 mod metrics;
 mod persist;
 mod recognition;
@@ -150,14 +151,7 @@ async fn main() {
         started_at: std::time::Instant::now(),
         shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         gallery_cache: Mutex::new(None),
-        gallery: Arc::new(
-            gallery::GalleryState::load(
-                (*db).clone(),
-                cfg.gallery_seed,
-                cfg.gallery_match_config(),
-            )
-            .await,
-        ),
+        gallery: Arc::new(gallery::GalleryState::load((*db).clone(), &cfg).await),
     });
 
     // 响应缓存层(无外部依赖)。四份 TTL cache:

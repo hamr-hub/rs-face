@@ -12,13 +12,15 @@
 //! The DB schema lives in `migrations/0005_persons.sql`.
 
 use crate::jobs::DetectorKind;
+use crate::liveness::{Liveness, LivenessVerdict};
 use crate::persist::Db;
 use rsface::embedding::{Embedding, Gallery, MatchConfig};
 use rsface::embednet::EmbedNet;
 use rsface::face::Detection;
 use rsface::image::codec::read_pgm;
 use rsface::image::png::decode_to_gray;
-use rsface::image::{GrayImage, RgbImage};
+use rsface::image::GrayImage;
+use rsface::image::RgbImage;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
@@ -35,20 +37,25 @@ pub struct GalleryState {
     embedder: Arc<EmbedNet>,
     db: Db,
     cfg: MatchConfig,
+    liveness: Option<Liveness>,
 }
 
 impl GalleryState {
-    pub async fn load(db: Db, seed: u64, cfg: MatchConfig) -> Self {
+    pub async fn load(db: Db, cfg: &crate::config::Config) -> Self {
+        let seed = cfg.gallery_seed;
+        let match_cfg = cfg.gallery_match_config();
         let embedder = Arc::new(EmbedNet::new(seed));
-        let mut gallery = Gallery::new(cfg.clone());
+        let mut gallery = Gallery::new(match_cfg.clone());
         if let Err(e) = hydrate_from_db(&db, &mut gallery).await {
             tracing::warn!("[gallery] hydrate failed: {e} (starting empty)");
         }
+        let liveness = Liveness::open(cfg);
         Self {
             gallery: Arc::new(RwLock::new(gallery)),
             embedder,
             db,
-            cfg,
+            cfg: match_cfg,
+            liveness,
         }
     }
 
@@ -66,6 +73,7 @@ impl GalleryState {
             embedder: Arc::new(EmbedNet::new(seed)),
             db: Db { pool: None },
             cfg,
+            liveness: None,
         }
     }
 
@@ -93,6 +101,7 @@ impl GalleryState {
     pub async fn recognize(
         &self,
         detector: DetectorKind,
+        rgb: &RgbImage,
         gray: &GrayImage,
         top_k: usize,
     ) -> Vec<RankedFace> {
@@ -100,14 +109,19 @@ impl GalleryState {
         let gallery = self.gallery.read().await;
         detections
             .iter()
-            .filter_map(|det| {
+            .map(|det| {
                 let crop = crop_gray(gray, det);
-                let emb = self.embedder.embed(&crop)?;
-                let ranked = gallery.rank(&emb);
-                Some(RankedFace {
+                let ranked = self
+                    .embedder
+                    .embed(&crop)
+                    .map(|emb| gallery.rank(&emb).into_iter().take(top_k).collect())
+                    .unwrap_or_default();
+                let liveness = self.liveness.as_ref().and_then(|live| live.check(rgb, det));
+                RankedFace {
                     detection: det.clone(),
-                    matches: ranked.into_iter().take(top_k).collect(),
-                })
+                    matches: ranked,
+                    liveness,
+                }
             })
             .collect()
     }
@@ -136,18 +150,22 @@ pub struct RankedFace {
     pub detection: Detection,
     /// Top-k ranked identities with cosine similarity, descending.
     pub matches: Vec<(String, f32)>,
+    /// Optional silent liveness verdict; `None` when liveness is disabled
+    /// or the backend could not produce a decision.
+    pub liveness: Option<LivenessVerdict>,
 }
 
 impl Serialize for RankedFace {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("RankedFace", 6)?;
+        let mut st = s.serialize_struct("RankedFace", 7)?;
         st.serialize_field("x", &self.detection.x)?;
         st.serialize_field("y", &self.detection.y)?;
         st.serialize_field("w", &self.detection.w)?;
         st.serialize_field("h", &self.detection.h)?;
         st.serialize_field("score", &self.detection.score)?;
         st.serialize_field("matches", &self.matches)?;
+        st.serialize_field("liveness", &self.liveness)?;
         st.end()
     }
 }
@@ -379,7 +397,7 @@ impl GalleryState {
         .bind(det.y as i32)
         .bind(det.w as i32)
         .bind(det.h as i32)
-        .bind(det.score as f32)
+        .bind(det.score)
         .bind(now)
         .execute(pool)
         .await
@@ -399,7 +417,7 @@ impl GalleryState {
             id: face_id,
             person_id: person_id.to_string(),
             dim: EMBED_DIM as i32,
-            quality: det.score as f32,
+            quality: det.score,
             bbox_x: det.x as i32,
             bbox_y: det.y as i32,
             bbox_w: det.w as i32,

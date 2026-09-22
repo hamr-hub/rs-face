@@ -315,6 +315,7 @@ pub async fn identify_image(
         Some(g) => g,
         None => return classify_enroll_err("decode_failed"),
     };
+    let rgb = decode_rgb(&bytes).unwrap_or_else(|| rsface::image::RgbImage::from_gray(&gray));
     let width = gray.width();
     let height = gray.height();
     let detector = match build_detector(&algo_name, &state.cfg.cascade_path) {
@@ -328,7 +329,7 @@ pub async fn identify_image(
             );
         }
     };
-    let faces = state.gallery.recognize(detector, &gray, top_k).await;
+    let faces = state.gallery.recognize(detector, &rgb, &gray, top_k).await;
     Json(IdentifyResult {
         face_count: faces.len(),
         width,
@@ -455,6 +456,20 @@ fn decode_gray(bytes: &[u8]) -> Option<rsface::image::GrayImage> {
     rsface::image::codec::read_ppm(&mut cur)
         .ok()
         .map(|img| img.to_gray())
+}
+
+/// Decode an uploaded image to RGB, trying PNG/JPEG and falling back to
+/// reconstructing colour from a grayscale decode. Liveness needs RGB.
+fn decode_rgb(bytes: &[u8]) -> Option<rsface::image::RgbImage> {
+    use std::io::Cursor;
+    let mut cur = Cursor::new(bytes);
+    if let Ok(rgb) = rsface::image::png::decode_to_rgb(&mut cur) {
+        return Some(rgb);
+    }
+    if let Ok(rgb) = rsface::image::jpeg::decode_jpeg_rgb(bytes) {
+        return Some(rgb);
+    }
+    decode_gray(bytes).map(|g| rsface::image::RgbImage::from_gray(&g))
 }
 
 fn build_detector(algo: &str, cascade_path: &std::path::Path) -> Option<DetectorKind> {

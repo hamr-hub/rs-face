@@ -45,7 +45,15 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "ansi"] }
 
+[features]
+# Default build stays lean (pure-Haar, no ONNX runtime). Enable `liveness`
+# to pull in rs-face's pure-Rust tract ONNX backend for MiniFASNet anti-spoofing.
+default = []
+liveness = ["rsface/tract-backend"]
+
 [dev-dependencies]
+# Integration tests also exercise rs-face types directly (decoding, Detection).
+rsface = { package = "rs-face", path = ".." }
 # 集成测试:跑整个 axum router 起来 + 用 reqwest 模拟真实 HTTP 请求。
 # 不引入 reqwest 之外的服务容器依赖;集成测试假设有 rustfs / postgres 在
 # 127.0.0.1 跑,没起来就跳过。
