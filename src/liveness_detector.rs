@@ -11,7 +11,7 @@
 //! The crop-expansion, BGR/NCHW build, softmax and fusion decision all live
 //! in [`crate::liveness`] as runtime-free functions; this module only supplies
 //! the missing forward pass, keeping the boundary sharp in the same spirit as
-//! [`crate::scrfd_detector`].
+//! `crate::scrfd_detector` (ONNX-feature gated).
 //!
 //! # Two models are loaded, not one
 //!

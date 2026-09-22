@@ -13,8 +13,8 @@
 
 use crate::jobs::DetectorKind;
 use crate::persist::Db;
-use rsface::embednet::EmbedNet;
 use rsface::embedding::{Embedding, Gallery, MatchConfig};
+use rsface::embednet::EmbedNet;
 use rsface::face::Detection;
 use rsface::image::codec::read_pgm;
 use rsface::image::png::decode_to_gray;
@@ -59,6 +59,7 @@ impl GalleryState {
     /// Minimal empty instance, mainly for integration tests that build a
     /// JobRegistry by hand (no DB / no async): in-memory gallery, seeded
     /// EmbedNet, no pool. Not used by production startup.
+    #[allow(dead_code)]
     pub fn empty_for_tests(seed: u64, cfg: MatchConfig) -> Self {
         Self {
             gallery: Arc::new(RwLock::new(Gallery::new(cfg.clone()))),
@@ -192,6 +193,7 @@ pub struct PersonCreate {
     pub note: Option<String>,
 }
 
+#[allow(dead_code)] // reserved for the person update endpoint (next iteration)
 #[derive(Clone, Debug, Deserialize)]
 pub struct PersonUpdate {
     #[serde(default)]
@@ -232,11 +234,24 @@ impl GalleryState {
         } else {
             "SELECT id, display_name, external_id, note, faces_count, created_ms, updated_ms, archived, archived_ms FROM persons WHERE archived = false ORDER BY created_ms DESC"
         };
-        sqlx::query_as::<_, (String, String, Option<String>, Option<String>, i32, i64, i64, bool, Option<i64>)>(q)
-            .fetch_all(pool)
-            .await
-            .map(|rows| rows.into_iter().map(row_to_person).collect())
-            .unwrap_or_default()
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                i32,
+                i64,
+                i64,
+                bool,
+                Option<i64>,
+            ),
+        >(q)
+        .fetch_all(pool)
+        .await
+        .map(|rows| rows.into_iter().map(row_to_person).collect())
+        .unwrap_or_default()
     }
 
     pub async fn get_person(&self, id: &str) -> Option<Person> {
@@ -253,7 +268,11 @@ impl GalleryState {
     }
 
     pub async fn create_person(&self, body: PersonCreate) -> Result<Person, String> {
-        let pool = self.db.pool.as_ref().ok_or_else(|| "DB disabled".to_string())?;
+        let pool = self
+            .db
+            .pool
+            .as_ref()
+            .ok_or_else(|| "DB disabled".to_string())?;
         let id = new_id("p_");
         let now = now_ms();
         sqlx::query(
@@ -278,7 +297,11 @@ impl GalleryState {
     }
 
     pub async fn archive_person(&self, id: &str) -> Result<(), String> {
-        let pool = self.db.pool.as_ref().ok_or_else(|| "DB disabled".to_string())?;
+        let pool = self
+            .db
+            .pool
+            .as_ref()
+            .ok_or_else(|| "DB disabled".to_string())?;
         let now = now_ms();
         sqlx::query(
             "UPDATE persons SET archived = true, archived_ms = $2, updated_ms = $2 WHERE id = $1",
@@ -304,7 +327,11 @@ impl GalleryState {
         image_bytes: &[u8],
         enroll: FaceEnroll,
     ) -> Result<FaceMeta, String> {
-        let pool = self.db.pool.as_ref().ok_or_else(|| "DB disabled".to_string())?;
+        let pool = self
+            .db
+            .pool
+            .as_ref()
+            .ok_or_else(|| "DB disabled".to_string())?;
         sqlx::query("SELECT 1 FROM persons WHERE id = $1 AND archived = false")
             .bind(person_id)
             .fetch_optional(pool)
@@ -312,8 +339,7 @@ impl GalleryState {
             .map_err(|e| format!("lookup person: {e}"))?
             .ok_or_else(|| "person_not_found".to_string())?;
 
-        let img = decode_to_gray_or_gray(image_bytes)
-            .ok_or_else(|| "decode_failed".to_string())?;
+        let img = decode_to_gray_or_gray(image_bytes).ok_or_else(|| "decode_failed".to_string())?;
         let detector = build_haar_detector().ok_or_else(|| "detector_build_failed".to_string())?;
         let detections = detector.detect(&img);
         if detections.is_empty() {
@@ -323,10 +349,7 @@ impl GalleryState {
             Some([x, y, w, h]) => detections
                 .iter()
                 .find(|d| {
-                    d.x == x as usize
-                        && d.y == y as usize
-                        && d.w == w as usize
-                        && d.h == h as usize
+                    d.x == x as usize && d.y == y as usize && d.w == w as usize && d.h == h as usize
                 })
                 .cloned()
                 .unwrap_or_else(|| pick_largest(&detections)),
@@ -403,7 +426,11 @@ impl GalleryState {
     }
 
     pub async fn delete_face(&self, face_id: &str) -> Result<(), String> {
-        let pool = self.db.pool.as_ref().ok_or_else(|| "DB disabled".to_string())?;
+        let pool = self
+            .db
+            .pool
+            .as_ref()
+            .ok_or_else(|| "DB disabled".to_string())?;
         let row: Option<(String,)> =
             sqlx::query_as("SELECT person_id FROM person_faces WHERE id = $1")
                 .bind(face_id)
@@ -437,7 +464,9 @@ impl GalleryState {
         .ok()
         .flatten();
         let Some((bytes,)) = row else { return };
-        let Some(embedding) = Embedding::from_bytes_le(&bytes) else { return };
+        let Some(embedding) = Embedding::from_bytes_le(&bytes) else {
+            return;
+        };
         let mut g = self.gallery.write().await;
         g.remove(person_id);
         g.enroll(person_id, embedding);
@@ -448,19 +477,32 @@ impl GalleryState {
 // helpers
 // ---------------------------------------------------------------------------
 
-fn row_to_person(
-    r: (
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        i32,
-        i64,
-        i64,
-        bool,
-        Option<i64>,
-    ),
-) -> Person {
+type PersonRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i32,
+    i64,
+    i64,
+    bool,
+    Option<i64>,
+);
+type FaceMetaRow = (
+    String,
+    String,
+    i32,
+    f32,
+    i32,
+    i32,
+    i32,
+    i32,
+    Option<String>,
+    i64,
+    String,
+);
+
+fn row_to_person(r: PersonRow) -> Person {
     Person {
         id: r.0,
         display_name: r.1,
@@ -474,21 +516,7 @@ fn row_to_person(
     }
 }
 
-fn row_to_face_meta(
-    r: (
-        String,
-        String,
-        i32,
-        f32,
-        i32,
-        i32,
-        i32,
-        i32,
-        Option<String>,
-        i64,
-        String,
-    ),
-) -> FaceMeta {
+fn row_to_face_meta(r: FaceMetaRow) -> FaceMeta {
     FaceMeta {
         id: r.0,
         person_id: r.1,
@@ -601,7 +629,9 @@ fn fallback_embedding() -> Embedding {
 }
 
 async fn hydrate_from_db(db: &Db, gallery: &mut Gallery) -> Result<(), String> {
-    let Some(pool) = db.pool.as_ref() else { return Ok(()); };
+    let Some(pool) = db.pool.as_ref() else {
+        return Ok(());
+    };
     let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
         "SELECT person_id, embedding FROM person_faces WHERE person_id IN \
          (SELECT id FROM persons WHERE archived = false) \
@@ -637,9 +667,6 @@ fn build_haar_detector() -> Option<DetectorKind> {
     Some(crate::jobs::DetectorKind::Haar(detector))
 }
 
-// Re-export to keep public API stable even though we use it internally.
-pub use self::crop_gray as public_crop_gray;
-
 // ---------------------------------------------------------------------------
 // Embedding LE byte decoding — local helper because rsface::Embedding's
 // serde derives don't ship a BYTEA codec.
@@ -651,7 +678,7 @@ trait EmbeddingIo {
 
 impl EmbeddingIo for Embedding {
     fn from_bytes_le(bytes: &[u8]) -> Option<Embedding> {
-        if bytes.len() % 4 != 0 {
+        if !bytes.len().is_multiple_of(4) {
             return None;
         }
         let mut out = Vec::with_capacity(bytes.len() / 4);

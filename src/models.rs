@@ -622,7 +622,10 @@ mod tests {
         // here automatically and this assertion just confirms YuNet is in
         // the set).
         let ids: Vec<_> = commercially_usable().map(|m| m.id).collect();
-        assert!(ids.contains(&"yunet_2023mar"), "YuNet should be commercial-use");
+        assert!(
+            ids.contains(&"yunet_2023mar"),
+            "YuNet should be commercial-use"
+        );
         for id in &ids {
             assert!(
                 *id == "yunet_2023mar"

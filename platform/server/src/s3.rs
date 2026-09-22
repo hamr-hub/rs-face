@@ -258,8 +258,7 @@ impl S3Client {
                 Some(e) => format!("bytes={start}-{e}"),
                 None => format!("bytes={start}-"),
             };
-            let resp =
-                self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
+            let resp = self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
             let cr_total = resp
                 .header("content-range")
                 .and_then(|v| v.rsplit('/').next())
@@ -287,8 +286,7 @@ impl S3Client {
                 Some(e) => format!("bytes={start}-{e}"),
                 None => format!("bytes={start}-"),
             };
-            let resp =
-                self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
+            let resp = self.request("GET", &format!("/{key}"), &[], &[("range", &range)], None)?;
             let total = resp
                 .header("content-range")
                 .and_then(|v| v.rsplit('/').next())

@@ -10,7 +10,7 @@
 //! - `POST /api/jobs/video`       上传视频检测(multipart: file,≤ UPLOAD_LIMIT_VIDEO_GB)
 //! - `POST /api/jobs/stream`      直播流检测(JSON: {url})
 //! - `POST /api/import/video`     视频导入(multipart,等价 `/api/jobs/video`,
-//!   但响应额外带 S3 LAN URL 让浏览器直接 <video> 播放)
+//!   但响应额外带 S3 LAN URL 让浏览器直接 `<video>` 播放)
 //! - `POST /api/import/video-url` 视频 URL 导入(JSON `{url, algo?}`,服务端 ffmpeg 拉取,
 //!   带 60s 内同 URL 去重 + 3 次指数退避重试)
 //! - `GET  /api/import/{id}/urls`  导入任务 S3 LAN URL 轮询端点(轻量,只查内存)
@@ -114,7 +114,10 @@ pub fn router(state: Arc<JobRegistry>, caches: ResponseCaches) -> Router {
         // `Arc<JobRegistry>` we already pass to the rest of the router.
         .route("/api/persons", get(super::gallery_handlers::list_persons))
         .route("/api/persons", post(super::gallery_handlers::create_person))
-        .route("/api/persons/{id}", get(super::gallery_handlers::get_person))
+        .route(
+            "/api/persons/{id}",
+            get(super::gallery_handlers::get_person),
+        )
         .route(
             "/api/persons/{id}",
             axum::routing::delete(super::gallery_handlers::archive_person),
@@ -518,12 +521,7 @@ async fn list_jobs(
     } else {
         let offset = q.offset.unwrap_or(0).min(total);
         let limit = q.limit.unwrap_or(total.saturating_sub(offset));
-        let jobs: Vec<serde_json::Value> = all
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .cloned()
-            .collect();
+        let jobs: Vec<serde_json::Value> = all.iter().skip(offset).take(limit).cloned().collect();
         serde_json::json!({
             "jobs": jobs,
             "total": total,
@@ -1028,7 +1026,12 @@ async fn recognize_job(
     const RECOGNIZE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
     let detector_name = match &q.algos {
-        Some(s) if !s.is_empty() => s.split(',').next().unwrap_or("haar").trim().to_ascii_lowercase(),
+        Some(s) if !s.is_empty() => s
+            .split(',')
+            .next()
+            .unwrap_or("haar")
+            .trim()
+            .to_ascii_lowercase(),
         _ => "haar".to_string(),
     };
     if !crate::jobs::available_algos().contains(&detector_name.as_str()) {
@@ -1047,7 +1050,8 @@ async fn recognize_job(
         .original_media_key
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .clone() else {
+        .clone()
+    else {
         return error_response_with(
             StatusCode::NOT_FOUND,
             "no_media",
@@ -1065,7 +1069,10 @@ async fn recognize_job(
     }
 
     let ext = std::path::Path::new(
-        media_key.rsplit_once('/').map(|(_, name)| name).unwrap_or(&media_key),
+        media_key
+            .rsplit_once('/')
+            .map(|(_, name)| name)
+            .unwrap_or(&media_key),
     )
     .extension()
     .and_then(|e| e.to_str())
@@ -1086,7 +1093,10 @@ async fn recognize_job(
             let path = state.cfg.local_media_dir.join(rest);
             match tokio::fs::metadata(&path).await {
                 Ok(m) if m.len() > RECOGNIZE_MAX_BYTES => {
-                    return error_response(StatusCode::PAYLOAD_TOO_LARGE, "original media too large")
+                    return error_response(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "original media too large",
+                    )
                 }
                 Err(e) => {
                     return error_response(
@@ -1223,7 +1233,7 @@ async fn recognize_job(
 }
 
 /// 从 `state.gallery_cache` 取画廊。缓存命中:Arc clone 返回;未命中:
-/// 同步加载 `GalleryBundle::load`,把结果(画廊路径 + Arc)写回缓存。
+/// 同步加载 `crate::recognition::GalleryBundle::load`,把结果(画廊路径 + Arc)写回缓存。
 ///
 /// 画廊加载开销:LBPH 增量注册 O(N crops),Eigenface PCA O(N²),
 /// Fisherface LDA O(N²·K) — 一次加载 ~100ms 级(50 身份 / 500 crops),
@@ -1241,7 +1251,10 @@ fn load_or_get_gallery(
 
     // 快速路径:已缓存且路径一致。
     {
-        let cache = state.gallery_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = state
+            .gallery_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some((cached_dir, _ts, bundle)) = cache.as_ref() {
             if *cached_dir == dir_abs {
                 return Some(std::sync::Arc::clone(bundle));
@@ -1263,7 +1276,10 @@ fn load_or_get_gallery(
         }
     };
     let ts = std::time::SystemTime::now();
-    let mut cache = state.gallery_cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = state
+        .gallery_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     *cache = Some((dir_abs, ts, std::sync::Arc::clone(&bundle)));
     Some(bundle)
 }
@@ -2164,7 +2180,11 @@ async fn media(
                     return (
                         StatusCode::NOT_MODIFIED,
                         [
-                            (header::ETAG, HeaderValue::from_str(&local_etag).unwrap_or_else(|_| HeaderValue::from_static("W/\"-\""))),
+                            (
+                                header::ETAG,
+                                HeaderValue::from_str(&local_etag)
+                                    .unwrap_or_else(|_| HeaderValue::from_static("W/\"-\"")),
+                            ),
                             (header::CACHE_CONTROL, HeaderValue::from_static(cache)),
                             (header::ACCEPT_RANGES, HeaderValue::from_static("bytes")),
                         ],
@@ -2217,11 +2237,10 @@ async fn media(
                 // 显式把所有元素都套成 HeaderValue,避免 `ct`/`cache` 都是 `&str`
                 // 时编译器把数组元素类型推断成 `&str`,然后 ETag 处的 HeaderValue
                 // 表达式不匹配。`from_str` 失败兜底 `W/"-"`,再失败兜底空值。
-                let etag: HeaderValue = HeaderValue::from_str(&local_etag)
-                    .unwrap_or_else(|_| {
-                        HeaderValue::from_str("W/\"-\"")
-                            .unwrap_or_else(|_| HeaderValue::from_static(""))
-                    });
+                let etag: HeaderValue = HeaderValue::from_str(&local_etag).unwrap_or_else(|_| {
+                    HeaderValue::from_str("W/\"-\"")
+                        .unwrap_or_else(|_| HeaderValue::from_static(""))
+                });
                 (
                     [
                         (header::CONTENT_TYPE, HeaderValue::from_static(ct)),
@@ -2960,7 +2979,9 @@ async fn import_video_url(
             );
             let job = match state.get(&existing_id) {
                 Some(j) => j,
-                None => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "dedup job vanished"),
+                None => {
+                    return error_response(StatusCode::INTERNAL_SERVER_ERROR, "dedup job vanished")
+                }
             };
             let key = job
                 .original_media_key
@@ -3699,10 +3720,8 @@ mod tests {
     /// 终端状态不算 dedup 这 4 条路径。
     #[test]
     fn url_dedup_first_seen_returns_none_and_records() {
-        let url = "https://example.com/v1.mp4?t=abc";
-        let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
-        map.clear();
-        drop(map);
+        // Unique URL so parallel dedup tests never share/clear global state.
+        let url = "https://example.com/uniq-first-seen/v1.mp4?t=abc";
         // 第一次出现 → None(没命中)
         let lookup = |_: &str| Some(JobStatus::Queued);
         let now = 1_000_000;
@@ -3715,14 +3734,13 @@ mod tests {
 
     #[test]
     fn url_dedup_trims_whitespace_before_hash() {
-        // 防止前端复制带空格绕过
+        // 防止前端复制带空格绕过。Unique URL for parallel-test isolation.
         let lookup = |_: &str| Some(JobStatus::Queued);
-        let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
-        map.clear();
-        drop(map);
         let now = 2_000_000;
-        let _ = url_dedup_check_and_record("  https://x.com/v.mp4 ", "job-X", now, lookup);
-        let hit = url_dedup_check_and_record("https://x.com/v.mp4", "job-Y", now + 10, lookup);
+        let _ =
+            url_dedup_check_and_record("  https://x.com/uniq-trim/v.mp4 ", "job-X", now, lookup);
+        let hit =
+            url_dedup_check_and_record("https://x.com/uniq-trim/v.mp4", "job-Y", now + 10, lookup);
         assert_eq!(hit.as_deref(), Some("job-X"));
     }
 
@@ -3730,42 +3748,53 @@ mod tests {
     fn url_dedup_terminal_status_does_not_block_resubmit() {
         let lookup_done = |_: &str| Some(JobStatus::Done);
         let lookup_queued = |_: &str| Some(JobStatus::Queued);
-        let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
-        map.clear();
-        drop(map);
         let now = 3_000_000;
         // 第一次:A 入队,记入表
-        let _ = url_dedup_check_and_record("https://y.com/a.mp4", "job-A", now, lookup_queued);
+        let _ = url_dedup_check_and_record(
+            "https://y.com/uniq-terminal/a.mp4",
+            "job-A",
+            now,
+            lookup_queued,
+        );
         // 同 URL,A 已 done:不命中,登记新条目 B
-        let hit = url_dedup_check_and_record("https://y.com/a.mp4", "job-B", now + 50, lookup_done);
+        let hit = url_dedup_check_and_record(
+            "https://y.com/uniq-terminal/a.mp4",
+            "job-B",
+            now + 50,
+            lookup_done,
+        );
         assert_eq!(hit, None);
     }
 
     #[test]
     fn url_dedup_missing_job_does_not_block_resubmit() {
         let lookup_missing = |_: &str| None;
-        let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
-        map.clear();
-        drop(map);
         let now = 4_000_000;
-        let _ = url_dedup_check_and_record("https://z.com/v.mp4", "job-A", now, lookup_missing);
+        let _ = url_dedup_check_and_record(
+            "https://z.com/uniq-missing/v.mp4",
+            "job-A",
+            now,
+            lookup_missing,
+        );
         // job 已从内存索引移除(冷启动 / janitor 回收):允许新条目
-        let hit = url_dedup_check_and_record("https://z.com/v.mp4", "job-B", now + 100, lookup_missing);
+        let hit = url_dedup_check_and_record(
+            "https://z.com/uniq-missing/v.mp4",
+            "job-B",
+            now + 100,
+            lookup_missing,
+        );
         assert_eq!(hit, None);
     }
 
     #[test]
     fn url_dedup_ttl_expiry_allows_resubmit() {
-        // URL_DEDUP_TTL_MS = 60_000;超过后视为新提交
+        // URL_DEDUP_TTL_MS = 60_000;超过后视为新提交。Unique URL isolation.
         let lookup = |_: &str| Some(JobStatus::Running);
-        let mut map = url_dedup_map().lock().unwrap_or_else(|e| e.into_inner());
-        map.clear();
-        drop(map);
         let now = 5_000_000;
-        let _ = url_dedup_check_and_record("https://w.com/v.mp4", "job-A", now, lookup);
+        let _ = url_dedup_check_and_record("https://w.com/uniq-ttl/v.mp4", "job-A", now, lookup);
         // TTL+1 ms:过期,允许新条目
         let hit = url_dedup_check_and_record(
-            "https://w.com/v.mp4",
+            "https://w.com/uniq-ttl/v.mp4",
             "job-B",
             now + URL_DEDUP_TTL_MS + 1,
             lookup,

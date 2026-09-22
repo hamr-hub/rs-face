@@ -269,7 +269,7 @@ impl Detector {
                     eprintln!(
                         "[gpu] OpenCL probe FAILED — falling back to backend::auto() (CUDA → Metal → OpenCL)"
                     );
-                    crate::gpu::backend::auto().and_then(|b| {
+                    crate::gpu::backend::auto().map(|b| {
                         let info = b.info().clone();
                         eprintln!(
                             "[gpu] backend::auto() selected: id={} vendor={:?} device={:?} cu={}",
@@ -286,7 +286,7 @@ impl Detector {
                             device_name: info.device.clone(),
                             compute_units: info.compute_units,
                         };
-                        Some(crate::gpu::GpuIntegral::from_backend(b, legacy_info))
+                        crate::gpu::GpuIntegral::from_backend(b, legacy_info)
                     })
                 }
             });
