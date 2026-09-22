@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — bounded memory for long streams' temporal votes
+- **Per-track liveness streaks are now pruned once a track leaves the
+  frame.** Each temporal vote records the frame it was last seen on; on
+  video/stream jobs streaks are periodically retained via the tested
+  `streak_alive` rule (unseen for 60 frames), so an endless live stream
+  with passers-by no longer accumulates one entry per track for the whole
+  process.
+
 ### Changed — liveness enforcement is fail-closed on error
 - **A missing liveness verdict now blocks under enforcement, in both
   `/api/verify` and video/stream jobs.** Previously the gate only blocked
