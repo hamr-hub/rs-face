@@ -324,6 +324,28 @@ mod tests {
     }
 
     #[test]
+    fn decide_splits_disagreement_by_averaged_margin() {
+        // Head A leans paper, head B leans real. Averaged: paper 0.50,
+        // real 0.40, screen 0.10 — the attack class must win even though
+        // one head judged the face real.
+        let paper_lean = [0.70f32, 0.20, 0.10];
+        let real_lean = [0.30f32, 0.60, 0.10];
+        let out = decide(&[paper_lean, real_lean], &LivenessConfig::default())
+            .expect("decision on disagreement");
+        assert!((out.real_score - 0.40).abs() < 1e-6);
+        assert!(!out.is_real, "higher averaged attack class wins");
+        assert_eq!(out.class, 0);
+
+        // A stronger real head tips the averaged real class on top:
+        // paper 0.40, real 0.50, screen 0.10.
+        let real_strong = [0.10f32, 0.80, 0.10];
+        let flipped = decide(&[paper_lean, real_strong], &LivenessConfig::default())
+            .expect("decision on flipped disagreement");
+        assert!(flipped.is_real, "averaged real class now wins");
+        assert_eq!(flipped.class, REAL_CLASS);
+    }
+
+    #[test]
     fn decide_honours_min_real_score() {
         // Real is argmax but only weakly: [0.34, 0.40, 0.26].
         let weak = [0.34f32, 0.40, 0.26];
