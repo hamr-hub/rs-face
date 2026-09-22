@@ -42,6 +42,7 @@ Detection (zero-dep):
 Detection (ONNX, opt-in via `ort-backend` or `tract-backend`):
 
 - The pre/post-processing for SCRFD lives in [`src/scrfd.rs`](../src/scrfd.rs); for ArcFace in [`src/arcface.rs`](../src/arcface.rs). Both are backend-agnostic; the forward pass is chosen at compile time.
+- [`docs/liveness.md`](liveness.md) — silent face-anti-spoofing (MiniFASNet): crop/preprocess, the 2.7×/4.0× two-model ensemble, platform enforcement across identify/verify/video, and FAR/FRR tuning.
 
 ---
 
