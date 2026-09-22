@@ -1116,7 +1116,7 @@ pub fn now_ms_u64() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::split_sql_statements;
+    use super::{split_sql_statements, Db};
 
     #[test]
     fn splits_on_top_level_semicolons() {
@@ -1203,5 +1203,11 @@ mod tests {
             "0004 should split into 3 stmts (ALTER + UPDATE + CREATE INDEX), got {}",
             heartbeat.len()
         );
+    }
+
+    #[tokio::test]
+    async fn liveness_quality_summary_is_empty_without_pool() {
+        let db = Db { pool: None };
+        assert!(db.liveness_quality_summary().await.is_empty());
     }
 }
