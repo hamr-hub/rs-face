@@ -172,7 +172,7 @@ impl Liveness {
 
 #[cfg(test)]
 mod tests {
-    use super::enforce_blocks;
+    use super::{enforce_blocks, QualitySnapshot};
 
     #[test]
     fn real_verdict_passes_under_enforcement() {
