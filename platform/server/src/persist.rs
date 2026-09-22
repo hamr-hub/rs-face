@@ -640,15 +640,9 @@ impl Db {
                     verdict: r.get("verdict"),
                     samples: r.get::<i64, _>("samples") as u64,
                     sharpness: r.get::<Option<f64>, _>("sharpness").map(|v| v as f32),
-                    mean_brightness: r
-                        .get::<Option<f64>, _>("mean_brightness")
-                        .map(|v| v as f32),
-                    clipped_ratio: r
-                        .get::<Option<f64>, _>("clipped_ratio")
-                        .map(|v| v as f32),
-                    high_freq_ratio: r
-                        .get::<Option<f64>, _>("high_freq_ratio")
-                        .map(|v| v as f32),
+                    mean_brightness: r.get::<Option<f64>, _>("mean_brightness").map(|v| v as f32),
+                    clipped_ratio: r.get::<Option<f64>, _>("clipped_ratio").map(|v| v as f32),
+                    high_freq_ratio: r.get::<Option<f64>, _>("high_freq_ratio").map(|v| v as f32),
                 })
                 .collect(),
             Err(e) => {
