@@ -38,6 +38,7 @@ pub struct GalleryState {
     db: Db,
     cfg: MatchConfig,
     liveness: Option<Liveness>,
+    liveness_enforce: bool,
 }
 
 impl GalleryState {
@@ -56,11 +57,18 @@ impl GalleryState {
             db,
             cfg: match_cfg,
             liveness,
+            liveness_enforce: cfg.liveness_enforce,
         }
     }
 
     pub fn cfg(&self) -> &MatchConfig {
         &self.cfg
+    }
+
+    /// Whether a liveness backend was successfully loaded.
+    #[allow(dead_code)] // used by integration tests and external consumers
+    pub fn has_liveness(&self) -> bool {
+        self.liveness.is_some()
     }
 
     /// Minimal empty instance, mainly for integration tests that build a
@@ -74,6 +82,7 @@ impl GalleryState {
             db: Db { pool: None },
             cfg,
             liveness: None,
+            liveness_enforce: false,
         }
     }
 
@@ -111,16 +120,22 @@ impl GalleryState {
             .iter()
             .map(|det| {
                 let crop = crop_gray(gray, det);
-                let ranked = self
-                    .embedder
-                    .embed(&crop)
-                    .map(|emb| gallery.rank(&emb).into_iter().take(top_k).collect())
-                    .unwrap_or_default();
                 let liveness = self.liveness.as_ref().and_then(|live| live.check(rgb, det));
+                let blocked =
+                    self.liveness_enforce && liveness.as_ref().is_some_and(|v| !v.is_real);
+                let ranked = if blocked {
+                    Vec::new()
+                } else {
+                    self.embedder
+                        .embed(&crop)
+                        .map(|emb| gallery.rank(&emb).into_iter().take(top_k).collect())
+                        .unwrap_or_default()
+                };
                 RankedFace {
                     detection: det.clone(),
                     matches: ranked,
                     liveness,
+                    blocked,
                 }
             })
             .collect()
@@ -153,12 +168,14 @@ pub struct RankedFace {
     /// Optional silent liveness verdict; `None` when liveness is disabled
     /// or the backend could not produce a decision.
     pub liveness: Option<LivenessVerdict>,
+    /// True when liveness enforcement refused to return matches for this face.
+    pub blocked: bool,
 }
 
 impl Serialize for RankedFace {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("RankedFace", 7)?;
+        let mut st = s.serialize_struct("RankedFace", 8)?;
         st.serialize_field("x", &self.detection.x)?;
         st.serialize_field("y", &self.detection.y)?;
         st.serialize_field("w", &self.detection.w)?;
@@ -166,6 +183,7 @@ impl Serialize for RankedFace {
         st.serialize_field("score", &self.detection.score)?;
         st.serialize_field("matches", &self.matches)?;
         st.serialize_field("liveness", &self.liveness)?;
+        st.serialize_field("blocked", &self.blocked)?;
         st.end()
     }
 }

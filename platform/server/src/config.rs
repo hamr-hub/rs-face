@@ -107,6 +107,11 @@ pub struct Config {
     /// Minimum averaged real-class probability to accept a face as live.
     #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
     pub liveness_min_real_score: f32,
+    /// When true (and liveness is enabled), a face judged non-real is refused
+    /// any identity matches — anti-spoofing becomes an enforcement gate, not
+    /// just an informational field.
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub liveness_enforce: bool,
 }
 
 impl Config {
@@ -215,6 +220,7 @@ impl Config {
             liveness_min_real_score: env_or("RSFACE_LIVENESS_MIN_REAL_SCORE", "0.0")
                 .parse::<f32>()
                 .unwrap_or(0.0),
+            liveness_enforce: env_bool("RSFACE_LIVENESS_ENFORCE", false),
         }
     }
 }

@@ -128,6 +128,7 @@ services:
       RSFACE_LIVENESS_ENABLED: ${RSFACE_LIVENESS_ENABLED:-false}
       RSFACE_LIVENESS_MODELS_DIR: /var/rsface-models
       RSFACE_LIVENESS_MIN_REAL_SCORE: ${RSFACE_LIVENESS_MIN_REAL_SCORE:-0.0}
+      RSFACE_LIVENESS_ENFORCE: ${RSFACE_LIVENESS_ENFORCE:-false}
     volumes:
       # bind mount 到 data/media/ (项目内,跟随代码可见)。
       - ../data/media:/var/rsface-media
