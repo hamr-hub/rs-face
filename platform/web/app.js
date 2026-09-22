@@ -89,59 +89,7 @@ const apiCache = {
   bustAll() { this.listJobs = null; this.config = null; },
 };
 
-const utils = (() => {
-  const $ = (s, r) => (r || document).querySelector(s);
-  const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
-  function legacyToast(msg, isError) {
-    const el = $('#toast'); if (!el) return;
-    el.textContent = msg; el.classList.toggle('error', !!isError); el.classList.remove('hidden');
-    clearTimeout(el._t); el._t = setTimeout(() => el.classList.add('hidden'), 3200);
-  }
-  function fmtTime(ms) {
-    if (ms == null) return '--:--';
-    const s = ms / 1000, m = Math.floor(s / 60), sec = Math.floor(s % 60), frac = Math.floor((s % 1) * 10);
-    return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}.${frac}`;
-  }
-  const fmtAbsTime = ms => ms ? new Date(ms).toLocaleString() : '';
-  const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
-  /** 转义后,把所有命中 query 的字符段包成 <mark>。query 为空时原样返回。 */
-  function highlight(text, query) {
-    const safe = escapeHtml(text || '');
-    if (!query) return safe;
-    let re;
-    try { re = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'); }
-    catch { return safe; }
-    return safe.replace(re, m => '<mark>' + m + '</mark>');
-  }
-  function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
-  function throttleRaf(fn) { let s = false, la = null; return (...a) => { la = a; if (s) return; s = true; requestAnimationFrame(() => { s = false; fn(...la); }); }; }
-  /** Bug 1/4: URL-encode media keys so 'local://jobs/...' works in <video>/<img>. */
-  function mediaUrl(key) {
-    if (!key) return '';
-    if (/^(https?:|data:|blob:)/.test(key)) return key;
-    return '/media/' + encodeURIComponent(key);
-  }
-  /** 人类可读字节大小(B / KB / MB / GB)。原本在 dropzone-preview.js /
-   *  upload-queue.js 各定义一份,现统一收口到 utils。 */
-  function humanSize(n) {
-    if (n == null || isNaN(n)) return '0 B';
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
-    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
-  }
-  /** 从 `{error, error_code, error_hint}` 响应里抽取最佳错误描述。
-   *  优先级:error_hint(若有) > error(必有)。`error_code` 用于机器化
-   *  分支但不进 toast(避免给最终用户展示代码)。 */
-  function explainError(body, fallback) {
-    if (!body || typeof body !== 'object') return fallback || '未知错误';
-    if (body.error_hint) return body.error_hint;
-    if (body.error) return body.error;
-    return fallback || '未知错误';
-  }
-  return { $, $$, toast: legacyToast, fmtTime, fmtAbsTime, escapeHtml, highlight, debounce, throttleRaf, mediaUrl, humanSize, explainError };
-})();
-
+// utils 已抽到 utils.js(必须先于其它 defer 脚本加载,见 index.html)。
 const state = {
   jobs: [], filter: 'all', algoFilter: '',
   search: '', searchMode: 'plain', searchRange: 'all',
@@ -662,8 +610,12 @@ const sidebar = (() => {
     if (el._sig === sig) return; // 内容未变:滚动中零 DOM 操作
     el._sig = sig;
     const st = j.stats || {}, fp = st.frames_processed || 0, fc = j.face_count || 0;
-    // 缩略图:运行中显示占位符;视频/流优先 cover_key(首帧标注 PNG)
-    const thumbSrc = (j.cover_key || j.original_key) ? utils.mediaUrl(j.cover_key || j.original_key) : null;
+    // 缩略图:运行中显示占位符;视频/流优先 cover_key(首帧标注 PNG)。
+    // 只把浏览器原生支持的格式(png/jpg/webp/gif)塞进 <img>;ppm/mp4 等
+    // 否则即便 server 200 也会 naturalWidth=0,显示破损图标。
+    const rawKey = j.cover_key || j.original_key;
+    const thumbKey = rawKey && /\.(png|jpe?g|webp|gif|bmp)(\?|$)/i.test(rawKey) ? rawKey : null;
+    const thumbSrc = thumbKey ? utils.mediaUrl(thumbKey) : null;
     const thumb = el.querySelector('.sb-thumb');
     if (thumb) {
       let inner;
@@ -841,7 +793,13 @@ const preview = (() => {
     const vid = utils.$('#pv-vid'); if (vid) { vid.removeAttribute('src'); vid.classList.add('hidden'); }
     const db = utils.$('#pv-double'); if (db) db.classList.add('hidden');
     const skel = utils.$('#pv-stage-skel'); if (skel) skel.classList.add('hidden');
-    const banner = utils.$('#pv-error-banner'); if (banner) { banner.classList.add('hidden'); banner.textContent = ''; }
+    const banner = utils.$('#pv-error-banner'); if (banner) {
+      banner.classList.add('hidden');
+      const msgEl = banner.querySelector('.pv-error-msg');
+      const actEl = banner.querySelector('.pv-error-act');
+      if (msgEl) msgEl.textContent = '';
+      if (actEl) actEl.innerHTML = '';
+    }
     clearOverlay();
   }
 
@@ -950,6 +908,7 @@ const preview = (() => {
     else if (job.kind === 'video') renderVideo(job);
     else renderStream(job);
     renderProgress(job); renderBreakdown(job); renderFaceGrid(job);
+    if (typeof timeline !== 'undefined') timeline.render(job.frames || [], job.id);
     // 已经存在的任务(刷新 / 切换 / 直链):如果 original_key 已经落 S3,直接显示 LAN URL。
     if (job.original_key) setLanUrl(utils.mediaUrl(job.original_key));
     else setLanUrl(null);
@@ -1532,7 +1491,9 @@ const preview = (() => {
       const prev = cur[cur.length - 1], f = raw[i], dt = f.ts - prev.ts;
       const pcx = (prev.x || 0) + (prev.w || 0) / 2, pcy = (prev.y || 0) + (prev.h || 0) / 2;
       const fcx = (f.x || 0) + (f.w || 0) / 2, fcy = (f.y || 0) + (f.h || 0) / 2;
-      if (dt < DT_MS && Math.hypot(fcx - pcx, fcy - pcy) < DIST_PX) cur.push(f);
+      // 同一帧(dt==0)里的多张人脸一定是不同身份,不能合并;
+      // 跨帧且时间连续、位置接近才视为同一个人的轨迹。
+      if (dt > 0 && dt < DT_MS && Math.hypot(fcx - pcx, fcy - pcy) < DIST_PX) cur.push(f);
       else { clusters.push(cur); cur = [f]; }
     }
     clusters.push(cur);
@@ -1572,7 +1533,7 @@ const preview = (() => {
     }
   }
 
-  return { open, close, render, toggleAnno, showEmpty, showDetail, setLanUrl, initSharedControls, initDivider, initFaceFilters, updatePerfMetrics, renderDispatch };
+  return { open, close, render, toggleAnno, showEmpty, showDetail, setLanUrl, initSharedControls, initDivider, initFaceFilters, updatePerfMetrics, renderDispatch, renderProgress, renderFaceGrid };
 })();
 
 const upload = (() => {

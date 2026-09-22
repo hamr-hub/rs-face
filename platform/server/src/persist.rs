@@ -114,6 +114,10 @@ impl Db {
                 "0005_persons.sql",
                 include_str!("../../migrations/0005_persons.sql"),
             ),
+            (
+                "0006_liveness_stats.sql",
+                include_str!("../../migrations/0006_liveness_stats.sql"),
+            ),
         ];
         let mut applied = 0u64;
         for (name, sql) in files {
@@ -558,13 +562,17 @@ impl Db {
             return;
         };
         let _ = sqlx::query(
-            "UPDATE jobs SET frames_processed=$2, frames_with_face=$3, total_detections=$4 WHERE id=$1"
+            "UPDATE jobs SET frames_processed=$2, frames_with_face=$3, total_detections=$4, \
+             spoof_detections=$5, blocked_detections=$6 WHERE id=$1",
         )
         .bind(id)
         .bind(s.frames_processed as i64)
         .bind(s.frames_with_face as i64)
         .bind(s.total_detections as i64)
-        .execute(pool).await;
+        .bind(s.spoof_detections as i64)
+        .bind(s.blocked_detections as i64)
+        .execute(pool)
+        .await;
     }
 
     /// 删除单个 job(frames / faces 通过 FK ON DELETE CASCADE 自动删)。
@@ -614,14 +622,53 @@ impl Db {
             return vec![];
         };
         let rows = sqlx::query(
-            "SELECT id, kind, display_name, status, created_ms, finished_ms, frames_processed, frames_with_face, total_detections, original_key, error, algo FROM jobs ORDER BY created_ms DESC"
+            "SELECT id, kind, display_name, status, created_ms, finished_ms, frames_processed, frames_with_face, total_detections, spoof_detections, blocked_detections, original_key, error, algo FROM jobs ORDER BY created_ms DESC"
         )
         .fetch_all(pool).await.unwrap_or_default();
+        // 一次性 batch 拉所有 video/stream job 的 idx=0 标注帧,作 sidebar 缩略图
+        // (server 重启后内存丢光,必须从 PG 重建 cover_key;否则原图是 .mp4 直接破损)。
+        let ids: Vec<String> = rows.iter().map(|r| r.get::<String, _>("id")).collect();
+        let mut first_annotated: std::collections::HashMap<String, String> = Default::default();
+        if !ids.is_empty() {
+            let placeholders = std::iter::repeat_n("$1", ids.len())
+                .enumerate()
+                .map(|(i, p)| p.replace("$1", &format!("${}", i + 1)))
+                .collect::<Vec<_>>()
+                .join(",");
+            let q = format!(
+                "SELECT DISTINCT ON (job_id) job_id, annotated_key FROM frames \
+                 WHERE job_id IN ({}) ORDER BY job_id, idx ASC",
+                placeholders
+            );
+            let mut q = sqlx::query(&q);
+            for id in &ids {
+                q = q.bind(id);
+            }
+            if let Ok(fr) = q.fetch_all(pool).await {
+                for r in fr {
+                    let jid: String = r.get("job_id");
+                    let ak: Option<String> = r.get("annotated_key");
+                    if let Some(k) = ak {
+                        first_annotated.insert(jid, k);
+                    }
+                }
+            }
+        }
         rows.into_iter()
             .map(|r| {
+                let id = r.get::<String, _>("id");
+                let kind = r.get::<String, _>("kind");
+                let original_key: Option<String> = r.get("original_key");
+                // 缩略图策略:image → 原图(浏览器原生格式);video/stream → idx=0 标注帧
+                let cover_key = match kind.as_str() {
+                    "video" | "stream" => {
+                        first_annotated.get(&id).cloned().or(original_key.clone())
+                    }
+                    _ => original_key.clone(),
+                };
                 serde_json::json!({
-                    "id": r.get::<String, _>("id"),
-                    "kind": r.get::<String, _>("kind"),
+                    "id": id,
+                    "kind": kind,
                     "display_name": r.get::<String, _>("display_name"),
                     "status": r.get::<String, _>("status"),
                     "created_ms": r.get::<i64, _>("created_ms"),
@@ -630,16 +677,90 @@ impl Db {
                         "frames_processed": r.get::<i64, _>("frames_processed"),
                         "frames_with_face": r.get::<i64, _>("frames_with_face"),
                         "total_detections": r.get::<i64, _>("total_detections"),
+                        "spoof_detections": r.get::<i64, _>("spoof_detections"),
+                        "blocked_detections": r.get::<i64, _>("blocked_detections"),
                         "elapsed_ms": 0u64,
                     },
                     "algo": r.get::<Option<String>, _>("algo"),
                     "face_count": r.get::<i64, _>("total_detections"), // 近似
                     "frame_count": 0,
-                    "original_key": r.get::<Option<String>, _>("original_key"),
+                    "cover_key": cover_key,
+                    "original_key": original_key,
                     "error": r.get::<Option<String>, _>("error"),
                 })
             })
             .collect()
+    }
+
+    /// 从 PG 读取单个历史任务详情,内存中不存在该任务时兜底。
+    pub async fn get_job(&self, job_id: &str) -> Option<serde_json::Value> {
+        let Some(pool) = &self.pool else {
+            return None;
+        };
+        let row = sqlx::query(
+            "SELECT id, kind, display_name, status, created_ms, finished_ms, frames_processed, \
+             frames_with_face, total_detections, spoof_detections, blocked_detections, \
+             original_key, error, algo, archived FROM jobs WHERE id=$1",
+        )
+        .bind(job_id)
+        .fetch_optional(pool)
+        .await
+        .ok()??;
+
+        let id: String = row.get("id");
+        let kind: String = row.get("kind");
+        let original_key: Option<String> = row.get("original_key");
+        let created_ms: i64 = row.get("created_ms");
+        let finished_ms: Option<i64> = row.get("finished_ms");
+        let stored_frame_count: i64 = row.get("frames_processed");
+        let frames = self.list_frames(&id).await;
+        let frame_count = if frames.is_empty() {
+            stored_frame_count.max(0) as u64
+        } else {
+            frames.len() as u64
+        };
+        let stored_detections: i64 = row.get("total_detections");
+        let face_count = if frames.is_empty() {
+            stored_detections.max(0) as u64
+        } else {
+            frames.iter().map(|frame| frame.faces.len()).sum::<usize>() as u64
+        };
+        let cover_key = match kind.as_str() {
+            "video" | "stream" => frames
+                .iter()
+                .find_map(|frame| frame.annotated_key.clone())
+                .or_else(|| original_key.clone()),
+            _ => original_key.clone(),
+        };
+        let elapsed_ms = finished_ms
+            .map(|finished| finished.saturating_sub(created_ms).max(0) as u64)
+            .unwrap_or_default();
+
+        Some(serde_json::json!({
+            "id": id,
+            "kind": kind,
+            "display_name": row.get::<String, _>("display_name"),
+            "status": row.get::<String, _>("status"),
+            "created_ms": created_ms,
+            "finished_ms": finished_ms,
+            "stats": {
+                "frames_processed": stored_frame_count,
+                "frames_with_face": row.get::<i64, _>("frames_with_face"),
+                "total_detections": stored_detections,
+                "spoof_detections": row.get::<i64, _>("spoof_detections"),
+                "blocked_detections": row.get::<i64, _>("blocked_detections"),
+                "elapsed_ms": elapsed_ms,
+                "algo": row.get::<Option<String>, _>("algo"),
+            },
+            "algo": row.get::<Option<String>, _>("algo"),
+            "face_count": face_count,
+            "frame_count": frame_count,
+            "original_key": original_key,
+            "cover_key": cover_key,
+            "error": row.get::<Option<String>, _>("error"),
+            "archived": row.get::<bool, _>("archived"),
+            "frames": frames,
+        }))
     }
 
     #[allow(dead_code)] // 保留:job 详情的 DB 直读路径(内存 miss 时兜底)

@@ -38,6 +38,12 @@ export default defineConfig({
         target: BACKEND,
         changeOrigin: false,
       },
+      // Media keys are loaded from absolute `/media/...` URLs. The Vite dev
+      // server must proxy those too; otherwise it falls back to index.html.
+      '/media': {
+        target: BACKEND,
+        changeOrigin: false,
+      },
       // SSE endpoint for live task progress.
       '/events': {
         target: BACKEND,
