@@ -98,9 +98,10 @@
       .rsfc-canvas-wrap {
         position: relative; background: #000; border-radius: 6px; overflow: hidden;
         width: 100%; max-height: 70vh;
+        display: flex; align-items: center; justify-content: center;
       }
       .rsfc-canvas-wrap canvas {
-        display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain;
+        display: block; max-width: 100%; max-height: 70vh; width: auto; height: auto;
       }
       .rsfc-err-overlay {
         position: absolute; inset: 0;
@@ -188,12 +189,10 @@
   }
 
   function currentJobId() {
-    if (typeof state !== 'undefined' && window.state && window.state.currentJobId) return window.state.currentJobId;
-    const idEl = document.getElementById('pv-id');
-    if (idEl && idEl.textContent) {
-      const m = idEl.textContent.match(/[#]?([0-9a-f-]+)/i);
-      if (m) return m[1];
-    }
+    // app.js 把 state 收紧在 IIFE 里,只通过 window.__rsface 暴露。
+    // 旧实现读 #pv-id 文本,只能拿到 8 字符的截断 ID,API 返回 404。
+    const rs = window.__rsface;
+    if (rs && rs.state && rs.state.currentJobId) return rs.state.currentJobId;
     return null;
   }
 
@@ -225,14 +224,19 @@
   document.addEventListener('visibilitychange', syncPolling);
 
   async function fetchAndRenderCompare(jobId) {
-    const host = document.getElementById('pv-stage') || document.getElementById('pv-detail');
+    // 注入到 #pv-detail 而不是 #pv-stage — pv-stage 有 max-height + overflow:hidden,
+    // 把面板塞进去会遮挡视频播放区;放到 detail 里让它自然下推到独立行。
+    const host = document.getElementById('pv-detail') || document.getElementById('pv-stage');
     if (!host) return;
     removeComparePanel();
     const panel = document.createElement('div');
     panel.id = 'rsfc-compare-panel';
     panel.className = 'rsfc-panel';
     panel.innerHTML = '<div class="rsfc-loading">Running ' + ALGOS_DEFAULT.length + ' algos in parallel (haar/cnn/luminance)...</div>';
-    host.appendChild(panel);
+    // 插到 timeline 之后、breakdown 之前 — 视觉上紧贴播放区,不影响人脸卡片。
+    const anchor = host.querySelector('#pv-bbar') || host.querySelector('#pv-faces');
+    if (anchor && anchor.parentNode === host) host.insertBefore(panel, anchor);
+    else host.appendChild(panel);
     try {
       const resp = await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/compare?algos=' + ALGOS_DEFAULT.join(','), { method: 'POST' });
       if (!resp.ok) {
@@ -409,7 +413,14 @@
         ctx.lineWidth = Math.max(1.5, w / 240);
         ctx.strokeStyle = color;
         ctx.fillStyle = color;
-        for (const d of (r.detections || [])) {
+        let dets = r.detections || [];
+        // 玩具检测器(无预训练权重)在纹理区会误检上千框,全画出来只会
+        // 把画面盖成色块;每算法只画置信度最高的 MAX_DRAWN 个。
+        const MAX_DRAWN = 60;
+        if (dets.length > MAX_DRAWN) {
+          dets = dets.slice().sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, MAX_DRAWN);
+        }
+        for (const d of dets) {
           ctx.strokeRect(d.x, d.y, d.w, d.h);
           if (d.score !== undefined) {
             const label = meta.abbr + ' ' + d.score.toFixed(2);
