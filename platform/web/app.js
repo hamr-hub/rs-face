@@ -782,6 +782,23 @@ const sidebar = (() => {
 
 const preview = (() => {
   let lastFrameIdx = -1, _lastAnnoFrameIdx = -1;
+  // jobId -> {w,h}:检测帧(ffmpeg scale=480)空间尺寸。
+  // 视频人脸坐标基于该空间,叠加到原视频时必须按它缩放。
+  let _detDims = {};
+  function ensureDetDims(job) {
+    if (_detDims[job.id]) return;
+    const first = (job.frames || []).find(f => f.annotated_key);
+    if (!first) return;
+    const probe = new Image();
+    probe.onload = () => {
+      _detDims[job.id] = { w: probe.naturalWidth, h: probe.naturalHeight };
+      if (state.currentJob && state.currentJob.id === job.id) {
+        const cur = (job.frames || []).find(f => f.index === _lastAnnoFrameIdx);
+        if (cur) drawOverlayOnAnno(job, cur);
+      }
+    };
+    probe.src = utils.mediaUrl(first.annotated_key);
+  }
 
   const showEmpty = () => { utils.$('#pv-empty').classList.remove('hidden'); utils.$('#pv-detail').classList.add('hidden'); };
   const showDetail = () => { utils.$('#pv-empty').classList.add('hidden'); utils.$('#pv-detail').classList.remove('hidden'); };
@@ -1092,6 +1109,7 @@ const preview = (() => {
     img.classList.add('hidden');
     dbl.classList.remove('hidden');
     if (sc) sc.classList.remove('hidden');
+    ensureDetDims(job);
     if (!job.original_key) { showHint('无视频源'); return; }
     // Bug 1/4:URL 编码
     const newOrigSrc = utils.mediaUrl(job.original_key);
@@ -1152,8 +1170,12 @@ const preview = (() => {
     c.style.top = (m.top - rect.top) + 'px';
     c.style.width = m.width + 'px'; c.style.height = m.height + 'px';
     c.width = m.width; c.height = m.height;
-    const natW = anno.videoWidth || (frame.faces[0] ? frame.faces[0].w * 4 : 640);
-    const natH = anno.videoHeight || 360;
+    // 人脸坐标是检测帧(ffmpeg scale=480)空间,不是原视频空间。
+    // 检测帧尺寸异步从首张标注帧 PNG 读(_detDims);拿到前用坐标
+    // 上界兜底(避免首屏画错位置)。
+    const dims = _detDims[job.id];
+    const natW = dims ? dims.w : (frame.faces[0] ? frame.faces[0].w * 2 : 480);
+    const natH = dims ? dims.h : 270;
     drawBoxes(c, frame, natW, natH);
   }
 

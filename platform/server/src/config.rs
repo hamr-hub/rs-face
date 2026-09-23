@@ -310,9 +310,7 @@ impl Config {
                 .parse::<usize>()
                 .unwrap_or(1)
                 .max(1),
-            liveness_temporal_min_score: env_optional_f32(
-                "RSFACE_LIVENESS_TEMPORAL_MIN_SCORE",
-            ),
+            liveness_temporal_min_score: env_optional_f32("RSFACE_LIVENESS_TEMPORAL_MIN_SCORE"),
             arcface_models_dir: PathBuf::from(env_or("RSFACE_ARCFACE_MODELS_DIR", "models")),
             arcface_enabled: env_bool("RSFACE_ARCFACE_ENABLED", true),
             arcface_backend: env_or("RSFACE_ARCFACE_BACKEND", "auto")
