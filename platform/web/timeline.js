@@ -165,7 +165,7 @@
     ensureDom();
     if (!_host) return;
     _frames = Array.isArray(frames) ? frames.slice() : [];
-    _jobId = jobId || (window.state && window.state.currentJobId) || null;
+    _jobId = jobId || (window.__rsface && window.__rsface.state && window.__rsface.state.currentJobId) || null;
     if (!_frames.length) {
       _caption.textContent = '无数据';
       _host.classList.add('hidden');
@@ -385,14 +385,12 @@
     const dot = findDotAt(x, y);
     if (!dot) return;
     const f = dot.frame;
-    // Try to open the existing frame lightbox (preview.showFrame if exposed).
+    // 优先打开人脸 lightbox(已是带脸帧的查看面板);
+    // 兜底只更新 hash,避免无声点击。
     try {
-      if (typeof window !== 'undefined' && window.app && typeof window.app.openFrame === 'function') {
-        window.app.openFrame(_jobId, f.index != null ? f.index : 0);
-        return;
-      }
-      if (window.preview && typeof window.preview.openFrame === 'function') {
-        window.preview.openFrame(_jobId, f.index != null ? f.index : 0);
+      const lb = window.__rsface && window.__rsface.lightbox;
+      if (lb && typeof lb.open === 'function' && f.faces && f.faces.length) {
+        lb.open(f);
         return;
       }
       // Fallback: navigate via deep-link to frame.
@@ -405,10 +403,11 @@
     }
   }
 
-  /** Read frames from window.state.currentJob and render. Auto-pulled by app.js. */
+  /** Read frames from window.__rsface.state.currentJob and render. Auto-pulled by app.js. */
   function refreshFromState() {
-    if (!window.state || !window.state.currentJob) return;
-    const job = window.state.currentJob;
+    const rs = window.__rsface;
+    if (!rs || !rs.state || !rs.state.currentJob) return;
+    const job = rs.state.currentJob;
     render(job.frames || [], job.id);
   }
 
@@ -419,7 +418,8 @@
     _pending = true;
     const tick = () => {
       _pending = false;
-      const s = window.state;
+      const rs = window.__rsface;
+      const s = rs && rs.state;
       if (!s || !s.currentJob) return;
       if (s.currentJob.id !== _lastJobId) {
         _lastJobId = s.currentJob.id;

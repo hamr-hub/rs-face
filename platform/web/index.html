@@ -179,13 +179,13 @@
           <video id="pv-orig" class="pv-media" preload="metadata" playsinline></video>
         </div>
         <div class="pv-divider" id="pv-divider" title="拖动调整"></div>
-        <div class="pv-half" id="pv-half-anno">
-          <div class="pv-half-label">标注视频</div>
-          <video id="pv-anno" class="pv-media" preload="metadata" playsinline></video>
-          <canvas id="pv-overlay" class="pv-overlay pv-overlay-anno" aria-hidden="true"></canvas>
-        </div>
+      <div class="pv-half" id="pv-half-anno">
+        <div class="pv-half-label">标注视频</div>
+        <video id="pv-anno" class="pv-media" preload="metadata" playsinline></video>
       </div>
-      <div class="pv-stage-hint" id="pv-stage-hint">加载中…</div>
+    </div>
+    <canvas id="pv-overlay" class="pv-overlay" aria-hidden="true"></canvas>
+    <div class="pv-stage-hint" id="pv-stage-hint">加载中…</div>
       <div class="pv-error-banner hidden" id="pv-error-banner" role="alert">
         <span class="pv-error-msg"></span>
         <span class="pv-error-act"></span>
@@ -386,7 +386,7 @@
     <div class="kbd-list">
       <div class="kbd-row"><kbd>n</kbd> 新建任务</div>
       <div class="kbd-row"><kbd>↑</kbd> / <kbd>↓</kbd> 或 <kbd>j</kbd> / <kbd>k</kbd> 上下切换任务</div>
-      <div class="kbd-row"><kbd>Enter</kbd> 打开当前任务</div>
+      <div class="kbd-row"><kbd>Enter</kbd> 打开当前任务的标注细节(lightbox)</div>
       <div class="kbd-row"><kbd>Delete</kbd> 删除当前任务(确认)</div>
       <div class="kbd-row"><kbd>p</kbd> 置顶 / 取消置顶当前任务</div>
       <div class="kbd-row"><kbd>Ctrl</kbd>+<kbd>K</kbd> 聚焦搜索</div>

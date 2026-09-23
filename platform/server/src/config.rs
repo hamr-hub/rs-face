@@ -192,6 +192,10 @@ pub struct Config {
     /// behaviour; higher values add fail-closed temporal defence.
     #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
     pub liveness_temporal_frames: usize,
+    /// Minimum mean real score over the confirmed temporal window. When unset,
+    /// it uses `liveness_min_real_score`.
+    #[cfg_attr(not(feature = "liveness"), allow(dead_code))]
+    pub liveness_temporal_min_score: Option<f32>,
 }
 
 impl Config {
@@ -306,6 +310,7 @@ impl Config {
                 .parse::<usize>()
                 .unwrap_or(1)
                 .max(1),
+            liveness_temporal_min_score: env_optional_f32("RSFACE_LIVENESS_TEMPORAL_MIN_SCORE"),
             arcface_models_dir: PathBuf::from(env_or("RSFACE_ARCFACE_MODELS_DIR", "models")),
             arcface_enabled: env_bool("RSFACE_ARCFACE_ENABLED", true),
             arcface_backend: env_or("RSFACE_ARCFACE_BACKEND", "auto")
@@ -337,6 +342,10 @@ fn optional_path(key: &str) -> Option<PathBuf> {
         Ok(s) if !s.is_empty() => Some(PathBuf::from(s)),
         _ => None,
     }
+}
+
+fn env_optional_f32(key: &str) -> Option<f32> {
+    std::env::var(key).ok()?.parse().ok()
 }
 
 /// Startup-time config validation. Returns Err on a hard failure (will

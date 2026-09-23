@@ -782,6 +782,23 @@ const sidebar = (() => {
 
 const preview = (() => {
   let lastFrameIdx = -1, _lastAnnoFrameIdx = -1;
+  // jobId -> {w,h}:检测帧(ffmpeg scale=480)空间尺寸。
+  // 视频人脸坐标基于该空间,叠加到原视频时必须按它缩放。
+  let _detDims = {};
+  function ensureDetDims(job) {
+    if (_detDims[job.id]) return;
+    const first = (job.frames || []).find(f => f.annotated_key);
+    if (!first) return;
+    const probe = new Image();
+    probe.onload = () => {
+      _detDims[job.id] = { w: probe.naturalWidth, h: probe.naturalHeight };
+      if (state.currentJob && state.currentJob.id === job.id) {
+        const cur = (job.frames || []).find(f => f.index === _lastAnnoFrameIdx);
+        if (cur) drawOverlayOnAnno(job, cur);
+      }
+    };
+    probe.src = utils.mediaUrl(first.annotated_key);
+  }
 
   const showEmpty = () => { utils.$('#pv-empty').classList.remove('hidden'); utils.$('#pv-detail').classList.add('hidden'); };
   const showDetail = () => { utils.$('#pv-empty').classList.add('hidden'); utils.$('#pv-detail').classList.remove('hidden'); };
@@ -849,7 +866,8 @@ const preview = (() => {
     }
     utils.$('#pv-kind').textContent = job.kind || '?';
     const st = job.stats || {};
-    utils.$('#pv-frames').textContent = `${st.frames_processed || 0} / ${job.frame_count || st.frames_processed || 0} 帧`;
+    const totalFrames = st.total_frames || (job.kind === 'image' ? job.frame_count : st.frames_processed) || st.frames_processed || 0;
+    utils.$('#pv-frames').textContent = `${st.frames_processed || 0} / ${totalFrames} 帧`;
     utils.$('#pv-faces').textContent = `${job.face_count || 0} 张脸`;
     utils.$('#pv-time').textContent = utils.fmtAbsTime(job.created_ms);
     const status = job.status || 'queued';
@@ -1075,6 +1093,10 @@ const preview = (() => {
       img.classList.remove('is-loaded');
       img.classList.add('is-blur');
       img.src = utils.mediaUrl(src);
+      img.ondblclick = () => {
+        const frame = (job.frames || []).find(f => f.original_key) || job.frames[0];
+        if (frame && typeof lightbox !== 'undefined' && lightbox && lightbox.open) lightbox.open(frame);
+      };
     } else { img.classList.add('hidden'); showHint('无原图'); clearOverlay(); }
   }
 
@@ -1087,15 +1109,19 @@ const preview = (() => {
     img.classList.add('hidden');
     dbl.classList.remove('hidden');
     if (sc) sc.classList.remove('hidden');
+    ensureDetDims(job);
     if (!job.original_key) { showHint('无视频源'); return; }
     // Bug 1/4:URL 编码
     const newOrigSrc = utils.mediaUrl(job.original_key);
     if (!orig.src || !orig.src.includes(encodeURIComponent(job.original_key))) orig.src = newOrigSrc;
-    // 标注视频:job.annotated_key 是后端合成的 mp4;没有就 fall back 到首帧 poster(立即设置,避免等待 metadata)
-    if (job.annotated_key && anno) anno.src = utils.mediaUrl(job.annotated_key);
-    else {
+    // 后端不产出 job 级别的标注 mp4(summary 中没有 annotated_key);
+    // 右侧与左侧播放同一份原视频(走浏览器缓存,不重复下载),检测框由
+    // #pv-overlay 按 orig currentTime 实时叠加(syncVideoOverlayDual),
+    // 保证左右画面帧同步。加载完成前用首张标注帧做 poster,避免黑屏。
+    if (anno) {
+      if (!anno.src || !anno.src.includes(encodeURIComponent(job.original_key))) anno.src = newOrigSrc;
       const first = (job.frames || []).find(f => f.annotated_key);
-      if (first && anno) anno.poster = utils.mediaUrl(first.annotated_key);
+      anno.poster = first ? utils.mediaUrl(first.annotated_key) : '';
     }
     if (anno) bindSync(orig, anno);
     orig.onloadedmetadata = () => {
@@ -1107,19 +1133,27 @@ const preview = (() => {
     anno.onloadedmetadata = () => { hideHint(); refreshSharedProgress(); };
     orig.ontimeupdate = () => { syncVideoOverlayDual(job); refreshSharedProgress(); };
     anno.ontimeupdate = () => { syncOrigByAnnoTime(job); refreshSharedProgress(); };
+    orig.onseeked = () => { syncVideoOverlayDual(job); };
   }
 
   function syncVideoOverlayDual(job) {
     const orig = utils.$('#pv-orig'); if (!orig) return;
     const frames = job.frames || []; if (!frames.length) return;
-    const cur = orig.currentTime * 1000; let best = null;
+    const cur = orig.currentTime * 1000;
+    // 视频任务只有检测到人脸的帧才入库;找时间上最接近当前播放位置的帧。
+    // 允许 +80ms 前瞻(与检测帧对齐)和 400ms 后窗;超出后窗说明当前
+    // 处于无脸区间,必须清掉上一帧残留的框。
+    let best = null;
     for (const f of frames) {
       if (f.annotated_key && f.timestamp_ms <= cur + 80) best = f;
       else if (f.timestamp_ms > cur + 80) break;
     }
-    if (best && best.index !== _lastAnnoFrameIdx) {
+    if (best && cur - best.timestamp_ms <= 400 && best.index !== _lastAnnoFrameIdx) {
       _lastAnnoFrameIdx = best.index;
       drawOverlayOnAnno(job, best);
+    } else if ((!best || cur - best.timestamp_ms > 400) && _lastAnnoFrameIdx !== -1) {
+      _lastAnnoFrameIdx = -1;
+      clearOverlay();
     }
   }
   function syncOrigByAnnoTime(job) {
@@ -1134,9 +1168,14 @@ const preview = (() => {
     const rect = stage.getBoundingClientRect(), m = anno.getBoundingClientRect();
     c.style.left = (m.left - rect.left) + 'px';
     c.style.top = (m.top - rect.top) + 'px';
+    c.style.width = m.width + 'px'; c.style.height = m.height + 'px';
     c.width = m.width; c.height = m.height;
-    const natW = anno.videoWidth || (frame.faces[0] ? frame.faces[0].w * 4 : 640);
-    const natH = anno.videoHeight || 360;
+    // 人脸坐标是检测帧(ffmpeg scale=480)空间,不是原视频空间。
+    // 检测帧尺寸异步从首张标注帧 PNG 读(_detDims);拿到前用坐标
+    // 上界兜底(避免首屏画错位置)。
+    const dims = _detDims[job.id];
+    const natW = dims ? dims.w : (frame.faces[0] ? frame.faces[0].w * 2 : 480);
+    const natH = dims ? dims.h : 270;
     drawBoxes(c, frame, natW, natH);
   }
 
@@ -1238,6 +1277,11 @@ const preview = (() => {
       const lpct = Math.max(0.15, Math.min(0.85, x / rect.width));
       left.style.flex = `0 0 calc(${lpct * 100}% - 2px)`;
       right.style.flex = '1 1 0';
+      const job = state.currentJob;
+      if (job && _lastAnnoFrameIdx !== -1) {
+        const cur = (job.frames || []).find(fr => fr.index === _lastAnnoFrameIdx);
+        if (cur) drawOverlayOnAnno(job, cur);
+      }
     });
     div.addEventListener('pointerup', (e) => { dragging = false; div.releasePointerCapture(e.pointerId); });
   }
@@ -1301,6 +1345,7 @@ const preview = (() => {
     const rect = stage.getBoundingClientRect(), mediaRect = mediaEl.getBoundingClientRect();
     c.style.left = (mediaRect.left - rect.left) + 'px';
     c.style.top = (mediaRect.top - rect.top) + 'px';
+    c.style.width = mediaRect.width + 'px'; c.style.height = mediaRect.height + 'px';
     c.width = mediaRect.width; c.height = mediaRect.height;
     drawBoxes(c, frame, mediaEl.naturalWidth || mediaEl.videoWidth, mediaEl.naturalHeight || mediaEl.videoHeight);
   }
@@ -1337,7 +1382,11 @@ const preview = (() => {
           if (f) drawOverlay(job, f, img);
         }
       } else if (job.kind === 'video') {
-        if (vid && !vid.classList.contains('hidden')) {
+        const dbl = utils.$('#pv-double');
+        if (dbl && !dbl.classList.contains('hidden')) {
+          const cur = (job.frames || []).find(fr => fr.index === _lastAnnoFrameIdx);
+          if (cur) drawOverlayOnAnno(job, cur);
+        } else if (vid && !vid.classList.contains('hidden')) {
           const f = (job.frames || []).find(fr => fr.index === _lastAnnoFrameIdx) || (job.frames || []).find(fr => fr.annotated_key);
           if (f) drawOverlay(job, f, vid);
         }
@@ -1347,8 +1396,9 @@ const preview = (() => {
 
   function renderProgress(job) {
     const st = job.stats || {};
-    const processed = st.frames_processed || 0, total = job.frame_count || processed;
-    const pct = total > 0 ? (processed / total) * 100 : 0;
+    const processed = st.frames_processed || 0;
+    const total = st.total_frames || (job.kind === 'image' ? job.frame_count : processed) || processed;
+    const pct = total > 0 ? Math.min(100, (processed / total) * 100) : 0;
     utils.$('#pv-prog-fill').style.width = pct + '%';
     utils.$('#pv-prog-text').textContent = `${processed} / ${total}`;
     utils.$('#pv-prog-pct').textContent = pct.toFixed(0) + '%';
@@ -1459,6 +1509,9 @@ const preview = (() => {
     if (job.kind === 'video') {
       const o = utils.$('#pv-orig') || utils.$('#pv-vid');
       if (o) { o.currentTime = frame.timestamp_ms / 1000; o.play().catch(() => {}); }
+    } else if (job.kind === 'image' || job.kind === 'stream') {
+      // 图片 / 流任务没有时间轴,seek = 打开 lightbox 直接看标注帧。
+      if (typeof lightbox !== 'undefined' && lightbox && lightbox.open) lightbox.open(frame);
     }
   }
 
@@ -2352,11 +2405,17 @@ function initKeys() {
     // vim 风格 j/k 上下选择(与 ↑/↓ 等价)
     if (e.key === 'j' || e.key === 'J') { sidebar.nextItem(1); e.preventDefault(); return; }
     if (e.key === 'k' || e.key === 'K') { sidebar.nextItem(-1); e.preventDefault(); return; }
-    // Enter 打开当前任务(已打开时无操作)
-    if (e.key === 'Enter' && state.currentJobId) {
-      // 当前焦点在按钮上时不劫持(保留原生按钮激活)
-      if (e.target && e.target.matches && e.target.matches('button, a[href], select')) return;
-      e.preventDefault(); return;
+    // Enter:打开当前任务的 lightbox(已打开时仍跳到首张带脸帧),
+    // 让键盘可达用户在不离开主区的情况下查看标注细节。
+    if (e.key === 'Enter' && state.currentJobId && state.currentJob) {
+      if (e.target && e.target.matches && e.target.matches('button, a[href], select, input')) return;
+      const job = state.currentJob;
+      const firstFaceFrame = (job.frames || []).find(f => f.faces && f.faces.length);
+      if (firstFaceFrame && typeof lightbox !== 'undefined' && lightbox && lightbox.open) {
+        lightbox.open(firstFaceFrame);
+        e.preventDefault();
+      }
+      return;
     }
     // Home / End / PageUp / PageDown:整段跳
     if (e.key === 'Home') {
@@ -2403,9 +2462,8 @@ async function init() {
   if (typeof preview.initDivider === 'function') preview.initDivider();
   if (typeof preview.initFaceFilters === 'function') preview.initFaceFilters();
   if (typeof lightbox.init === 'function') lightbox.init();
-  // 顶栏主题快切按钮(在 theme.init() 之后,确保按钮已存在)
-  const tbTheme = utils.$('#tb-theme');
-  if (tbTheme) tbTheme.addEventListener('click', theme.cycle);
+  // 顶栏主题快切按钮的 click 监听已在 theme.init() 里绑定(theme.cycle);
+  // 这里不要再加一次,否则点一次会切两次主题(已修复)。
   utils.$('#pv-close').addEventListener('click', preview.close);
   utils.$('#pv-cancel').addEventListener('click', cancelCurrent);
   utils.$('#pv-toggle-anno').addEventListener('click', preview.toggleAnno);
