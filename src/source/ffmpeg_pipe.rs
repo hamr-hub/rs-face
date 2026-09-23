@@ -23,12 +23,15 @@ pub struct FfmpegPipeSource {
     fps: u32,
     width: usize,
     height: usize,
+    total_frames: Option<u64>,
 }
 
 impl FfmpegPipeSource {
     pub fn new(url: &str, fps: u32) -> io::Result<Self> {
         // Probe source dimensions via ffprobe (best-effort).
         let (src_w, src_h) = probe_size(url).unwrap_or((640, 480));
+        // Probe total frame count (best-effort; streams have none).
+        let total_frames = probe_frame_count(url);
         // Compute the actual output dimensions ffmpeg will produce with
         // `scale=480:-2`: ffmpeg rounds the result *up* to the nearest even
         // number to satisfy H.264/H.265 macroblock alignment, so we must
@@ -85,11 +88,15 @@ impl FfmpegPipeSource {
             fps,
             width: w,
             height: h,
+            total_frames,
         })
     }
 }
 
 impl FrameSource for FfmpegPipeSource {
+    fn total_hint(&self) -> Option<u64> {
+        self.total_frames
+    }
     fn next_frame(&mut self) -> io::Result<Option<Frame>> {
         let rx = match self.rx.as_ref() {
             Some(r) => r,
@@ -142,6 +149,33 @@ fn probe_size(url: &str) -> Option<(usize, usize)> {
     let w: usize = parts.next()?.trim().parse().ok()?;
     let h: usize = parts.next()?.trim().parse().ok()?;
     Some((w, h))
+}
+
+/// Probe a media file for its total video frame count via `ffprobe`.
+/// Returns `None` for live streams / missing ffprobe / unparseable output.
+fn probe_frame_count(url: &str) -> Option<u64> {
+    if url.starts_with("rtsp://") || url.starts_with("http://") || url.starts_with("https://") {
+        return None;
+    }
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_frames",
+            "-of",
+            "csv=p=0",
+            url,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = std::str::from_utf8(&out.stdout).ok()?.trim();
+    s.parse::<u64>().ok()
 }
 
 /// Ask ffmpeg itself what the even-aligned height will be for `scale=W:-2`.

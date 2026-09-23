@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — UI: panel placement and key bindings
+- **Algorithm compare and identity consensus panels now live below the playback
+  area, not inside it.** Previously the panels were appended to `pv-stage`,
+  whose `max-height + overflow:hidden` clipped the canvas and overlapped the
+  video. They now anchor before the breakdown stats inside `pv-detail`, so the
+  video stays fully visible and the panel flows naturally with the page.
+- **`compare` and `recognize` modules now use the full job UUID when calling
+  their endpoints.** The fallback parser was reading `#pv-id` textContent,
+  which only carries the 8-character prefix. The server received a truncated
+  ID and returned 404, so enabling either mode silently failed. Both modules
+  now read `window.__rsface.state.currentJobId` and the wrong-URL 404 is gone.
+- **`timeline.js` switched from the dead `window.state` reference to
+  `window.__rsface.state`.** With the old pointer, the auto-watch loop never
+  saw a current job, so the canvas stayed empty on every video / stream
+  preview. The render loop and `refreshFromState` now look at the right
+  object and the frame dots appear as soon as a job loads.
+- **Pressing <kbd>Enter</kbd> while a task is open now opens the lightbox on
+  the first detected face** instead of being a silent no-op. The help modal
+  text was updated to match.
+- **`seekToFrame` for image and stream jobs now opens the lightbox** when a
+  face card is clicked, since there is no video to scrub to.
+- **Theme button no longer cycles two themes per click.** A duplicate click
+  listener was bound in `app.init()` after `theme.init()` already attached
+  one; removing the duplicate keeps the cycle button at the documented
+  `auto → dark → light → auto` cadence.
+
+### Added — independent threshold for temporal liveness voting
+- **Video and stream temporal voting can now require a separate window mean
+  real score via `RSFACE_LIVENESS_TEMPORAL_MIN_SCORE`.** A track still needs N
+  consecutive real frames, and the sliding window's mean real score must clear
+  the new threshold; when it is unset, the platform falls back to
+  `RSFACE_LIVENESS_MIN_REAL_SCORE`. This prevents one unusually high-scoring
+  frame from carrying otherwise weak frames while allowing operators to tune
+  the temporal gate independently. The defaults preserve existing behaviour.
+
 ### Added — verdict labels and calibration summary endpoint
 - **Stored face rows now carry the liveness verdict, and a read-only
   aggregation endpoint serves the calibration summary.** Migration
