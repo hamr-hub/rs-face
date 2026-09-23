@@ -44,23 +44,30 @@ const dashboard = (() => {
       { k: '人脸总数', v: d.faces, c: 'accent' },
       { k: '总检测时长', v: fmt(d.ms), c: 'fg' },
     ];
-    utils.$('#dash-stats').innerHTML = tiles.map(t =>
-      `<div class="dash-tile ${t.c}"><div class="dash-tile-v">${t.v}</div><div class="dash-tile-k">${t.k}</div></div>`
-    ).join('');
+    const el = utils.$('#ins-stats');
+    if (!el) return;
+    el.innerHTML =
+      `<div class="ins-section-title">概览</div>` +
+      tiles.map(t =>
+        `<div class="dash-tile ${t.c}"><div class="dash-tile-v">${t.v}</div><div class="dash-tile-k">${t.k}</div></div>`
+      ).join('');
   }
 
   function renderAlgos(d) {
     const entries = Object.entries(d.algoCount).sort((a,b) => b[1]-a[1]);
     const max = Math.max(1, ...entries.map(e => e[1]));
-    const el = utils.$('#dash-algos');
-    if (!entries.length) { el.innerHTML = '<div class="hint">暂无数据</div>'; return; }
-    el.innerHTML = entries.map(([k,v]) => {
+    const el = utils.$('#ins-algos');
+    if (!el) return;
+    let html = `<div class="ins-section-title">算法占比</div>`;
+    if (!entries.length) { html += '<div class="hint">暂无数据</div>'; el.innerHTML = html; return; }
+    html += entries.map(([k,v]) => {
       const pct = (v / max * 100).toFixed(1);
       return `<div class="dash-bar-row">
         <div class="dash-bar-label">${utils.escapeHtml(k)}</div>
         <div class="dash-bar"><div class="dash-bar-fill" style="width:${pct}%"></div><span class="dash-bar-val">${v}</span></div>
       </div>`;
     }).join('');
+    el.innerHTML = html;
   }
 
   function renderTimeline(d) {
@@ -75,54 +82,46 @@ const dashboard = (() => {
     const lblHrs = ['现在', '-12h', '-24h'];
     const lblX = [W - 28, W/2 - 12, 0];
     lblHrs.forEach((t, i) => { labels += `<text x="${lblX[i].toFixed(0)}" y="${H + 2}">${t}</text>`; });
-    utils.$('#dash-timeline').innerHTML =
+    const el = utils.$('#ins-timeline');
+    if (!el) return;
+    el.innerHTML = `<div class="ins-section-title">最近 24h 任务数</div>` +
       `<svg viewBox="0 0 ${W} ${H + 6}" class="dash-svg" preserveAspectRatio="none">${bars}${labels}</svg>`;
   }
 
-  /** 用户行为埋点摘要(异步,无 DB 时降级)。 */
   async function renderTelemetry() {
-    const sec = utils.$('#dash-telemetry-section');
-    const wrap = utils.$('#dash-telemetry');
-    const meta = utils.$('#dash-telemetry-meta');
-    if (!sec || !wrap) return;
+    const el = utils.$('#ins-telemetry');
+    if (!el) return;
     try {
       const r = await api.telemetrySummary(86400);
       if (!r || !r.enabled || !Array.isArray(r.buckets) || r.buckets.length === 0) {
-        sec.hidden = true;
-        return;
+        el.innerHTML = ''; el.hidden = true; return;
       }
-      sec.hidden = false;
+      el.hidden = false;
       const total = r.total || 0;
-      if (meta) meta.textContent = `最近 24h · ${total} 条`;
       const buckets = r.buckets;
       const max = Math.max(1, ...buckets.map(b => b.count || 0));
-      wrap.innerHTML = buckets.map(b => {
-        const pct = ((b.count || 0) / max * 100).toFixed(1);
-        return `<div class="dash-bar-row">
-          <div class="dash-bar-label" title="${utils.escapeHtml(b.name)}">${utils.escapeHtml(b.name)}</div>
-          <div class="dash-bar"><div class="dash-bar-fill" style="width:${pct}%"></div><span class="dash-bar-val">${b.count || 0}</span></div>
-        </div>`;
-      }).join('');
-    } catch {
-      sec.hidden = true;
-    }
+      el.innerHTML = `<div class="ins-section-title">用户行为埋点 · 最近 24h · ${total} 条</div>` +
+        buckets.map(b => {
+          const pct = ((b.count || 0) / max * 100).toFixed(1);
+          return `<div class="dash-bar-row">
+            <div class="dash-bar-label" title="${utils.escapeHtml(b.name)}">${utils.escapeHtml(b.name)}</div>
+            <div class="dash-bar"><div class="dash-bar-fill" style="width:${pct}%"></div><span class="dash-bar-val">${b.count || 0}</span></div>
+          </div>`;
+        }).join('');
+    } catch { el.innerHTML = ''; el.hidden = true; }
   }
 
-  /** 活体标定:按真脸/假脸分组的信号均值(无 DB / 无判定时降级)。 */
   async function renderLiveness() {
-    const sec = utils.$('#dash-liveness-section');
-    const wrap = utils.$('#dash-liveness');
-    if (!sec || !wrap) return;
+    const el = utils.$('#ins-liveness');
+    if (!el) return;
     let groups = [];
     try {
       const r = await fetch('/api/liveness/quality-summary');
       const data = r.ok ? await r.json() : null;
       groups = (data && Array.isArray(data.groups)) ? data.groups : [];
-    } catch {
-      groups = [];
-    }
+    } catch { groups = []; }
     if (!groups.length) {
-      wrap.innerHTML = '<div class="hint">暂无判定数据(启用活体并完成任务后累积)</div>';
+      el.innerHTML = '<div class="hint">暂无判定数据</div>';
       return;
     }
     const signals = [
@@ -141,25 +140,47 @@ const dashboard = (() => {
     const head = groups.map(g =>
       `<th class="dl-head ${g.verdict === 'real' ? 'is-real' : 'is-spoof'}">${g.verdict === 'real' ? '真脸' : '假脸'}<span class="dl-n">n=${g.samples}</span></th>`
     ).join('');
-    wrap.innerHTML =
+    el.innerHTML = `<div class="ins-section-title">活体标定 · 真脸 vs 假脸</div>` +
       `<table class="dl-table"><thead><tr><th></th>${head}</tr></thead><tbody>${rows}</tbody></table>`;
   }
 
-  async function open() {
-    utils.$('#modal-dashboard').classList.remove('hidden');
-    utils.$('#dash-stats').innerHTML = '<div class="hint">加载中…</div>';
+  async function refresh() {
+    // v0.5:渲染到右侧 Inspector 抽屉的 Stats tab(#inspector [data-ins="stats"] 面板)。
+    // 抽屉 DOM 在 index.html 里已经写好 4 个 <div id="ins-*"> 锚点,这里只填内容。
+    const host = document.querySelector('#inspector [data-ins="stats"]');
+    if (!host) return;
+    // 第一次填充 4 个锚点 div
+    if (!host.querySelector('#ins-stats')) {
+      host.innerHTML = `
+        <div class="ins-stack">
+          <div id="ins-stats"></div>
+          <div id="ins-algos"></div>
+          <div id="ins-timeline"></div>
+          <div id="ins-telemetry" hidden></div>
+          <div id="ins-liveness"></div>
+          <div class="ins-meta" id="ins-meta"></div>
+        </div>`;
+    }
+    document.querySelector('#ins-stats').innerHTML = '<div class="hint">加载中…</div>';
     try {
       const d = await compute();
       renderStats(d); renderAlgos(d); renderTimeline(d);
-      utils.$('#dash-meta').textContent = `数据源:内存 + 历史(/api/jobs 合并 PG) · 任务总数 ${d.total} · 刷新于 ${new Date().toLocaleTimeString()}`;
-      // 埋点摘要独立加载(无 DB 也不阻塞主面板)
+      const meta = document.querySelector('#ins-meta');
+      if (meta) meta.textContent = `数据源:内存 + PG · 任务总数 ${d.total} · 刷新于 ${new Date().toLocaleTimeString()}`;
       renderTelemetry();
-      // 活体标定独立加载(无 DB / 无判定时降级)
       renderLiveness();
     } catch (e) {
-      utils.$('#dash-stats').innerHTML = '<div class="hint">加载失败: ' + utils.escapeHtml(e.message) + '</div>';
+      const el = document.querySelector('#ins-stats');
+      if (el) el.innerHTML = '<div class="hint">加载失败: ' + utils.escapeHtml(e.message) + '</div>';
     }
   }
 
-  return { open };
+  // 兼容旧 API:dashboard.open() 仍可被外部调用,等价于打开 Inspector + 切到 Stats。
+  async function open() {
+    const rs = window.__rsface;
+    if (rs && rs.inspector) { rs.inspector.open(); rs.inspector.activate('stats'); }
+    await refresh();
+  }
+
+  return { open, refresh };
 })();

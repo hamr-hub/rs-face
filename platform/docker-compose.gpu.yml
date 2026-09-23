@@ -115,6 +115,11 @@ services:
       LOCAL_MEDIA_DIR: /var/rsface-media
       # 走 cuda-backend(cudarc + NVRTC),不走 OpenCL(Jetson 驱动不发 OpenCL ICD)。
       RSFACE_USE_GPU: ${RSFACE_USE_GPU:-1}
+      # ORT execution-provider selection for SCRFD + ArcFace.
+      # `auto` (default) tries CUDA first, falls back to TensorRT, then CPU.
+      # `cuda` / `tensorrt` / `tract` force one path. Override at run time
+      # by exporting `RSFACE_ARCFACE_BACKEND=cuda` before `docker compose up`.
+      RSFACE_ARCFACE_BACKEND: ${RSFACE_ARCFACE_BACKEND:-auto}
       # filesystem face gallery(每个子目录一个身份)→ host data/gallery/。
       # /api/jobs/{id}/recognize 走的是这条;JS-only 方案走 PG(persons/person_faces)。
       RSFACE_GALLERY_DIR: ${RSFACE_GALLERY_DIR:-/var/rsface-gallery}
@@ -170,4 +175,18 @@ services:
       # 进镜像,所以这里挂 host 路径。rsface 用户 uid=1000 → host hyx uid=1000
       # 对得上,目录直接可读。
       - ../models:/app/models:ro
+      # bind mount host TensorRT + cuDNN + CUDA toolkit libs 到容器内
+      # `/opt/jetson-tensorrt/lib` — 这些都是 JetPack 6 自带的,几百 MB,
+      # 不可能 COPY 进镜像。容器启动时 ORT TensorRT EP 通过 LD_LIBRARY_PATH
+      # 看到这些。host 路径 → 容器路径一一映射:
+      #   /usr/lib/aarch64-linux-gnu/libnvinfer*.so  (TensorRT 10.3)
+      #   /usr/lib/aarch64-linux-gnu/libnvonnxparser*.so
+      #   /usr/lib/aarch64-linux-gnu/libcudnn.so.9  (cuDNN 9)
+      #   /usr/local/cuda-12.6/targets/aarch64-linux/lib/ (libcudart/libcublas/libcufft)
+      - /usr/lib/aarch64-linux-gnu:/opt/jetson-tensorrt/lib-host:ro
+      - /usr/local/cuda-12.6/targets/aarch64-linux/lib:/opt/jetson-tensorrt/lib-cuda:ro
+      # 容器内通过符号链接把所有 host lib 聚到 /opt/jetson-tensorrt/lib。
+      # 入口脚本(docker-entrypoint.sh)建立这些符号链接,然后 ORT 即可统一查找。
+      # bind mount ORT TensorRT engine 缓存(避免 SM87 engine 每次重建)。
+      - ../data/ort-cache:/data/ort-cache:rw
     restart: unless-stopped

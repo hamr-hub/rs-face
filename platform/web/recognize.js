@@ -126,6 +126,17 @@
       #tb-recognize[aria-pressed="true"] {
         color: #33d17a; border-color: rgba(51,209,122,0.55);
       }
+      /* v0.5:识别开关搬到 Inspector 抽屉的「识别」tab 顶部 */
+      .rsfr-inspector-bar {
+        margin: 0 0 10px 0;
+        padding: 10px 12px;
+        background: var(--bg-3, #181d27);
+        border: 1px solid var(--border, rgba(255,255,255,0.08));
+        border-radius: 10px;
+        font-size: 13px;
+      }
+      .rsfr-inspector-bar label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+      .rsfr-inspector-bar .rsfr-hint { color: var(--fg-dim, #7a8595); font-size: 11px; }
     `;
     const tag = document.createElement('style');
     tag.id = 'rsfr-styles';
@@ -148,8 +159,11 @@
 
   function schedule() {
     if (state.pollingStopped) return;
-    const detail = document.getElementById('pv-detail');
-    if (!isEnabled() || !detail || detail.classList.contains('hidden')) {
+    // v0.5:轮询条件 — 仅在 Inspector 打开 + 「识别」tab 激活时才跑
+    const inspector = document.getElementById('inspector');
+    const open = inspector && !inspector.getAttribute('aria-hidden');
+    const onRecognizeTab = document.querySelector('#inspector .ins-tab.active')?.dataset.ins === 'recognize';
+    if (!isEnabled() || !open || !onRecognizeTab) {
       state.lastJobId = null;
       state.lastResponseKey = '';
       removePanel();
@@ -175,19 +189,15 @@
   document.addEventListener('visibilitychange', syncPolling);
 
   async function fetchAndRender(jobId) {
-    // 注入到 #pv-detail 而不是 #pv-stage — pv-stage 有 max-height + overflow:hidden,
-    // 把面板塞进去会遮挡视频播放区;放到 detail 里让它自然下推到独立行。
-    const host = document.getElementById('pv-detail') || document.getElementById('pv-stage');
+    // v0.5:注入到右侧 Inspector 抽屉的「识别」面板,而不是主区。
+    const host = document.querySelector('#inspector [data-ins="recognize"]');
     if (!host) return;
     removePanel();
     const panel = document.createElement('div');
     panel.id = 'rsfr-panel';
     panel.className = 'rsfr-panel';
     panel.innerHTML = '<div class="rsfr-loading">Running LBPH / Eigenface / Fisherface consensus...</div>';
-    // 插到 timeline 之后、breakdown 之前 — 视觉上紧贴播放区,不影响人脸卡片。
-    const anchor = host.querySelector('#pv-bbar') || host.querySelector('#pv-faces');
-    if (anchor && anchor.parentNode === host) host.insertBefore(panel, anchor);
-    else host.appendChild(panel);
+    host.appendChild(panel);
     try {
       // 后端要求 ?algos=haar(handler 用 q.algos 第一个切片决定 detector),
       // 旧的 ?detector=haar 文档是错的;统一走 ?algos= 路径。
@@ -368,22 +378,34 @@
   }
 
   function initButton() {
-    const btn = document.getElementById('tb-recognize');
-    if (!btn) return;
     injectStyles();
-    btn.setAttribute('aria-pressed', isEnabled() ? 'true' : 'false');
-    btn.addEventListener('click', () => {
-      const next = !isEnabled();
-      setEnabled(next);
-      btn.setAttribute('aria-pressed', next ? 'true' : 'false');
-      // 用户切换:重新允许轮询(上次可能是 no_gallery 自动停的)。
-      state.pollingStopped = false;
-      state.lastResponseKey = '';
-      state.lastErrorKey = '';
-      removePanel();
-      syncPolling();
-      schedule();
-    });
+    // v0.5:开关注入到 Inspector 抽屉的「识别」面板顶部(顶栏不再有 tb-recognize)。
+    const recPanel = document.querySelector('#inspector [data-ins="recognize"]');
+    if (!recPanel) return;
+    if (!recPanel.querySelector('#rsfr-toggle-bar')) {
+      const bar = document.createElement('div');
+      bar.id = 'rsfr-toggle-bar';
+      bar.className = 'rsfr-inspector-bar';
+      bar.innerHTML = `
+        <label>
+          <input type="checkbox" id="rsfr-toggle" ${isEnabled() ? 'checked' : ''}>
+          <span style="font-weight:600">身份识别共识</span>
+          <span class="rsfr-hint">同一张脸用多个识别器投票(LBPH / Eigenface / Fisherface)</span>
+        </label>
+      `;
+      recPanel.insertBefore(bar, recPanel.firstChild);
+      const cb = bar.querySelector('#rsfr-toggle');
+      cb.addEventListener('change', () => {
+        const next = !!cb.checked;
+        setEnabled(next);
+        state.pollingStopped = false;
+        state.lastResponseKey = '';
+        state.lastErrorKey = '';
+        removePanel();
+        syncPolling();
+        schedule();
+      });
+    }
   }
 
   if (document.readyState === 'loading') {

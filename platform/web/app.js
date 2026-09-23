@@ -1,12 +1,15 @@
 /* rs-face Platform · 零依赖 vanilla JS · 主模块:api / utils / theme / sidebar / preview / upload / sse / keys / batch
  * 拆分模块(经典 script,共享全局词法作用域,须在 app.js 之前加载):
  *   toast.js(多级 toast) · modal.js(confirmModal / modalKit / ctxMenu) · dashboard.js(仪表板) · visibility.js(可见性治理)
- * 优化:虚拟滚动(key 复用 + 签名跳过重建 + 元素缓存) · 缩略图 IntersectionObserver 懒加载 · SSE 帧事件 throttleRaf 批渲染
- *     · <img> 全部 loading="lazy" decoding="async" · 无 setInterval 长轮询(除 KPI 2s,受 visibility 治理)
- * 增强(v0.2):批量选 + 批量删/归档/导出 · 主题切换(暗/亮/自动) · 智能搜索(正则 + 时间范围)
- *            · 仪表板 · 多级 toast · 确认 modal · a11y + 键盘导航
- * 增强(v0.3):任务置顶 · 右键上下文菜单 · j/k 键盘导航 · 全屏拖放遮罩 · 粘贴 URL 建任务
- *            · 页面不可见暂停轮询/SSE · 引导式空状态 · 移动端适配(抽屉侧栏 + KPI 横滚)
+ *   compare.js(多算法叠加) · recognize.js(LBPH/Eigenface 共识) · upload-queue.js(队列)
+ *   timeline.js(帧时间轴) · telemetry.js(埋点)
+ *
+ * v0.5 简约大气重构:
+ *   - 顶栏 9 图标 → 4 元素(+ 新建 / 搜索 / 主题 / 帮助)
+ *   - KPI 8 格 → 4 格(运行/FPS/GPU/检出),其它维度进 Tabs
+ *   - 详情页 6 统计格 + timeline + 双控件 折叠到 4 个 Tabs(结果/帧/统计/导出)
+ *   - Compare / Recognize / Dashboard → 右侧 Inspector 抽屉(默认收起,顶栏不再挂 toggle)
+ *   - 详情 header kebab(⋯)收纳「取消 / 重跑 / 导出 / 删除」等低频动作
  */
 'use strict';
 
@@ -260,10 +263,11 @@ const batch = (() => {
     } catch (e) { toast.error('导出失败: ' + e.message); }
   }
   function init() {
-    utils.$('#sb-batch-clear').addEventListener('click', exit);
-    utils.$('#sb-batch-delete').addEventListener('click', deleteSelected);
-    utils.$('#sb-batch-archive').addEventListener('click', archiveSelected);
-    utils.$('#sb-batch-export').addEventListener('click', exportSelected);
+    const on = (sel, fn) => { const el = utils.$(sel); if (el) el.addEventListener('click', fn); };
+    on('#sb-batch-clear', exit);
+    on('#sb-batch-delete', deleteSelected);
+    on('#sb-batch-archive', archiveSelected);
+    on('#sb-batch-export', exportSelected);
   }
   return { isActive, enter, exit, toggle, init };
 })();
@@ -336,23 +340,8 @@ const kpi = (() => {
       gpuEl.classList.toggle('kpi-warn', gpuPct === 0 && (m.total_gpu_levels + m.total_cpu_levels) > 0);
     }
 
-    // frames
-    setText('kpi-frames-v', String(m.total_frames_processed || 0));
-    setText('kpi-frames-sub', '含脸 ' + (m.total_frames_with_face || 0));
-
     // detections
     setText('kpi-det-v', String(m.total_detections || 0));
-
-    // pass rate
-    const pr = (m.cascade_pass_rate || 0);
-    setText('kpi-rate-v', pr > 0 ? (pr * 100).toFixed(2) + '%' : '—');
-
-    // failures
-    setText('kpi-fail-v', String(m.errored || 0));
-    setText('kpi-fail-sub', '取消 ' + (m.cancelled || 0));
-
-    // mode
-    setText('kpi-mode-v', (m.mode || '—').toUpperCase());
   }
 
   function init() {
@@ -394,6 +383,8 @@ const sidebar = (() => {
       });
       render();
     }));
+    // 算法过滤 chips(若 HTML 提供 #sb-algofilter 才挂监听;v0.5 默认省略,
+    // 算法切换收敛到顶部「新建任务」下拉 / Inspector 抽屉的 Stats / Compare)。
     utils.$$('#sb-algofilter .sb-algo-chip').forEach(b => b.addEventListener('click', () => {
       state.algoFilter = b.dataset.algo || '';
       utils.$$('#sb-algofilter .sb-algo-chip').forEach(x => {
@@ -794,7 +785,8 @@ const preview = (() => {
       _detDims[job.id] = { w: probe.naturalWidth, h: probe.naturalHeight };
       if (state.currentJob && state.currentJob.id === job.id) {
         const cur = (job.frames || []).find(f => f.index === _lastAnnoFrameIdx);
-        if (cur) drawOverlayOnAnno(job, cur);
+        const vid = utils.$('#pv-vid');
+        if (cur && vid && !vid.classList.contains('hidden')) drawVideoOverlay(job, cur, vid);
       }
     };
     probe.src = utils.mediaUrl(first.annotated_key);
@@ -873,7 +865,9 @@ const preview = (() => {
     const status = job.status || 'queued';
     const statusEl = utils.$('#pv-status'); statusEl.textContent = status; statusEl.className = 'pv-status ' + status;
     utils.$('#pv-dot').className = 'pv-dot ' + status;
-    utils.$('#pv-cancel').classList.toggle('hidden', !(status === 'running' || status === 'queued'));
+    // v0.5:pv-cancel / pv-retry / pv-delete / pv-toggle-anno 等按钮被 kebab menu 替代,
+    // 这里只查询不再 toggle(若 DOM 不存在,直接跳过)。这些行保留是为了不破坏外部测试调用约定。
+    { const el = utils.$('#pv-cancel'); if (el) el.classList.toggle('hidden', !(status === 'running' || status === 'queued')); }
     // Bug 2:error/cancelled 都显示原图 + 顶部红色 banner(带复制/重试按钮)
     const banner = utils.$('#pv-error-banner');
     if (status === 'error' || status === 'cancelled') {
@@ -912,9 +906,8 @@ const preview = (() => {
     } else if (banner) {
       banner.classList.add('hidden');
     }
-    const retryBtn = utils.$('#pv-retry');
     const canRetry = job.original_input || (job.kind === 'image' && job.original_key);
-    if (retryBtn) retryBtn.classList.toggle('hidden', !canRetry);
+    { const retryBtn = utils.$('#pv-retry'); if (retryBtn) retryBtn.classList.toggle('hidden', !canRetry); }
     if (job.error && status === 'error') {
       if (state.currentJob && state.currentJob.id === job.id && state.currentJob.status !== 'error') {
         toast.error('任务错误: ' + job.error);
@@ -1102,38 +1095,23 @@ const preview = (() => {
 
   function renderVideo(job) {
     const img = utils.$('#pv-img');
-    const dbl = utils.$('#pv-double');
-    const sc = utils.$('#pv-shared-controls');
-    const orig = utils.$('#pv-orig'), anno = utils.$('#pv-anno');
-    if (!dbl || !orig) return;
-    img.classList.add('hidden');
-    dbl.classList.remove('hidden');
-    if (sc) sc.classList.remove('hidden');
+    const vid = utils.$('#pv-vid');
+    if (!vid) return;
+    if (img) img.classList.add('hidden');
+    vid.classList.remove('hidden');
     ensureDetDims(job);
     if (!job.original_key) { showHint('无视频源'); return; }
-    // Bug 1/4:URL 编码
-    const newOrigSrc = utils.mediaUrl(job.original_key);
-    if (!orig.src || !orig.src.includes(encodeURIComponent(job.original_key))) orig.src = newOrigSrc;
-    // 后端不产出 job 级别的标注 mp4(summary 中没有 annotated_key);
-    // 右侧与左侧播放同一份原视频(走浏览器缓存,不重复下载),检测框由
-    // #pv-overlay 按 orig currentTime 实时叠加(syncVideoOverlayDual),
-    // 保证左右画面帧同步。加载完成前用首张标注帧做 poster,避免黑屏。
-    if (anno) {
-      if (!anno.src || !anno.src.includes(encodeURIComponent(job.original_key))) anno.src = newOrigSrc;
-      const first = (job.frames || []).find(f => f.annotated_key);
-      anno.poster = first ? utils.mediaUrl(first.annotated_key) : '';
-    }
-    if (anno) bindSync(orig, anno);
-    orig.onloadedmetadata = () => {
+    const newSrc = utils.mediaUrl(job.original_key);
+    if (!vid.src || !vid.src.includes(encodeURIComponent(job.original_key))) vid.src = newSrc;
+    const first = (job.frames || []).find(f => f.annotated_key);
+    vid.poster = first ? utils.mediaUrl(first.annotated_key) : '';
+    vid.onloadedmetadata = () => {
       hideHint();
-      const first = (job.frames || []).find(f => f.annotated_key);
-      if (first && anno) drawOverlayOnAnno(job, first);
-      refreshSharedProgress();
+      syncVideoOverlay(job, vid);
     };
-    anno.onloadedmetadata = () => { hideHint(); refreshSharedProgress(); };
-    orig.ontimeupdate = () => { syncVideoOverlayDual(job); refreshSharedProgress(); };
-    anno.ontimeupdate = () => { syncOrigByAnnoTime(job); refreshSharedProgress(); };
-    orig.onseeked = () => { syncVideoOverlayDual(job); };
+    vid.ontimeupdate = () => syncVideoOverlay(job, vid);
+    vid.onseeked = () => syncVideoOverlay(job, vid);
+    syncVideoOverlay(job, vid);
   }
 
   function syncVideoOverlayDual(job) {
@@ -1288,13 +1266,20 @@ const preview = (() => {
 
   function syncVideoOverlay(job, vid) {
     const frames = job.frames || []; if (!frames.length) return;
-    const cur = vid.currentTime * 1000; let best = null;
+    const cur = vid.currentTime * 1000;
+    // 视频任务只入库检测到人脸的帧;取时间上最接近播放位置的帧。
+    // 允许 +80ms 前瞻、400ms 后窗;超出后窗属于无脸区间,清掉残留框。
+    let best = null;
     for (const f of frames) {
-      if (f.annotated_key && f.timestamp_ms <= cur + 80) best = f;
+      if (f.timestamp_ms <= cur + 80) best = f;
       else if (f.timestamp_ms > cur + 80) break;
     }
-    if (best && best.index !== _lastAnnoFrameIdx) {
-      _lastAnnoFrameIdx = best.index; drawOverlay(job, best, vid);
+    if (best && cur - best.timestamp_ms <= 400) {
+      if (best.index !== _lastAnnoFrameIdx) _lastAnnoFrameIdx = best.index;
+      drawVideoOverlay(job, best, vid);
+    } else if ((!best || cur - best.timestamp_ms > 400) && _lastAnnoFrameIdx !== -1) {
+      _lastAnnoFrameIdx = -1;
+      clearOverlay();
     }
   }
 
@@ -1350,6 +1335,23 @@ const preview = (() => {
     drawBoxes(c, frame, mediaEl.naturalWidth || mediaEl.videoWidth, mediaEl.naturalHeight || mediaEl.videoHeight);
   }
 
+  // 视频任务的叠加:人脸坐标基于检测帧(ffmpeg scale=480)空间,必须按
+  // _detDims 缩放,而不是视频原始分辨率。
+  function drawVideoOverlay(job, frame, vid) {
+    if (!state.annoVisible) return clearOverlay();
+    const c = utils.$('#pv-overlay'), stage = utils.$('#pv-stage');
+    if (!c || !stage) return;
+    const rect = stage.getBoundingClientRect(), m = vid.getBoundingClientRect();
+    c.style.left = (m.left - rect.left) + 'px';
+    c.style.top = (m.top - rect.top) + 'px';
+    c.style.width = m.width + 'px'; c.style.height = m.height + 'px';
+    c.width = m.width; c.height = m.height;
+    const dims = _detDims[job.id];
+    const natW = dims ? dims.w : (frame.faces[0] ? frame.faces[0].w * 2 : 480);
+    const natH = dims ? dims.h : 270;
+    drawBoxes(c, frame, natW, natH);
+  }
+
   function drawBoxes(canvas, frame, natW, natH) {
     const ctx = canvas.getContext('2d'); if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -1382,13 +1384,9 @@ const preview = (() => {
           if (f) drawOverlay(job, f, img);
         }
       } else if (job.kind === 'video') {
-        const dbl = utils.$('#pv-double');
-        if (dbl && !dbl.classList.contains('hidden')) {
-          const cur = (job.frames || []).find(fr => fr.index === _lastAnnoFrameIdx);
-          if (cur) drawOverlayOnAnno(job, cur);
-        } else if (vid && !vid.classList.contains('hidden')) {
+        if (vid && !vid.classList.contains('hidden')) {
           const f = (job.frames || []).find(fr => fr.index === _lastAnnoFrameIdx) || (job.frames || []).find(fr => fr.annotated_key);
-          if (f) drawOverlay(job, f, vid);
+          if (f) drawVideoOverlay(job, f, vid);
         }
       }
     });
@@ -1558,10 +1556,13 @@ const preview = (() => {
     prefStore.write(prefStore.KEYS.annoVisible, state.annoVisible ? '1' : '0');
     const btn = utils.$('#pv-toggle-anno');
     if (btn) {
-      btn.textContent = state.annoVisible ? '标注 ●' : '标注 〇';
+      btn.textContent = state.annoVisible ? '结果' : '原片';
       btn.setAttribute('aria-pressed', state.annoVisible ? 'true' : 'false');
     }
-    if (state.currentJob) render(state.currentJob);
+    if (state.currentJob) {
+      if (state.annoVisible) render(state.currentJob);
+      else clearOverlay();
+    }
   }
 
   /**
@@ -1591,9 +1592,9 @@ const preview = (() => {
 
 const upload = (() => {
   function init() {
-    utils.$('#tb-new').addEventListener('click', openModal);
-    utils.$('#tb-settings').addEventListener('click', openSettings);
-    utils.$('#tb-help').addEventListener('click', () => utils.$('#modal-help').classList.remove('hidden'));
+    const on = (sel, fn) => { const el = utils.$(sel); if (el) el.addEventListener('click', fn); };
+    on('#tb-new', openModal);
+    on('#tb-help', () => utils.$('#modal-help').classList.remove('hidden'));
     utils.$$('.new-type').forEach(b => b.addEventListener('click', () => selectType(b.dataset.type)));
     // data-close 点击委托已由 modalKit.init() 统一处理
     setupDropzone('#dz-image', '#file-image', files => {
@@ -1605,7 +1606,7 @@ const upload = (() => {
       if (typeof dropzonePreview !== 'undefined') dropzonePreview.renderVideo(files);
       submitVideo(files[0]); closeAllModals();
     }, { accept: f => (f.type && f.type.startsWith('video/')) || /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(f.name || ''), label: '视频' });
-    utils.$('#video-url-go').addEventListener('click', () => {
+    on('#video-url-go', () => {
       const url = utils.$('#video-url').value.trim();
       if (!url) return toast.warn('请输入视频 URL');
       submitVideoUrl(url); closeAllModals();
@@ -1613,7 +1614,7 @@ const upload = (() => {
     utils.$('#video-url').addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); utils.$('#video-url-go').click(); }
     });
-    utils.$('#stream-go').addEventListener('click', () => {
+    on('#stream-go', () => {
       const url = utils.$('#stream-url').value.trim();
       if (!url) return toast.warn('请输入流地址');
       submitStream(url); closeAllModals();
@@ -1621,60 +1622,34 @@ const upload = (() => {
     utils.$('#stream-url').addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); utils.$('#stream-go').click(); }
     });
-    // 复制 LAN URL 按钮(预览面板)
-    utils.$('#pv-copy-lan').addEventListener('click', async () => {
-      const url = state.currentLanUrl;
-      if (!url) return;
-      try {
-        await navigator.clipboard.writeText(url);
-        toast.success('已复制 LAN 链接');
-      } catch {
-        // 退化:用临时 textarea
-        const ta = document.createElement('textarea');
-        ta.value = url; document.body.appendChild(ta); ta.select();
-        try { document.execCommand('copy'); toast.success('已复制 LAN 链接'); }
-        catch { toast.error('复制失败,请手动复制'); }
-        document.body.removeChild(ta);
-      }
-    });
-    utils.$('#tb-search-opts').addEventListener('click', () => {
-      utils.$('#modal-search-opts').classList.remove('hidden');
-      utils.$$('#search-mode .seg-btn').forEach(b => {
-        const on = b.dataset.mode === state.searchMode;
-        b.classList.toggle('active', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
-      });
-      utils.$$('#search-range .seg-btn').forEach(b => {
-        const on = b.dataset.range === state.searchRange;
-        b.classList.toggle('active', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
-      });
-    });
-    utils.$$('#search-mode .seg-btn').forEach(b => b.addEventListener('click', () => {
-      state.searchMode = b.dataset.mode;
-      utils.$$('#search-mode .seg-btn').forEach(x => {
-        const on = x === b; x.classList.toggle('active', on); x.setAttribute('aria-checked', on ? 'true' : 'false');
-      });
-      sidebar.render();
-    }));
-    utils.$$('#search-range .seg-btn').forEach(b => b.addEventListener('click', () => {
-      state.searchRange = b.dataset.range;
-      utils.$$('#search-range .seg-btn').forEach(x => {
-        const on = x === b; x.classList.toggle('active', on); x.setAttribute('aria-checked', on ? 'true' : 'false');
-      });
-      sidebar.render();
-    }));
-    utils.$('#tb-dashboard').addEventListener('click', () => { dashboard.open(); });
-    setupGlobalDrop(); setupGlobalPaste();
+    // 复制 LAN URL 按钮(可选,精简模板默认不渲染)
+    on('#pv-copy-lan', copyLanUrl);
     // 上传队列:"清空" 按钮移除已完成 / 失败项
     const uqClear = utils.$('#upload-queue-clear');
     if (uqClear) uqClear.addEventListener('click', (e) => {
       e.stopPropagation();
       uploadQueue.clearDone();
     });
+    setupGlobalDrop(); setupGlobalPaste();
   }
 
   const openModal = () => { utils.$('#modal-new').classList.remove('hidden'); selectType('image'); };
-  const openSettings = () => { utils.$('#modal-settings').classList.remove('hidden'); loadSettings(); };
   const closeAllModals = () => modalKit.closeAll();
+  /** 复制 LAN URL — 兼容 Clipboard API + execCommand fallback。 */
+  async function copyLanUrl() {
+    const url = state.currentLanUrl;
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success('已复制 LAN 链接');
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = url; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); toast.success('已复制 LAN 链接'); }
+      catch { toast.error('复制失败,请手动复制'); }
+      document.body.removeChild(ta);
+    }
+  }
   function selectType(t) {
     utils.$$('.new-type').forEach(b => {
       const on = b.dataset.type === t; b.classList.toggle('active', on);
@@ -1700,27 +1675,20 @@ const upload = (() => {
     return ids;
   }
   function submitVideo(file) { return submitVideoFiles([file]); }
-  async function loadSettings() {
+  async function loadConfig() {
     const cfg = await api.getConfig();
     state.config = cfg;
-    const setVal = (sel, val) => { const el = utils.$(sel); if (el) el.textContent = val || 'n/a'; };
-    if (cfg) {
-      setVal('#set-mode', cfg.mode);
-      setVal('#set-cnn', cfg.cnn_weights_status || cfg.cnn_weights_path || 'n/a');
-      setVal('#set-cascade', cfg.cascade_status || 'n/a');
-      // 用后端 available_algos 填充分享给图片/视频/流的上传算法下拉框。
-      // 注意:不要清掉"默认 (env / 配置)"选项(它在 HTML 里 hardcoded 为首项)。
-      const sel = utils.$('#new-algo-select');
-      if (sel && Array.isArray(cfg.available_algos)) {
-        // 防止重复添加:每次调用前 wipe 除第一个外的所有 options
-        while (sel.options.length > 1) sel.remove(1);
-        for (const a of cfg.available_algos) {
-          const opt = document.createElement('option');
-          opt.value = a; opt.textContent = a;
-          sel.appendChild(opt);
-        }
+    // 用后端 available_algos 填充分享给图片/视频/流的上传算法下拉框。
+    // 注意:不要清掉"默认 (env / 配置)"选项(它在 HTML 里 hardcoded 为首项)。
+    const sel = utils.$('#new-algo-select');
+    if (sel && cfg && Array.isArray(cfg.available_algos)) {
+      while (sel.options.length > 1) sel.remove(1);
+      for (const a of cfg.available_algos) {
+        const opt = document.createElement('option');
+        opt.value = a; opt.textContent = a;
+        sel.appendChild(opt);
       }
-    } else { setVal('#set-mode', 'n/a (404)'); setVal('#set-cnn', 'n/a'); setVal('#set-cascade', 'n/a'); }
+    }
   }
   function setupDropzone(zoneSel, inputSel, handler, opts) {
     const zone = utils.$(zoneSel), input = utils.$(inputSel); if (!zone || !input) return;
@@ -1910,10 +1878,127 @@ const upload = (() => {
       toast.error('启动失败: ' + e.message);
     }
   }
-  return { init, openModal, openSettings,
+  return { init, openModal, loadConfig, copyLanUrl,
            submitImage: f => submitImage(f),
            submitVideoUrl: u => submitVideoUrl(u),
            submitStream: u => submitStream(u) };
+})();
+
+/**
+ * Inspector 抽屉(右侧,v0.5 新增):
+ *  - 默认收起,90% 用户不需要看到 Compare / Recognize / Stats;
+ *  - 顶栏 tb-inspector / 快捷键 i / 点开后展开;
+ *  - 在抽屉内切换对比 / 识别 / 统计 三个 tab。
+ *  Compare / Recognize / Dashboard 模块原本注入到 #pv-detail;现在
+ * 改注入到 #inspector [data-ins=...] 三个 panel(各自 module 文件已更新 host 选择器)。
+ */
+const inspector = (() => {
+  let _open = false;
+  let _active = 'compare';
+  function open() {
+    _open = true;
+    document.body.classList.add('inspector-open');
+    const el = utils.$('#inspector'); if (el) el.setAttribute('aria-hidden', 'false');
+    const btn = utils.$('#tb-inspector'); if (btn) btn.setAttribute('aria-pressed', 'true');
+    activate(_active);
+    // Stats 是异步渲染,默认进来就拉一次(空 job 时无意义但 cheap)
+    if (_active === 'stats') dashboard.refresh();
+  }
+  function close() {
+    _open = false;
+    document.body.classList.remove('inspector-open');
+    const el = utils.$('#inspector'); if (el) el.setAttribute('aria-hidden', 'true');
+    const btn = utils.$('#tb-inspector'); if (btn) btn.setAttribute('aria-pressed', 'false');
+  }
+  function toggle() { _open ? close() : open(); }
+  function activate(name) {
+    _active = name;
+    utils.$$('#inspector .ins-tab').forEach(b => {
+      const on = b.dataset.ins === name;
+      b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    utils.$$('#inspector .ins-panel').forEach(p => {
+      p.classList.toggle('hidden', p.dataset.ins !== name);
+      p.classList.toggle('active', p.dataset.ins === name);
+    });
+  }
+  function init() {
+    utils.$$('#inspector .ins-tab').forEach(b => b.addEventListener('click', () => activate(b.dataset.ins)));
+    const closeBtn = utils.$('#ins-close');
+    if (closeBtn) closeBtn.addEventListener('click', close);
+  }
+  return { open, close, toggle, activate, init, get isOpen() { return _open; }, get active() { return _active; } };
+})();
+
+/**
+ * 详情页 Tabs(结果 / 帧 / 统计 / 导出,v0.5 新增):
+ *  - 默认 Tab 是「结果」 — 99% 用户进来就想看「这个人脸在哪」
+ *  - 数字键 1/2/3/4 切换(全局快捷键)
+ *  - 切换后调对应 panel 的渲染钩子(暂未实现 panel lazy render,直接显示/隐藏)
+ */
+const tabs = (() => {
+  let _active = 'results';
+  const ORDER = ['results', 'frames', 'stats', 'export'];
+  function activate(name) {
+    if (!ORDER.includes(name)) return;
+    _active = name;
+    utils.$$('#pv-tabs .pv-tab').forEach(b => {
+      const on = b.dataset.tab === name;
+      b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    utils.$$('#pv-detail .pv-tab-panel').forEach(p => {
+      p.classList.toggle('active', p.dataset.panel === name);
+      p.classList.toggle('hidden', p.dataset.panel !== name);
+    });
+    // 切换到「统计」时,如果当前 job 有 dispatch 数据,重画一次
+    if (name === 'stats' && state.currentJob && typeof preview.renderDispatch === 'function') {
+      preview.renderDispatch(state.currentJob);
+    }
+  }
+  function next(dir) {
+    const i = ORDER.indexOf(_active);
+    activate(ORDER[(i + dir + ORDER.length) % ORDER.length]);
+  }
+  function init() {
+    utils.$$('#pv-tabs .pv-tab').forEach(b => b.addEventListener('click', () => activate(b.dataset.tab)));
+  }
+  return { activate, next, init, get active() { return _active; } };
+})();
+
+/**
+ * 任务详情 kebab menu(⋯ 按钮,v0.5 新增):
+ *  - 收纳「取消 / 重跑 / 标注切换 / 导出 JSON/CSV/ZIP / 复制深链 / 删除」
+ *  - 保留顶部一行只有 title + status + LAN,核心信息密度低
+ */
+const taskMenu = (() => {
+  function open(e) {
+    if (!state.currentJob) return;
+    const job = state.currentJob;
+    const items = [
+      { label: state.annoVisible ? '隐藏人脸标注' : '显示人脸标注', hint: 'A', onPick: () => preview.toggleAnno() },
+      { label: '复制任务深链', hint: '#', onPick: () => {
+        const url = location.origin + location.pathname + location.search + '#/job/' + encodeURIComponent(job.id);
+        navigator.clipboard.writeText(url).then(
+          () => toast.success('已复制深链'),
+          () => toast.error('复制失败'));
+      } },
+    ];
+    if (job.status === 'running' || job.status === 'queued') {
+      items.push({ label: '取消任务', hint: '⏹', danger: true, onPick: () => cancelCurrent() });
+    }
+    const canRetry = !!(job.original_input || (job.kind === 'image' && job.original_key));
+    if (canRetry) items.push({ label: '重跑任务', hint: '↻', onPick: () => retryCurrent() });
+    items.push({ label: '导出 JSON', hint: 'JSON', onPick: () => exportJSON() });
+    items.push({ label: '导出 CSV',  hint: 'CSV',  onPick: () => exportCSV() });
+    items.push({ label: '下载 ZIP',  hint: 'ZIP',  onPick: () => exportZip() });
+    items.push({ label: '删除任务',  hint: 'Del', danger: true, onPick: () => deleteCurrent() });
+    ctxMenu.show(e, items);
+  }
+  function init() {
+    const btn = utils.$('#pv-menu');
+    if (btn) btn.addEventListener('click', open);
+  }
+  return { init, open };
 })();
 
 const sse = (() => {
@@ -2453,49 +2538,19 @@ async function init() {
   theme.init(); modalKit.init();
   if (typeof uploadQueue !== 'undefined' && uploadQueue && typeof uploadQueue.init === 'function') uploadQueue.init();
   if (typeof dropzonePreview !== 'undefined' && dropzonePreview && typeof dropzonePreview.init === 'function') dropzonePreview.init();
-  sidebar.init(); upload.init(); batch.init(); confirmModal.init(); initKeys();
+  sidebar.init(); upload.init(); batch.init(); confirmModal.init();
+  initKeys();
   visibilityCtl.init();
-  // 平台 KPI 实时拉取
-  if (typeof kpi !== 'undefined' && kpi && typeof kpi.init === 'function') kpi.init();
-  // 视频双画面播放器:共享控制 + 拖动分隔条 + 人脸筛选 + 人脸 lightbox
-  if (typeof preview.initSharedControls === 'function') preview.initSharedControls();
-  if (typeof preview.initDivider === 'function') preview.initDivider();
-  if (typeof preview.initFaceFilters === 'function') preview.initFaceFilters();
   if (typeof lightbox.init === 'function') lightbox.init();
-  // 顶栏主题快切按钮的 click 监听已在 theme.init() 里绑定(theme.cycle);
-  // 这里不要再加一次,否则点一次会切两次主题(已修复)。
-  utils.$('#pv-close').addEventListener('click', preview.close);
-  utils.$('#pv-cancel').addEventListener('click', cancelCurrent);
-  utils.$('#pv-toggle-anno').addEventListener('click', preview.toggleAnno);
-  utils.$('#pv-retry').addEventListener('click', retryCurrent);
-  utils.$('#pv-delete').addEventListener('click', deleteCurrent);
-  utils.$('#pv-export-json').addEventListener('click', exportJSON);
-  utils.$('#pv-export-csv').addEventListener('click', exportCSV);
-  utils.$('#pv-export-zip').addEventListener('click', exportZip);
-  // 空状态 CTA
+  const bind = (sel, fn) => { const el = utils.$(sel); if (el) el.addEventListener('click', fn); };
+  bind('#pv-toggle-anno', preview.toggleAnno);
+  bind('#pv-cancel', cancelCurrent);
+  bind('#pv-retry', retryCurrent);
+  bind('#pv-export-json', exportJSON);
+  bind('#pv-delete', deleteCurrent);
+  bind('#pv-close', preview.close);
   const emptyNew = utils.$('#pv-empty-new');
   if (emptyNew) emptyNew.addEventListener('click', () => upload.openModal());
-  const emptyPaste = utils.$('#pv-empty-paste');
-  if (emptyPaste) emptyPaste.addEventListener('click', async () => {
-    // 尝试读剪贴板图片;没有图片时提示支持 URL 粘贴
-    try {
-      if (navigator.clipboard && navigator.clipboard.read) {
-        const items = await navigator.clipboard.read();
-        for (const it of items) {
-          const imgType = (it.types || []).find(t => t.startsWith('image/'));
-          if (imgType) {
-            const blob = await it.getType(imgType);
-            const f = new File([blob], `paste-${Date.now()}.png`, { type: imgType });
-            upload.submitImage(f);
-            return;
-          }
-        }
-        toast.warn('剪贴板中没有图片;可直接按 Ctrl+V,或粘贴 http(s)/rtsp 链接');
-      } else {
-        toast.info('请直接按 Ctrl+V 粘贴图片或媒体 URL');
-      }
-    } catch { toast.info('请直接按 Ctrl+V 粘贴图片或媒体 URL'); }
-  });
   // 移动端抽屉侧栏
   const drawerBtn = utils.$('#tb-drawer');
   const drawerBack = utils.$('#drawer-backdrop');
@@ -2507,19 +2562,18 @@ async function init() {
     };
     drawerBtn.addEventListener('click', () => setDrawer(!utils.$('#sidebar').classList.contains('drawer-open')));
     drawerBack.addEventListener('click', () => setDrawer(false));
-    // 抽屉打开时选任务自动收起(≤768px 布局下侧栏覆盖主区)
     window.addEventListener('resize', () => {
       if (window.innerWidth > 768) setDrawer(false);
     });
   }
-  // URL hash 深链:刷新 / 分享链接可定位到指定 job
+  // URL hash 深链
   hashRouter.bind();
   try {
     const jobs = await api.listJobs();
     sidebar.setJobs(jobs);
     hashRouter.maybeOpen();
   } catch (e) { toast.error('加载任务列表失败: ' + e.message); }
-  api.getConfig().then(c => { state.config = c; }).catch(() => {});
+  upload.loadConfig().catch(() => {});
 }
 
 /**
@@ -2565,8 +2619,15 @@ const hashRouter = (() => {
 
 document.addEventListener('DOMContentLoaded', init);
 window.__rsface = {
-  state, api, sidebar, preview, sse, batch, theme, toast, dashboard, lightbox, hashRouter,
-  kpi, visibilityCtl, modalKit, ctxMenu, confirmModal,
+  state, api, sidebar, preview, sse, batch, theme, toast, lightbox, hashRouter,
+  modalKit, confirmModal,
+  dashboard: (typeof dashboard !== 'undefined') ? dashboard : null,
+  kpi: (typeof kpi !== 'undefined') ? kpi : null,
+  visibilityCtl: (typeof visibilityCtl !== 'undefined') ? visibilityCtl : null,
+  ctxMenu: (typeof ctxMenu !== 'undefined') ? ctxMenu : null,
+  inspector: (typeof inspector !== 'undefined') ? inspector : null,
+  tabs: (typeof tabs !== 'undefined') ? tabs : null,
+  taskMenu: (typeof taskMenu !== 'undefined') ? taskMenu : null,
   uploadQueue: (typeof uploadQueue !== 'undefined') ? uploadQueue : null,
   dropzonePreview: (typeof dropzonePreview !== 'undefined') ? dropzonePreview : null,
 };

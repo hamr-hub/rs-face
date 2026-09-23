@@ -149,39 +149,32 @@
   }
 
   function ensureSettingsMenu() {
+    // v0.5:对比模式的开关搬到 Inspector 抽屉的「对比」tab 顶部(自己注入),
+    // 顶栏不再有 tb-compare 按钮。
     let menu = document.getElementById('rsfc-settings-menu');
     if (menu) return menu;
-    const btn = document.getElementById('tb-compare');
-    if (!btn) return null;
     injectStyles();
     menu = document.createElement('div');
     menu.id = 'rsfc-settings-menu';
-    menu.className = 'rsfc-menu hidden';
+    menu.className = 'rsfc-menu rsfc-inspector-bar';
     menu.innerHTML = `
       <label class="rsfc-row">
         <input type="checkbox" id="rsfc-cmp-toggle" ${isEnabled() ? 'checked' : ''}>
-        <span class="rsfc-label">Algorithm compare mode</span>
-        <span class="rsfc-hint">multi-algo overlay</span>
+        <span class="rsfc-label">多算法叠加</span>
+        <span class="rsfc-hint">同一图片跑多个算法并把 bbox 叠在一张画布上</span>
       </label>
-      <div class="rsfc-row rsfc-info">
-        <span class="rsfc-hint">When on, image jobs render one canvas with all algorithms' detections overlaid. Click legend chips to toggle each algo.</span>
-      </div>
     `;
-    document.body.appendChild(menu);
-    btn.setAttribute('aria-pressed', isEnabled() ? 'true' : 'false');
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const r = btn.getBoundingClientRect();
-      menu.style.top = (r.bottom + 6) + 'px';
-      menu.style.right = (window.innerWidth - r.right) + 'px';
-      menu.classList.toggle('hidden');
-    });
-    document.addEventListener('click', () => menu.classList.add('hidden'));
-    menu.addEventListener('click', (e) => e.stopPropagation());
+    // 把 bar 注入到 Inspector 抽屉的「对比」面板顶部
+    const cmpPanel = document.querySelector('#inspector [data-ins="compare"]');
+    if (cmpPanel) {
+      // 避免重复注入
+      if (!cmpPanel.querySelector('#rsfc-settings-menu')) {
+        cmpPanel.insertBefore(menu, cmpPanel.firstChild);
+      }
+    }
     const toggle = menu.querySelector('#rsfc-cmp-toggle');
     toggle.addEventListener('change', () => {
       setEnabled(toggle.checked);
-      btn.setAttribute('aria-pressed', toggle.checked ? 'true' : 'false');
       syncPolling();
       scheduleCompare();
     });
@@ -198,8 +191,10 @@
 
   function scheduleCompare() {
     const enabled = isEnabled();
-    const detail = document.getElementById('pv-detail');
-    if (!enabled || !detail || detail.classList.contains('hidden')) {
+    const inspector = document.getElementById('inspector');
+    const open = inspector && !inspector.getAttribute('aria-hidden');
+    const onCompareTab = document.querySelector('#inspector .ins-tab.active')?.dataset.ins === 'compare';
+    if (!enabled || !open || !onCompareTab) {
       state.lastJobId = null;
       removeComparePanel();
       return;
@@ -224,19 +219,17 @@
   document.addEventListener('visibilitychange', syncPolling);
 
   async function fetchAndRenderCompare(jobId) {
-    // 注入到 #pv-detail 而不是 #pv-stage — pv-stage 有 max-height + overflow:hidden,
-    // 把面板塞进去会遮挡视频播放区;放到 detail 里让它自然下推到独立行。
-    const host = document.getElementById('pv-detail') || document.getElementById('pv-stage');
+    // v0.5:注入到右侧 Inspector 抽屉的「对比」面板,而不是主区。
+    const host = document.querySelector('#inspector [data-ins="compare"]');
     if (!host) return;
     removeComparePanel();
+    // 顶部开关(只在第一次插入)
+    if (!host.querySelector('#rsfc-settings-menu')) ensureSettingsMenu();
     const panel = document.createElement('div');
     panel.id = 'rsfc-compare-panel';
     panel.className = 'rsfc-panel';
     panel.innerHTML = '<div class="rsfc-loading">Running ' + ALGOS_DEFAULT.length + ' algos in parallel (haar/cnn/luminance)...</div>';
-    // 插到 timeline 之后、breakdown 之前 — 视觉上紧贴播放区,不影响人脸卡片。
-    const anchor = host.querySelector('#pv-bbar') || host.querySelector('#pv-faces');
-    if (anchor && anchor.parentNode === host) host.insertBefore(panel, anchor);
-    else host.appendChild(panel);
+    host.appendChild(panel);
     try {
       const resp = await fetch('/api/jobs/' + encodeURIComponent(jobId) + '/compare?algos=' + ALGOS_DEFAULT.join(','), { method: 'POST' });
       if (!resp.ok) {

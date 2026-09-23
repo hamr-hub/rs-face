@@ -90,12 +90,17 @@ impl OrtSession {
         requested: Device,
     ) -> Result<(ort::session::builder::SessionBuilder, Device), OnnxError> {
         // Candidate list in preference order. `Auto` tries whatever this build supports.
+        // CUDA leads TensorRT: on shared-memory devices (8 GB Jetson Orin Nano)
+        // the TRT engine build for a 174 MB R50 model OOMs, while CUDA EP runs
+        // on the same device with no upfront build. Operators who have enough
+        // VRAM can pass `RSFACE_ARCFACE_EP=tensorrt` (env path) or ask
+        // explicitly via the platform to flip the preference.
         let candidates: Vec<Device> = match requested {
             Device::Auto => vec![
-                #[cfg(feature = "ort-tensorrt")]
-                Device::TensorRt(0),
                 #[cfg(feature = "ort-cuda")]
                 Device::Cuda(0),
+                #[cfg(feature = "ort-tensorrt")]
+                Device::TensorRt(0),
                 #[cfg(feature = "ort-coreml")]
                 Device::CoreMl,
                 #[cfg(feature = "ort-directml")]
@@ -105,66 +110,87 @@ impl OrtSession {
             explicit => vec![explicit],
         };
 
+        // ort 2.0 RC API: build an EP into an `ExecutionProviderDispatch`,
+        // then `builder.with_execution_providers(...)` to register. The
+        // builder is consumed and returned by `with_execution_providers`,
+        // so we thread it through every candidate.
+        //
+        // Preference order: CUDA first (no engine build, lighter VRAM),
+        // then TensorRT (heavier upfront cost, faster steady-state). On
+        // 8 GB shared-memory Jetsons the TRT engine build for 174 MB
+        // R50 models can OOM, so CUDA is the safer automatic pick.
+        let mut builder = builder;
+        let mut chosen = Device::Cpu;
         for cand in candidates {
-            match Self::try_register(&builder, cand) {
-                Ok(true) => return Ok((builder, cand)),
-                Ok(false) => continue,
+            let ep = match Self::build_ep(cand) {
+                Some(ep) => ep,
+                None => continue, // device not handled by this build
+            };
+            // Apply to a clone: on success, swap; on failure, keep the
+            // original builder and report.
+            let attempt = builder.clone().with_execution_providers([ep]);
+            match attempt {
+                Ok(b) => {
+                    builder = b;
+                    chosen = cand;
+                    break;
+                }
                 Err(e) => {
-                    // An explicitly requested provider that fails is worth shouting about,
-                    // because the user's performance expectation is now wrong.
                     if !matches!(requested, Device::Auto) {
                         eprintln!(
                             "[rs-face] WARNING: execution provider '{}' was requested but \
-                             could not be registered ({e}); falling back to CPU. Inference \
-                             will be substantially slower than expected.",
+                             could not be registered ({e}); falling back to CPU. \
+                             Inference will be substantially slower than expected.",
                             cand.as_str()
                         );
                     }
-                    continue;
                 }
             }
         }
-        Ok((builder, Device::Cpu))
+        Ok((builder, chosen))
     }
 
-    /// Register one provider. `Ok(false)` means this build lacks support for it.
+    /// Build the dispatch for one device. `None` means this build does not compile
+    /// in support for the requested device at all (no candidate to try).
+    /// `.build()` is infallible in ort 2.0 RC; failures are deferred to
+    /// `with_execution_providers()` at registration time.
     #[allow(unused_variables)]
-    fn try_register(
-        builder: &ort::session::builder::SessionBuilder,
-        device: Device,
-    ) -> Result<bool, String> {
+    fn build_ep(device: Device) -> Option<ort::ep::ExecutionProviderDispatch> {
+        use ort::ep::ExecutionProvider;
         match device {
-            Device::Cpu | Device::Auto => Ok(false),
+            Device::Cpu | Device::Auto => None,
 
             #[cfg(feature = "ort-coreml")]
-            Device::CoreMl => ort::execution_providers::CoreMLExecutionProvider::default()
-                .register(builder)
-                .map(|_| true)
-                .map_err(|e| e.to_string()),
+            Device::CoreMl => Some(ort::execution_providers::CoreML::default().build()),
 
             #[cfg(feature = "ort-cuda")]
-            Device::Cuda(idx) => ort::execution_providers::CUDAExecutionProvider::default()
-                .with_device_id(idx as i32)
-                .register(builder)
-                .map(|_| true)
-                .map_err(|e| e.to_string()),
+            Device::Cuda(idx) => {
+                // Cap GPU memory at 1.5 GB so the system can keep its
+                // 8 GB pool usable for OS + other workloads. R50 + SCRFD
+                // activations fit comfortably; bigger models would need a
+                // bigger cap and a host with more VRAM.
+                const CUDA_MEM_LIMIT_BYTES: usize = 1536 * 1024 * 1024;
+                Some(
+                    ort::execution_providers::CUDA::default()
+                        .with_device_id(idx as i32)
+                        .with_memory_limit(CUDA_MEM_LIMIT_BYTES)
+                        .build(),
+                )
+            }
 
             #[cfg(feature = "ort-tensorrt")]
-            Device::TensorRt(idx) => ort::execution_providers::TensorRTExecutionProvider::default()
-                .with_device_id(idx as i32)
-                .register(builder)
-                .map(|_| true)
-                .map_err(|e| e.to_string()),
+            Device::TensorRt(idx) => Some(
+                ort::execution_providers::TensorRT::default()
+                    .with_device_id(idx as i32)
+                    .build(),
+            ),
 
             #[cfg(feature = "ort-directml")]
-            Device::DirectMl => ort::execution_providers::DirectMLExecutionProvider::default()
-                .register(builder)
-                .map(|_| true)
-                .map_err(|e| e.to_string()),
+            Device::DirectMl => Some(ort::execution_providers::DirectML::default().build()),
 
             // Provider not compiled into this build.
             #[allow(unreachable_patterns)]
-            _ => Ok(false),
+            _ => None,
         }
     }
 }

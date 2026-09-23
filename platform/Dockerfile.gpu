@@ -21,7 +21,8 @@ COPY tests ./tests
 # kernel 编译时用 sm_87 arch(Jetson Orin Ampere),cudarc 默认 compute_53
 # 在 Tegra driver 540 上 load_ptx 报 CUDA_ERROR_NOT_FOUND "named symbol not found"。
 # `liveness` 启用 MiniFASNet 活体检测(tract ONNX 后端)。
-RUN cargo build --release --features 'liveness rsface/cuda-backend' --manifest-path platform/Cargo.toml
+# `ort-backend` + `ort-tensorrt` 启用 ONNX Runtime + TensorRT EP(SCRFD/ArcFace GPU 路径)。
+RUN cargo build --release --features 'liveness rsface/cuda-backend rsface/ort-backend rsface/ort-tensorrt rsface/ort-cuda' --manifest-path platform/Cargo.toml
 
 # ---- 运行时镜像:Ubuntu 24.04 + CUDA 12.6 + OpenCL ICD + ffmpeg ----
 # 必须用 Ubuntu 24.04(noble)以匹配 rust:1.97-slim 的 glibc 2.39;Ubuntu 22.04 只有 2.35。
@@ -45,7 +46,21 @@ RUN mkdir -p /etc/OpenCL/vendors \
 
 # 复制构建产物
 COPY --from=build /build/platform/target/release/rsface-server /usr/local/bin/rsface-server
+# ONNX Runtime C 库 — Jetson aarch64 wheel(从
+# https://github.com/Shattered217/Jetson-Orin-Wheels/releases/tag/6.2.1rc1 下载,
+# 内置 CUDA + TensorRT EP,匹配 host JetPack 6.2.1 + TensorRT 10.3.0 + CUDA 12.6)。
+# `libonnxruntime.so` 是 ort crate 的 dlopen 目标;provider plugins 通过
+# `LIBRARY_PATH` 或 OrtApi 注册,本镜像只装主库 + 提供方即可。
+COPY vendor/ort-jetson/lib/onnxruntime/ /opt/onnxruntime/lib/
+# entrypoint 会把 bind-mounted host TensorRT/cuDNN/CUDA libs 符号链接到这个目录,
+# 镜像里先建好,不然 UID 1000 的非 root user 无法在只读路径里 mkdir。
+# chown 给 UID 1000 的运行用户,否则 symlink 创建失败。
+RUN mkdir -p /opt/jetson-tensorrt/lib && chown -R 1000:1000 /opt/jetson-tensorrt
 COPY platform/web /app/web
+# 容器入口:把 bind-mounted host TensorRT/cuDNN/CUDA libs 拼成一个目录,
+# 让 LD_LIBRARY_PATH 只用一条路径就能找到所有 ORT TensorRT EP 的依赖。
+COPY platform/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # 级联权重在 src/weights/(随 core 嵌入式分发);容器内路径仍保持 /app/cascade.rfcf。
 COPY src/weights/haarcascade_frontalface_default.rfcf /app/cascade.rfcf
 # Note: MiniFASNet weights (models/*.onnx) are NOT baked into the image —
@@ -72,8 +87,19 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     # Operators can disable at runtime with RSFACE_LIVENESS_ENABLED=0.
     RSFACE_LIVENESS_ENABLED=${RSFACE_LIVENESS_ENABLED:-1} \
     RSFACE_LIVENESS_MODELS_DIR=/app/models \
+    # ONNX Runtime TensorRT/CUDA EP 默认 backend 优先级:TensorRT > CUDA > CPU。
+    # ort crate 启动时按此顺序遍历 SessionConfig::with_execution_provider,
+    # 第一个能成功注册的就是 active EP。失败自动降级到下一个。
+    RSFACE_ARCFACE_BACKEND=${RSFACE_ARCFACE_BACKEND:-auto} \
+    RSFACE_ARCFACE_EP=${RSFACE_ARCFACE_EP:-tensorrt} \
+    # ORT TensorRT engine cache(避免每次容器启动重建 SM87 engine)。
+    # 路径被 ort 内部用 ORT_TENSORRT_ENGINE_CACHE_PATH env 覆盖,这里通过
+    # LD_LIBRARY_PATH 顺序先看到 /opt/jetson-tensorrt/lib 后看到 /opt/onnxruntime/lib,
+    # 保证 TensorRT EP 找到 host nvinfer 库而不是 apt 装的旧版。
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    NVIDIA_VISIBLE_DEVICES=all
+    NVIDIA_VISIBLE_DEVICES=all \
+    LD_LIBRARY_PATH=/opt/onnxruntime/lib:/opt/jetson-tensorrt/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+    ORT_TENSORRT_ENGINE_CACHE_PATH=/data/ort-cache
 
 USER rsface
 WORKDIR /app
@@ -83,4 +109,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
     CMD curl -sf http://127.0.0.1:8080/api/health || exit 1
 
-CMD ["rsface-server"]
+CMD ["/usr/local/bin/docker-entrypoint.sh"]

@@ -375,3 +375,37 @@ body { grid-template-rows: 56px auto 1fr; }
     transition-duration: .01ms !important;
   }
 }
+
+/* ============ v0.5 · 主题微调 ============ */
+/* Why: 新结构更轻,色调更柔;省字距、字重让主信息一眼到位。
+   How: 主区背景留白更多;kpi / 空态卡片背景更通透。 */
+
+/* 详情页 Stage 用更透的环境光,边框更柔 */
+.preview {
+  background: transparent;
+}
+.pv-detail { max-width: 1320px; padding: 22px 28px 40px; }
+
+/* KPI 4 格改用更柔的层叠,字重略降 */
+.kpi {
+  background: var(--bg-3);
+  border-color: var(--border);
+}
+.kpi-v { font-size: 16px; font-weight: 600; }
+
+/* Inspector 抽屉(在 light 主题下用更透的灰底) */
+[data-theme="light"] .inspector { background: rgba(255,255,255,0.92); backdrop-filter: blur(12px); }
+
+/* 详情 Tabs 在 light 主题下边框颜色略柔 */
+[data-theme="light"] .pv-tabs { border-bottom-color: rgba(15, 23, 42, 0.08); }
+[data-theme="light"] .pv-export-card { background: rgba(255,255,255,0.65); }
+
+/* 极简空态:p 字号略大,呼吸感更强 */
+.pv-empty h2 { font-size: 22px; }
+.pv-empty p { font-size: 13.5px; }
+
+/* 详情 Stage 卡片阴影稍提 */
+.pv-stage { box-shadow: var(--shadow); }
+
+/* 主区进度条更细 */
+.pv-prog-track { height: 6px; }
