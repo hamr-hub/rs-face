@@ -80,6 +80,7 @@ Configuration (environment):
 | `RSFACE_LIVENESS_ENFORCE` | `false` | non-real faces get no identity matches |
 | `RSFACE_LIVENESS_QUALITY_GATE` | `false` | reject tiny/blurry/badly exposed/clipped crops before the classifier runs |
 | `RSFACE_LIVENESS_TEMPORAL_FRAMES` | `1` | consecutive real frames required in video/stream jobs (`>1` adds temporal defence) |
+| `RSFACE_LIVENESS_TEMPORAL_MIN_SCORE` | unset | minimum mean real score over the temporal window; unset uses `RSFACE_LIVENESS_MIN_REAL_SCORE` |
 
 ## Quality gate
 
@@ -142,7 +143,11 @@ warm-up the track is not confirmed, so a short clip carrying only one good
 frame can never pass enforcement. Set `RSFACE_LIVENESS_TEMPORAL_FRAMES=3` (the
 upstream live-stream recommendation) to enable; `1` keeps the plain per-frame
 behaviour. The averaged real score over the streak also gives a steadier
-confidence than any single frame.
+confidence than any single frame and must clear `RSFACE_LIVENESS_MIN_REAL_SCORE`,
+or the separate `RSFACE_LIVENESS_TEMPORAL_MIN_SCORE` when configured, so one
+momentarily high-scoring frame cannot carry otherwise weak frames through
+enforcement. The default threshold remains `0.0`, preserving the upstream
+argmax behaviour.
 
 ### Covered entry points
 

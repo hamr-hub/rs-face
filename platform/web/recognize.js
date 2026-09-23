@@ -68,13 +68,14 @@
         font-size: 12px; color: var(--fg-dim, #7a8595); flex-wrap: wrap;
       }
       .rsfr-title { font-weight: 700; color: var(--fg, #e6edf3); font-size: 13px; }
-      .rsfr-canvas-wrap {
-        position: relative; background: #000; border-radius: 6px; overflow: hidden;
-        width: 100%; max-height: 70vh;
-      }
-      .rsfr-canvas-wrap canvas {
-        display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain;
-      }
+     .rsfr-canvas-wrap {
+       position: relative; background: #000; border-radius: 6px; overflow: hidden;
+       width: 100%; max-height: 70vh;
+       display: flex; align-items: center; justify-content: center;
+     }
+     .rsfr-canvas-wrap canvas {
+       display: block; max-width: 100%; max-height: 70vh; width: auto; height: auto;
+     }
       .rsfr-loading {
         padding: 24px; text-align: center; color: rgba(255,255,255,0.6); font-size: 13px;
       }
@@ -133,15 +134,10 @@
   }
 
   function currentJobId() {
-    // 与 compare.js 保持一致的兜底:`window.state.currentJobId` 没有时
-    // 从 #pv-id 文本里抽 hex-dash-id。app.js 把 state 收紧在 IIFE 里,
-    // 所以此处只能从 DOM 兜底 — 跟 compare.js 的实现完全一样。
-    if (typeof window !== 'undefined' && window.state && window.state.currentJobId) return window.state.currentJobId;
-    const idEl = document.getElementById('pv-id');
-    if (idEl && idEl.textContent) {
-      const m = idEl.textContent.match(/[#]?([0-9a-f-]+)/i);
-      if (m) return m[1];
-    }
+    // app.js 把 state 收紧在 IIFE 里,只通过 window.__rsface 暴露。
+    // 旧实现读 #pv-id 文本,只能拿到 8 字符的截断 ID,API 返回 404。
+    const rs = window.__rsface;
+    if (rs && rs.state && rs.state.currentJobId) return rs.state.currentJobId;
     return null;
   }
 
@@ -179,14 +175,19 @@
   document.addEventListener('visibilitychange', syncPolling);
 
   async function fetchAndRender(jobId) {
-    const host = document.getElementById('pv-stage') || document.getElementById('pv-detail');
+    // 注入到 #pv-detail 而不是 #pv-stage — pv-stage 有 max-height + overflow:hidden,
+    // 把面板塞进去会遮挡视频播放区;放到 detail 里让它自然下推到独立行。
+    const host = document.getElementById('pv-detail') || document.getElementById('pv-stage');
     if (!host) return;
     removePanel();
     const panel = document.createElement('div');
     panel.id = 'rsfr-panel';
     panel.className = 'rsfr-panel';
     panel.innerHTML = '<div class="rsfr-loading">Running LBPH / Eigenface / Fisherface consensus...</div>';
-    host.appendChild(panel);
+    // 插到 timeline 之后、breakdown 之前 — 视觉上紧贴播放区,不影响人脸卡片。
+    const anchor = host.querySelector('#pv-bbar') || host.querySelector('#pv-faces');
+    if (anchor && anchor.parentNode === host) host.insertBefore(panel, anchor);
+    else host.appendChild(panel);
     try {
       // 后端要求 ?algos=haar(handler 用 q.algos 第一个切片决定 detector),
       // 旧的 ?detector=haar 文档是错的;统一走 ?algos= 路径。
@@ -293,6 +294,11 @@
     canvas.height = ch;
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, cw, ch);
+    // 先铺原图作为底图:canvas-wrap 背景是黑色,透明底只会看到黑屏,
+    // 无法把识别框与画面位置对应起来。原图未加载完时跳过,后续 tick 会重绘。
+    if (orig && orig.complete && orig.naturalWidth > 0) {
+      ctx.drawImage(orig, 0, 0, cw, ch);
+    }
     ctx.lineWidth = Math.max(2, cw / 400);
     ctx.font = 'bold ' + Math.max(13, cw / 45) + 'px ui-monospace, monospace';
     ctx.textBaseline = 'top';

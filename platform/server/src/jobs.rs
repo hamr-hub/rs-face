@@ -94,6 +94,9 @@ pub struct FrameResult {
 #[derive(Clone, Serialize, Debug, Default)]
 pub struct JobStats {
     pub frames_processed: u64,
+    /// 视频总帧数(视频任务;来自帧源 total_hint,ffprobe)。
+    /// 0 = 未知(直播流 / ffprobe 不可用),前端进度条降级显示处理帧数。
+    pub total_frames: u64,
     pub frames_with_face: u64,
     pub total_detections: u64,
     /// Detections judged non-real by liveness (spoof_detections).
@@ -212,6 +215,7 @@ impl Job {
             "algo": self.algo.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             "face_count": face_count,
             "frame_count": frame_count,
+            "total_frames": self.stats.lock().unwrap_or_else(|e| e.into_inner()).total_frames,
             "original_key": self.original_media_key.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             "cover_key": cover_key,
             "error": self.error.lock().unwrap_or_else(|e| e.into_inner()).clone(),
@@ -929,6 +933,12 @@ impl JobRegistry {
 
         // 4) 打开源,逐帧检测。流任务在 EOF 时重开(本地 mp4 还在被 ffmpeg 持续写)。
         let mut source = open_source(&input_path)?;
+        // 视频总帧数(ffprobe):写入 stats,供前端进度条显示正确分母。
+        // 流 / 探测失败为 None,前端降级只显示已处理帧数。
+        if let Some(hint) = source.total_hint() {
+            let mut st = job.stats.lock().unwrap_or_else(|e| e.into_inner());
+            st.total_frames = hint;
+        }
         let is_stream = job.kind == JobKind::Stream;
         let max_frames = match job.kind {
             JobKind::Stream => self.cfg.max_frames_stream,
@@ -955,6 +965,10 @@ impl JobRegistry {
         > = std::collections::HashMap::new();
         let temporal_cfg = rsface::liveness::TemporalConfig {
             required_frames: temporal_n,
+            min_real_score: self
+                .cfg
+                .liveness_temporal_min_score
+                .unwrap_or(self.cfg.liveness_min_real_score),
         };
         // Drop a streak after this many frames unseen; comfortably above the
         // tracker's `max_age` so a briefly occluded face is not forgotten.

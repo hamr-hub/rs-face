@@ -258,11 +258,16 @@ pub struct TemporalConfig {
     ///
     /// `1` reproduces the plain per-frame behaviour (no temporal gate).
     pub required_frames: usize,
+    /// Minimum mean real-class probability over the confirmed window.
+    pub min_real_score: f32,
 }
 
 impl Default for TemporalConfig {
     fn default() -> Self {
-        Self { required_frames: 1 }
+        Self {
+            required_frames: 1,
+            min_real_score: 0.0,
+        }
     }
 }
 
@@ -275,6 +280,7 @@ impl Default for TemporalConfig {
 #[derive(Clone, Debug, Default)]
 pub struct TemporalVote {
     required_frames: usize,
+    min_real_score: f32,
     streak: Vec<(bool, f32)>,
 }
 
@@ -284,6 +290,7 @@ impl TemporalVote {
     pub fn new(config: &TemporalConfig) -> Self {
         Self {
             required_frames: config.required_frames.max(1),
+            min_real_score: config.min_real_score,
             streak: Vec::new(),
         }
     }
@@ -309,9 +316,10 @@ impl TemporalVote {
     }
 
     /// Fail-closed confirmation: `true` only once at least
-    /// [`TemporalConfig::required_frames`] consecutive frames were real.
+    /// [`TemporalConfig::required_frames`] consecutive frames were real and
+    /// their mean real-class probability clears the configured threshold.
     pub fn confirmed(&self) -> bool {
-        self.streak.len() >= self.required_frames
+        self.streak.len() >= self.required_frames && self.mean_real_score() >= self.min_real_score
     }
 
     /// Mean real-class probability over the current streak (`0.0` when empty).
@@ -472,7 +480,10 @@ mod tests {
 
     #[test]
     fn temporal_is_per_frame_with_single_requirement() {
-        let mut v = TemporalVote::new(&TemporalConfig { required_frames: 1 });
+        let mut v = TemporalVote::new(&TemporalConfig {
+            required_frames: 1,
+            ..TemporalConfig::default()
+        });
         v.observe(true, 0.9);
         assert!(v.confirmed());
         assert_eq!(v.consecutive_real(), 1);
@@ -481,7 +492,10 @@ mod tests {
 
     #[test]
     fn temporal_requires_consecutive_real_frames() {
-        let mut v = TemporalVote::new(&TemporalConfig { required_frames: 3 });
+        let mut v = TemporalVote::new(&TemporalConfig {
+            required_frames: 3,
+            ..TemporalConfig::default()
+        });
         v.observe(true, 0.6);
         assert!(!v.confirmed(), "fail-closed until 3 frames");
         v.observe(true, 0.7);
@@ -492,8 +506,36 @@ mod tests {
     }
 
     #[test]
+    fn temporal_requires_window_mean_real_score() {
+        let mut v = TemporalVote::new(&TemporalConfig {
+            required_frames: 3,
+            min_real_score: 0.5,
+        });
+        v.observe(true, 0.99);
+        v.observe(true, 0.20);
+        v.observe(true, 0.20);
+        assert_eq!(v.consecutive_real(), 3);
+        assert!(!v.confirmed(), "one strong frame cannot carry weak frames");
+
+        v.observe(true, 0.20);
+        assert!((v.mean_real_score() - 0.20).abs() < 1e-6);
+        assert!(!v.confirmed());
+
+        v.observe(true, 0.70);
+        assert!((v.mean_real_score() - 0.36666667).abs() < 1e-6);
+        assert!(!v.confirmed());
+
+        v.observe(true, 0.70);
+        assert!((v.mean_real_score() - 0.53333336).abs() < 1e-6);
+        assert!(v.confirmed());
+    }
+
+    #[test]
     fn temporal_resets_on_any_spoof_frame() {
-        let mut v = TemporalVote::new(&TemporalConfig { required_frames: 3 });
+        let mut v = TemporalVote::new(&TemporalConfig {
+            required_frames: 3,
+            ..TemporalConfig::default()
+        });
         v.observe(true, 0.8);
         v.observe(true, 0.8);
         v.observe(false, 0.1);
@@ -505,7 +547,10 @@ mod tests {
 
     #[test]
     fn temporal_keeps_only_the_latest_window() {
-        let mut v = TemporalVote::new(&TemporalConfig { required_frames: 2 });
+        let mut v = TemporalVote::new(&TemporalConfig {
+            required_frames: 2,
+            ..TemporalConfig::default()
+        });
         for _ in 0..5 {
             v.observe(true, 0.9);
         }
@@ -515,7 +560,10 @@ mod tests {
 
     #[test]
     fn temporal_zero_requirement_treated_as_one() {
-        let mut v = TemporalVote::new(&TemporalConfig { required_frames: 0 });
+        let mut v = TemporalVote::new(&TemporalConfig {
+            required_frames: 0,
+            ..TemporalConfig::default()
+        });
         v.observe(true, 0.5);
         assert!(v.confirmed());
     }
