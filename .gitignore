@@ -99,6 +99,15 @@ platform/.env
 # Nested Cargo build output for standalone tool crates under tools/
 tools/*/target/
 
+# ---- vendor/ort-jetson: only the staged .so ships ----
+# tools/fetch_ort_jetson.sh downloads the wheel into a mktemp dir and
+# cleans up; the wheel and any extracted/ scratch left at the vendor
+# root are local-only artifacts and must not be committed. The five
+# .so files actually baked into platform/Dockerfile.gpu live under
+# vendor/ort-jetson/lib/onnxruntime/ and are tracked explicitly.
+vendor/ort-jetson/*.whl
+vendor/ort-jetson/extracted/
+
 # ---- Local tooling / OS junk ----
 .meta.yaml
 ._.DS_Store
