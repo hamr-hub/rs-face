@@ -1,150 +1,77 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="auto">
-<head>
+<html lang="zh-CN" data-theme="auto"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>rs-face</title>
 <link rel="stylesheet" href="/style.css">
-<link rel="stylesheet" href="/theme.css">
-<link rel="stylesheet" href="/simplify.css">
-</head>
-<body>
+</head><body>
 <header class="topbar" id="topbar" role="banner">
-  <div class="tb-left">
-    <button id="tb-drawer" class="tb-icon-btn tb-drawer-btn" title="任务列表" aria-label="任务列表" aria-expanded="false"><span aria-hidden="true">☰</span></button>
+  <button id="tb-drawer" class="tb-icon-btn tb-drawer-btn" title="任务列表" aria-label="任务列表" aria-expanded="false" hidden><span aria-hidden="true">☰</span></button>
+  <a id="tb-home" href="#" class="tb-home" aria-label="主页">
     <span class="tb-logo" aria-hidden="true">◐</span>
     <h1 class="tb-title">rs-face</h1>
     <span id="tb-runtime" class="tb-runtime" hidden></span>
-  </div>
+  </a>
   <div class="tb-search" role="search">
     <span class="tb-search-icon" aria-hidden="true">⌕</span>
     <input id="tb-search" type="search" placeholder="搜索任务名 / id" autocomplete="off" aria-label="搜索任务">
     <button id="tb-search-clear" class="tb-search-clear hidden" aria-label="清除">×</button>
   </div>
-  <div class="tb-right">
-    <button id="tb-theme" class="tb-icon-btn" title="主题切换" aria-label="主题切换">◐</button>
-    <button id="tb-help" class="tb-icon-btn" title="快捷键" aria-label="快捷键">?</button>
-    <button id="tb-new" class="tb-new-btn" title="新建任务 (n)"><span aria-hidden="true">+</span> 新建</button>
-  </div>
+  <button id="tb-theme" class="tb-icon-btn" title="主题切换" aria-label="主题切换">◐</button>
 </header>
-
 <aside class="sidebar" id="sidebar" role="navigation" aria-label="任务列表">
-  <div class="sb-filters" id="sb-filters" role="tablist">
-    <button class="sb-filter active" data-f="all" role="tab" aria-selected="true"><span class="sb-filter-label">全部</span><span class="sb-filter-count" data-count="all">0</span></button>
-    <button class="sb-filter" data-f="running" role="tab" aria-selected="false"><span class="sb-filter-label">进行</span><span class="sb-filter-count" data-count="running">0</span></button>
-    <button class="sb-filter" data-f="done" role="tab" aria-selected="false"><span class="sb-filter-label">完成</span><span class="sb-filter-count" data-count="done">0</span></button>
-    <button class="sb-filter" data-f="error" role="tab" aria-selected="false"><span class="sb-filter-label">错误</span><span class="sb-filter-count" data-count="error">0</span></button>
-  </div>
+  <div class="sb-head"><span>任务</span><span id="sb-count" class="sb-count">0</span></div>
   <div class="sb-scroll" id="sb-scroll" tabindex="0" role="listbox" aria-label="任务列表">
     <div class="sb-spacer" id="sb-spacer"></div>
     <div class="sb-vp" id="sb-vp"></div>
   </div>
-  <div class="sb-foot" id="sb-foot" aria-live="polite">0 任务</div>
-  <div class="sb-batch hidden" id="sb-batch" role="region" aria-label="批量操作">
-    <span class="sb-batch-count" id="sb-batch-count">已选 0 个</span>
-    <button class="sb-batch-btn" id="sb-batch-clear">取消</button>
-    <button class="sb-batch-btn" id="sb-batch-export">导出</button>
-    <button class="sb-batch-btn danger" id="sb-batch-delete">删除</button>
-  </div>
+  <div class="sb-foot" id="sb-foot" aria-live="polite">共 0 个 · 0 运行</div>
 </aside>
-
 <main class="preview" id="preview" role="main">
   <div class="pv-empty" id="pv-empty">
-    <div class="pv-empty-art" aria-hidden="true">◐</div>
-    <h2>人脸识别 · 任务台</h2>
-    <p>上传图片或视频,查看实时检测结果</p>
-    <div class="pv-empty-cta">
-      <button id="pv-empty-new" class="pv-btn primary">+ 新建任务</button>
-    </div>
+    <h2>拖入图片/视频 或粘贴 URL</h2>
+    <button id="pv-empty-new" class="pv-btn primary">+ 新建 (n)</button>
+    <p class="pv-empty-hint">支持 jpg/png/mp4/rtsp/m3u8 · 最大 500MB</p>
   </div>
-
   <div class="pv-detail hidden" id="pv-detail">
     <div class="pv-head">
-      <div class="pv-title-row">
-        <span class="pv-dot" id="pv-dot"></span>
-        <h2 id="pv-title" class="pv-title">…</h2>
-        <span class="pv-status" id="pv-status">…</span>
-      </div>
-      <div class="pv-meta">
-        <span id="pv-kind" class="pv-tag">…</span>
-        <span id="pv-frames" class="pv-meta-item">0 帧</span>
-        <span id="pv-faces" class="pv-meta-item">0 张脸</span>
-        <span id="pv-time" class="pv-meta-item"></span>
-        <span id="pv-id" class="pv-meta-item mono">#…</span>
-      </div>
-      <div class="pv-actions">
-        <button id="pv-toggle-anno" class="pv-btn" aria-pressed="true">结果</button>
-        <button id="pv-cancel" class="pv-btn hidden">取消</button>
-        <button id="pv-retry" class="pv-btn primary hidden">重跑</button>
-        <button id="pv-export-json" class="pv-btn ghost">JSON</button>
-        <button id="pv-delete" class="pv-btn ghost danger">删除</button>
-        <button id="pv-close" class="pv-btn ghost">✕</button>
-      </div>
+      <span class="pv-dot" id="pv-dot"></span>
+      <h2 id="pv-title" class="pv-title">…</h2>
+      <span class="pv-status" id="pv-status">…</span>
+      <span id="pv-id" class="pv-meta-item mono">#…</span>
+      <button id="pv-kebab" class="pv-btn ghost" aria-label="更多" aria-haspopup="menu">⋯</button>
     </div>
-
     <div class="pv-stage" id="pv-stage">
-      <div class="pv-stage-skel hidden" id="pv-stage-skel" aria-hidden="true"></div>
       <img id="pv-img" class="pv-media" alt="原图" loading="lazy" decoding="async">
       <video id="pv-vid" class="pv-media hidden" controls preload="metadata" playsinline></video>
       <canvas id="pv-overlay" class="pv-overlay" aria-hidden="true"></canvas>
       <div class="pv-stage-hint" id="pv-stage-hint">加载中…</div>
       <div class="pv-error-banner hidden" id="pv-error-banner" role="alert">
-        <span class="pv-error-msg"></span>
-        <span class="pv-error-act"></span>
+        <span class="pv-error-msg"></span><span class="pv-error-act"></span>
       </div>
     </div>
-
     <div class="pv-progress" id="pv-progress">
       <div class="pv-prog-track"><div class="pv-prog-fill" id="pv-prog-fill"></div></div>
       <div class="pv-prog-labels"><span id="pv-prog-text">0 / 0</span><span id="pv-prog-pct">0%</span></div>
     </div>
-
-    <div id="timeline" class="pv-timeline hidden" role="region" aria-label="帧时间轴"></div>
-
-    <div class="pv-bbar" id="pv-bbar" aria-label="检测统计">
-      <div class="pv-bbar-cell" id="pv-bb-det"><span class="k">检测</span><span class="v">0</span></div>
-      <div class="pv-bbar-cell" id="pv-bb-fwf"><span class="k">含脸帧</span><span class="v">0</span></div>
-      <div class="pv-bbar-cell" id="pv-bb-rate"><span class="k">命中率</span><span class="v">—</span></div>
-      <div class="pv-bbar-cell" id="pv-bb-top"><span class="k">最高分</span><span class="v">—</span></div>
-    </div>
-
-    <section class="pv-faces" id="pv-faces" aria-label="检测到的人脸">
-      <div class="pv-faces-head">
-        <h3>人脸卡片</h3>
-        <span id="pv-faces-count" class="pv-faces-count">—</span>
-      </div>
-      <div class="pv-faces-grid" id="pv-faces-grid"></div>
-    </section>
+    <div class="pv-stats" id="pv-stats"><span id="pv-faces">0 张脸</span> · <span id="pv-time">—</span> · <span id="pv-gpu">cuda:0</span></div>
+    <section class="pv-faces" aria-label="检测到的人脸"><div class="pv-faces-grid" id="pv-faces-grid"></div></section>
   </div>
 </main>
-
+<div class="status-bar" id="status-bar" aria-live="polite">
+  <span id="sb-total">0 任务 · 0 运行</span> · ⌨n 新建 · j/k 切换 · ⌫ 删除 · ? 帮助
+</div>
 <div class="modal hidden" id="modal-new" role="dialog" aria-modal="true" aria-labelledby="modal-new-title">
   <div class="modal-backdrop" data-close></div>
   <div class="modal-card">
     <header class="modal-head"><h2 id="modal-new-title">新建任务</h2><button class="pv-btn ghost modal-x" data-close aria-label="关闭">✕</button></header>
-    <div class="new-types">
-      <button class="new-type" data-type="image">🖼 图片</button>
-      <button class="new-type" data-type="video">🎬 视频</button>
-      <button class="new-type" data-type="stream">📡 直播流</button>
+    <div class="dropzone" id="dz-unified">
+      <input type="file" id="file-unified" accept="image/*,video/*" multiple hidden>
+      <div class="dz-inner"><div class="dz-icon">◐</div><p>拖入图片/视频 或粘贴 URL</p></div>
     </div>
-    <div class="new-pane hidden" id="pane-image">
-      <div class="dropzone" id="dz-image">
-        <input type="file" id="file-image" accept="image/*" multiple hidden>
-        <div class="dz-inner"><div class="dz-icon">🖼</div><p>点击选择 / 拖入图片(支持多选)</p></div>
-      </div>
-    </div>
-    <div class="new-pane hidden" id="pane-video">
-      <div class="dropzone" id="dz-video">
-        <input type="file" id="file-video" accept="video/*" hidden>
-        <div class="dz-inner"><div class="dz-icon">🎬</div><p>点击选择 / 拖入视频文件</p></div>
-      </div>
-      <div class="url-row"><input id="video-url" type="text" placeholder="或视频 URL(http/https/m3u8)"><button id="video-url-go" class="pv-btn primary">导入并识别</button></div>
-    </div>
-    <div class="new-pane hidden" id="pane-stream">
-      <div class="url-row"><input id="stream-url" type="text" placeholder="rtsp:// 或 http(s):// 流地址"><button id="stream-go" class="pv-btn primary">开始</button></div>
-    </div>
+    <div class="url-row"><input id="unified-url" type="text" placeholder="或 http/https/m3u8/rtsp URL"></div>
+    <a id="algo-link" class="algo-link" href="#" title="选择算法(高级)">算法</a>
   </div>
 </div>
-
 <div class="modal hidden" id="modal-confirm" role="alertdialog" aria-modal="true" aria-labelledby="modal-confirm-title">
   <div class="modal-backdrop" data-close></div>
   <div class="modal-card modal-narrow">
@@ -156,61 +83,14 @@
     </div>
   </div>
 </div>
-
-<div class="modal hidden" id="modal-help" role="dialog" aria-modal="true" aria-labelledby="modal-help-title">
-  <div class="modal-backdrop" data-close></div>
-  <div class="modal-card">
-    <header class="modal-head"><h2 id="modal-help-title">键盘快捷键</h2><button class="pv-btn ghost modal-x" data-close aria-label="关闭">✕</button></header>
-    <div class="kbd-list">
-      <div class="kbd-row"><kbd>n</kbd> 新建任务</div>
-      <div class="kbd-row"><kbd>j</kbd> / <kbd>k</kbd> 上下切换任务</div>
-      <div class="kbd-row"><kbd>Enter</kbd> 查看人脸详情</div>
-      <div class="kbd-row"><kbd>a</kbd> 切换结果 / 原片</div>
-      <div class="kbd-row"><kbd>Delete</kbd> 删除当前任务</div>
-      <div class="kbd-row"><kbd>Ctrl</kbd>+<kbd>K</kbd> 搜索</div>
-      <div class="kbd-row"><kbd>Esc</kbd> 关闭弹窗 / 预览</div>
-      <div class="kbd-row"><kbd>?</kbd> 显示本帮助</div>
-    </div>
-  </div>
-</div>
-
-<div class="modal hidden" id="modal-lightbox" role="dialog" aria-modal="true" aria-labelledby="modal-lb-title">
-  <div class="modal-backdrop" data-close></div>
-  <div class="lb-card">
-    <header class="lb-head">
-      <h2 id="modal-lb-title">人脸详情</h2>
-      <span id="lb-meta" class="lb-meta">—</span>
-      <button class="pv-btn ghost modal-x" data-close aria-label="关闭">✕</button>
-    </header>
-    <div class="lb-body">
-      <div class="lb-stage" id="lb-stage">
-        <img id="lb-img" alt="标注帧" decoding="async">
-        <canvas id="lb-overlay" class="lb-overlay" aria-hidden="true"></canvas>
-      </div>
-      <aside class="lb-rail" id="lb-rail" aria-label="本帧人脸列表">
-        <div class="lb-rail-head">本帧 <span id="lb-rail-count">0</span> 张</div>
-        <div class="lb-rail-list" id="lb-rail-list"></div>
-      </aside>
-    </div>
-    <footer class="lb-foot">
-      <button id="lb-prev" class="pv-btn">上一帧</button>
-      <span id="lb-pos" class="lb-pos mono">— / —</span>
-      <button id="lb-next" class="pv-btn">下一帧</button>
-    </footer>
-  </div>
-</div>
-
 <div class="toast-host" id="toast-host" aria-live="polite"></div>
 <div class="toast hidden" id="toast" aria-hidden="true"></div>
 <div class="drawer-backdrop hidden" id="drawer-backdrop" aria-hidden="true"></div>
-
 <script defer src="/utils.js"></script>
 <script defer src="/toast.js"></script>
 <script defer src="/modal.js"></script>
-<script defer src="/dashboard.js"></script>
 <script defer src="/visibility.js"></script>
 <script defer src="/upload-queue.js"></script>
 <script defer src="/dropzone-preview.js"></script>
 <script defer src="/app.js"></script>
-</body>
-</html>
+</body></html>

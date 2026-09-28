@@ -1,4 +1,4 @@
-// 通用工具集 — 必须在 app.js 之前加载(toast/modal/dashboard/upload-queue/
+// 通用工具集 — 必须在 app.js 之前加载(toast/modal/upload-queue/
 // dropzone-preview 等文件都依赖 `utils`,而它们又用 defer 在 app.js 之前执行)。
 const utils = (() => {
   const $ = (s, r) => (r || document).querySelector(s);

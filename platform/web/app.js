@@ -1,39 +1,26 @@
-/* rs-face Platform · 零依赖 vanilla JS · 主模块:api / utils / theme / sidebar / preview / upload / sse / keys / batch
- * 拆分模块(经典 script,共享全局词法作用域,须在 app.js 之前加载):
- *   toast.js(多级 toast) · modal.js(confirmModal / modalKit / ctxMenu) · dashboard.js(仪表板) · visibility.js(可见性治理)
- *   compare.js(多算法叠加) · recognize.js(LBPH/Eigenface 共识) · upload-queue.js(队列)
- *   timeline.js(帧时间轴) · telemetry.js(埋点)
+/* rs-face Platform · v0.6 主模块
+ * 零依赖 vanilla JS(经典 script 共享全局词法作用域):
+ *   utils / toast / modal / visibility / upload-queue / dropzone-preview
  *
- * v0.5 简约大气重构:
- *   - 顶栏 9 图标 → 4 元素(+ 新建 / 搜索 / 主题 / 帮助)
- *   - KPI 8 格 → 4 格(运行/FPS/GPU/检出),其它维度进 Tabs
- *   - 详情页 6 统计格 + timeline + 双控件 折叠到 4 个 Tabs(结果/帧/统计/导出)
- *   - Compare / Recognize / Dashboard → 右侧 Inspector 抽屉(默认收起,顶栏不再挂 toggle)
- *   - 详情 header kebab(⋯)收纳「取消 / 重跑 / 导出 / 删除」等低频动作
+ * 简洁原则(per platform/DESIGN.md):
+ *   - 顶栏 3 元素:logo+title(回家)· search · theme
+ *   - 侧栏 1 列(无 tab / 无 algo chip),3 段时间分组(进行 / 今天 / 较早)
+ *   - 主区三态:empty / detail — 同一时间只能看到 1 个
+ *   - 低频操作收纳进 kebab ⋯ 右键菜单(ctxMenu)
+ *   - 全局无 KPI / 仪表板 / 对比 / 活体面板 — 都不在主页
  */
 'use strict';
 
-/**
- * POST/import 响应解析:先确认 r.ok,再解析 JSON。后端错误统一是 `{error:..}`;
- * 个别历史路径仍可能返回纯文本,这里兼容两种(JSON 取不到退化为文本)。
- * 否则 413/500/502 上 r.json() 抛 SyntaxError,toast 只能显示一个空失败,
- * 用户看不到服务端真正的报错。
- */
+/** POST 响应解析:先 r.ok,再 JSON。错误统一 {error} 形态,纯文本降级。 */
 function readApiJson(r) {
   if (!r.ok) {
-    return r
-      .json()
-      .catch(() => r.text().then(t => ({ error: t || ('HTTP ' + r.status) })))
+    return r.json().catch(() => r.text().then(t => ({ error: t || ('HTTP ' + r.status) })))
       .then(j => Promise.reject(new Error(j.error || ('HTTP ' + r.status))));
   }
   return r.json();
 }
 
 const api = {
-  // 列表带 200ms 内存缓存:同一 tab 内 SSE 帧事件 + sidebar 刷新可能连发 2-3 次。
-  // 命中路径 0 次 HTTP,0 次 JSON parse。
-  // 响应里包含"内存 live + PG 历史"合并的 jobs(in-memory 覆盖 PG 同 id 的) —
-  // 见 platform/server/src/api.rs list_jobs 的合并逻辑。
   listJobs() {
     const cached = apiCache.listJobs;
     if (cached && Date.now() - cached.at < 200) return Promise.resolve(cached.value);
@@ -47,85 +34,51 @@ const api = {
   cancelJob:   id => fetch('/api/jobs/' + encodeURIComponent(id) + '/cancel', { method: 'POST' }),
   deleteJob:   id => fetch('/api/jobs/' + encodeURIComponent(id), { method: 'DELETE' }).then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
   retryJob:    id => fetch('/api/jobs/' + encodeURIComponent(id) + '/retry', { method: 'POST' }).then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
-  batch:       (ids, op) => fetch('/api/jobs/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, op }) }).then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
   postImage:   (file, algo) => {
-    const fd = new FormData();
-    fd.append('file', file);
-    if (algo) fd.append('algo', algo); // 空 / undefined = 不发送,后端走 env/默认
+    const fd = new FormData(); fd.append('file', file);
+    if (algo) fd.append('algo', algo);
     return fetch('/api/jobs/image', { method: 'POST', body: fd }).then(readApiJson);
   },
   postVideo:   (file, algo) => {
-    const fd = new FormData();
-    fd.append('file', file);
+    const fd = new FormData(); fd.append('file', file);
     if (algo) fd.append('algo', algo);
     return fetch('/api/jobs/video', { method: 'POST', body: fd }).then(readApiJson);
   },
   postStream:  (url, algo) => fetch('/api/jobs/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, algo: algo || undefined }) }).then(readApiJson),
-  // 导入端点 — 返回 S3 LAN URL,浏览器可直接 <video src> 播放
-  importVideo:    (file, algo) => {
-    const fd = new FormData();
-    fd.append('file', file);
-    if (algo) fd.append('algo', algo);
-    return fetch('/api/import/video', { method: 'POST', body: fd }).then(readApiJson);
-  },
   importVideoUrl: (url, algo) => fetch('/api/import/video-url', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url, algo: algo || undefined }),
   }).then(readApiJson),
-  importUrls:     id => fetch('/api/import/' + encodeURIComponent(id) + '/urls').then(r => r.ok ? r.json() : Promise.reject(new Error(r.status))),
   getConfig:   () => fetch('/api/config').then(r => r.ok ? r.json() : null).catch(() => null),
-  metrics:     (signal) => fetch('/api/metrics', { signal }).then(r => r.ok ? r.json() : null).catch(() => null),
-  // 埋点摘要(供 dashboard 面板)
-  telemetrySummary: (windowSecs = 86400) => fetch('/api/telemetry/summary?window_secs=' + windowSecs).then(r => r.ok ? r.json() : { enabled: false, buckets: [] }).catch(() => ({ enabled: false, buckets: [] })),
 };
 
-/**
- * 前端内存缓存层 — 镜像后端 TTL 的轻量版。
- * 注意:不能作为唯一真相源(其它 tab / 容器会改),SSE / 主动操作后必须
- * 调下面的 `bust()` 失效。
- */
 const apiCache = {
-  listJobs: null, // {at, value}
+  listJobs: null,
   config:   null,
   bust(key) { if (key) this[key] = null; },
   bustAll() { this.listJobs = null; this.config = null; },
 };
 
-// utils 已抽到 utils.js(必须先于其它 defer 脚本加载,见 index.html)。
 const state = {
-  jobs: [], filter: 'all', algoFilter: '',
-  search: '', searchMode: 'plain', searchRange: 'all',
+  jobs: [], search: '',
   currentJobId: null, currentJob: null,
   annoVisible: true, eventSource: null, faceCardObserver: null,
   listScrollEl: null, listVpEl: null, listSpacerEl: null,
   itemHeight: 60, itemGap: 6,
-  batchMode: false, selectedIds: new Set(),
   themePref: 'auto',
   deletedIds: new Set(),
-  pinIds: new Set(),   // 置顶任务 id 集(持久化到 localStorage)
+  pinIds: new Set(),
   config: null,
-  // 人脸筛选
-  faceScoreMin: 0,
-  faceSort: 'time',
-  // 性能采样
+  // 性能采样(FPS / elapsed)
   _fpsSamples: [],
   _fpsLastFrames: 0,
   _fpsLastAt: 0,
-  // KPI 拉取缓存(避免每 200ms 重画)
-  _kpi: null,
-  _kpiAt: 0,
-  _kpiAbort: null,
 };
 
-// 持久化 face filter & anno toggle 到 localStorage(避免刷新重置)
+/** 用户偏好持久化(face 阈值 / 标注显示 / 置顶 / 主题)。 */
 const prefStore = (() => {
   const KEYS = {
-    faceScoreMin: 'rsface.face.scoreMin',
-    faceSort: 'rsface.face.sort',
     annoVisible: 'rsface.annoVisible',
-    searchMode: 'rsface.search.mode',
-    searchRange: 'rsface.search.range',
     pinIds: 'rsface.pinIds',
   };
   function read(key, fallback) {
@@ -133,16 +86,8 @@ const prefStore = (() => {
   }
   function write(key, val) { try { localStorage.setItem(key, String(val)); } catch {} }
   function applyAll() {
-    const sm = read(KEYS.faceScoreMin, null);
-    if (sm != null) state.faceScoreMin = Math.max(0, Math.min(1, parseFloat(sm) || 0));
-    const sort = read(KEYS.faceSort, null);
-    if (sort && ['time', 'score-desc', 'score-asc', 'size-desc'].indexOf(sort) >= 0) state.faceSort = sort;
     const av = read(KEYS.annoVisible, null);
     if (av != null) state.annoVisible = av === '1';
-    const mode = read(KEYS.searchMode, null);
-    if (mode && ['plain', 'regex'].indexOf(mode) >= 0) state.searchMode = mode;
-    const range = read(KEYS.searchRange, null);
-    if (range && ['all', '1h', '24h', '7d', '30d'].indexOf(range) >= 0) state.searchRange = range;
     const pins = read(KEYS.pinIds, null);
     if (pins) {
       try {
@@ -153,16 +98,14 @@ const prefStore = (() => {
   }
   return { KEYS, read, write, applyAll };
 })();
-// 立即应用持久化值,确保 sidebar/preview 拿到的是用户上次的状态
 prefStore.applyAll();
 
 const theme = (() => {
   const KEY = 'rsface.theme';
-  /** 按 pref 返回按钮图标 ◐ / ● / ○ */
   function iconFor(pref) {
-    if (pref === 'dark') return '●';
-    if (pref === 'light') return '○';
-    return '◐'; // auto
+    if (pref === 'dark') return '◑';
+    if (pref === 'light') return '◐';
+    return '◐';
   }
   function readPref() { try { return localStorage.getItem(KEY) || 'auto'; } catch { return 'auto'; } }
   function writePref(v) { try { localStorage.setItem(KEY, v); } catch {} }
@@ -173,10 +116,6 @@ const theme = (() => {
       effective = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
     }
     document.documentElement.dataset.theme = effective;
-    utils.$$('#set-theme .seg-btn').forEach(b => {
-      const on = b.dataset.theme === pref;
-      b.classList.toggle('active', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
-    });
     const btn = utils.$('#tb-theme');
     if (btn) {
       btn.textContent = iconFor(pref);
@@ -184,7 +123,6 @@ const theme = (() => {
       btn.title = pref === 'auto' ? '主题:自动(点击切换)' : `主题:${pref === 'dark' ? '暗' : '亮'}(点击切换)`;
     }
   }
-  /** 顶栏按钮:auto → dark → light → auto 循环 */
   function cycle() {
     const cur = state.themePref || 'auto';
     const next = cur === 'auto' ? 'dark' : cur === 'dark' ? 'light' : 'auto';
@@ -193,9 +131,6 @@ const theme = (() => {
   function init() {
     state.themePref = readPref();
     applyPref(state.themePref);
-    utils.$$('#set-theme .seg-btn').forEach(b => b.addEventListener('click', () => {
-      applyPref(b.dataset.theme); writePref(b.dataset.theme);
-    }));
     const tb = utils.$('#tb-theme');
     if (tb) tb.addEventListener('click', cycle);
     if (window.matchMedia) {
@@ -207,156 +142,7 @@ const theme = (() => {
   return { init, applyPref, cycle };
 })();
 
-// toast 模块已拆分至 toast.js(本文件之前加载)
-
-const batch = (() => {
-  function isActive() { return state.batchMode; }
-  function enter() {
-    state.batchMode = true; state.selectedIds = new Set();
-    utils.$('#sb-batch').classList.remove('hidden');
-    utils.$('#sb-scroll').classList.add('batch-on');
-    refreshBar();
-  }
-  function exit() {
-    state.batchMode = false; state.selectedIds = new Set();
-    utils.$('#sb-batch').classList.add('hidden');
-    utils.$('#sb-scroll').classList.remove('batch-on');
-    utils.$$('.sb-item').forEach(el => el.classList.remove('selected'));
-  }
-  function refreshBar() {
-    const n = state.selectedIds.size;
-    utils.$('#sb-batch-count').textContent = `已选 ${n} 个`;
-    utils.$$('.sb-item').forEach(el => el.classList.toggle('selected', state.selectedIds.has(el.id.replace(/^sb-/, ''))));
-  }
-  function toggle(id) {
-    if (state.selectedIds.has(id)) state.selectedIds.delete(id); else state.selectedIds.add(id);
-    if (state.selectedIds.size === 0) exit(); else refreshBar();
-  }
-  async function deleteSelected() {
-    const ids = Array.from(state.selectedIds);
-    if (!ids.length) return;
-    if (!await confirmModal.open('批量删除', `确认删除 ${ids.length} 个任务?此操作不可恢复。`)) return;
-    try {
-      const r = await api.batch(ids, 'delete');
-      ids.forEach(id => state.deletedIds.add(id));
-      toast.success(`已删除 ${r.removed_in_mem || ids.length} 个任务`);
-      exit(); sidebar.render();
-    } catch (e) { toast.error('删除失败: ' + e.message); }
-  }
-  async function archiveSelected() {
-    const ids = Array.from(state.selectedIds);
-    if (!ids.length) return;
-    try {
-      const r = await api.batch(ids, 'archive');
-      toast.success(`已归档 ${r.archived} 个任务`);
-      exit(); sidebar.render();
-    } catch (e) { toast.error('归档失败: ' + e.message); }
-  }
-  async function exportSelected() {
-    const ids = Array.from(state.selectedIds);
-    if (!ids.length) return;
-    try {
-      const r = await api.batch(ids, 'export');
-      downloadBlob(JSON.stringify(r.jobs, null, 2), `jobs-batch-${Date.now()}.json`, 'application/json');
-      toast.success(`已导出 ${r.jobs.length} 个任务`);
-      exit();
-    } catch (e) { toast.error('导出失败: ' + e.message); }
-  }
-  function init() {
-    const on = (sel, fn) => { const el = utils.$(sel); if (el) el.addEventListener('click', fn); };
-    on('#sb-batch-clear', exit);
-    on('#sb-batch-delete', deleteSelected);
-    on('#sb-batch-archive', archiveSelected);
-    on('#sb-batch-export', exportSelected);
-  }
-  return { isActive, enter, exit, toggle, init };
-})();
-
-// 平台 KPI:每 2s 拉 /api/metrics,渲染顶栏。带 fps 折线图。
-const kpi = (() => {
-  const _fpsHist = [];  // 最近 30 个 live_fps_max 样本(平台级)
-  const _fpsHistMax = 30;
-
-  function setText(id, txt) {
-    const el = utils.$('#' + id);
-    if (el) el.textContent = txt;
-  }
-  function drawSpark(canvas, data, maxOverride) {
-    if (!canvas) return;
-    const w = canvas.width, h = canvas.height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, w, h);
-    if (!data || data.length < 2) return;
-    const max = (maxOverride && maxOverride > 0) ? maxOverride : Math.max(1, ...data);
-    ctx.lineWidth = 1.2;
-    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#4fc3f7';
-    ctx.beginPath();
-    const step = w / (data.length - 1);
-    for (let i = 0; i < data.length; i++) {
-      const x = i * step;
-      const y = h - (data[i] / max) * (h - 2) - 1;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-    // 渐变填充
-    ctx.lineTo(w, h);
-    ctx.lineTo(0, h);
-    ctx.closePath();
-    ctx.fillStyle = ctx.strokeStyle + '22';
-    ctx.fill();
-  }
-
-  async function refresh() {
-    // AbortController 取消上一次 in-flight 请求,避免慢响应 + 2s 轮询
-    // 把请求堆在浏览器队列里。命中缓存时 /api/metrics ~0ms,但页面里
-    // 多个 fetch 并发不会让旧结果覆盖新结果。
-    if (state._kpiAbort) { try { state._kpiAbort.abort(); } catch {} }
-    state._kpiAbort = new AbortController();
-    const signal = state._kpiAbort.signal;
-    const m = await api.metrics(signal).catch(() => null);
-    if (!m || signal.aborted) return;
-    state._kpi = m;
-    state._kpiAt = Date.now();
-
-    // running
-    setText('kpi-running-v', String(m.running || 0));
-    setText('kpi-running-sub', '/ ' + (m.max_concurrency || 0) + ' 并发');
-
-    // fps
-    const fps = m.live_fps_max || 0;
-    setText('kpi-fps-v', fps > 0 ? fps.toFixed(1) : '—');
-    _fpsHist.push(fps);
-    if (_fpsHist.length > _fpsHistMax) _fpsHist.shift();
-    drawSpark(utils.$('#kpi-fps-spark'), _fpsHist);
-
-    // gpu
-    const gpuPct = Math.max(0, Math.min(100, Math.round(m.gpu_pct || 0)));
-    setText('kpi-gpu-v', gpuPct + '%');
-    const bar = utils.$('#kpi-gpu-bar');
-    if (bar) bar.style.width = gpuPct + '%';
-    const gpuEl = utils.$('#kpi-gpu');
-    if (gpuEl) {
-      gpuEl.classList.toggle('kpi-warn', gpuPct === 0 && (m.total_gpu_levels + m.total_cpu_levels) > 0);
-    }
-
-    // detections
-    setText('kpi-det-v', String(m.total_detections || 0));
-  }
-
-  function init() {
-    refresh();
-    // timer 交给 visibilityCtl 管理:页面不可见时暂停,恢复时立即刷新一次
-    const timer = setInterval(() => {
-      if (visibilityCtl.isHidden()) return; // 双保险(visibilitychange 兜底)
-      refresh();
-    }, 2000);
-    visibilityCtl.bindKpiTimer(timer);
-  }
-
-  return { init, refresh };
-})();
-
+/** 侧栏:单列任务流,3 段时间分组(进行 ≤8 / 今天 24h / 较早),虚拟滚动。 */
 const sidebar = (() => {
   const ROW_H = state.itemHeight + state.itemGap;
 
@@ -375,24 +161,6 @@ const sidebar = (() => {
     }, { root: state.listScrollEl, rootMargin: '50px' });
     state.listScrollEl.addEventListener('scroll', renderVp, { passive: true });
     window.addEventListener('resize', utils.throttleRaf(renderVp));
-    utils.$$('#sb-filters .sb-filter').forEach(b => b.addEventListener('click', () => {
-      state.filter = b.dataset.f;
-      utils.$$('#sb-filters .sb-filter').forEach(x => {
-        const on = x === b;
-        x.classList.toggle('active', on); x.setAttribute('aria-selected', on ? 'true' : 'false');
-      });
-      render();
-    }));
-    // 算法过滤 chips(若 HTML 提供 #sb-algofilter 才挂监听;v0.5 默认省略,
-    // 算法切换收敛到顶部「新建任务」下拉 / Inspector 抽屉的 Stats / Compare)。
-    utils.$$('#sb-algofilter .sb-algo-chip').forEach(b => b.addEventListener('click', () => {
-      state.algoFilter = b.dataset.algo || '';
-      utils.$$('#sb-algofilter .sb-algo-chip').forEach(x => {
-        const on = x === b;
-        x.classList.toggle('active', on); x.setAttribute('aria-pressed', on ? 'true' : 'false');
-      });
-      render();
-    }));
     const search = utils.$('#tb-search');
     const onSearch = utils.debounce(() => {
       state.search = (search.value || '').trim();
@@ -407,54 +175,40 @@ const sidebar = (() => {
     });
   }
 
-  function rangeMs() {
-    if (state.searchRange === 'all') return 0;
-    const now = Date.now();
-    if (state.searchRange === '1h')  return now - 60 * 60 * 1000;
-    if (state.searchRange === '24h') return now - 24 * 60 * 60 * 1000;
-    if (state.searchRange === '7d')  return now - 7  * 24 * 60 * 60 * 1000;
-    if (state.searchRange === '30d') return now - 30 * 24 * 60 * 60 * 1000;
-    return 0;
-  }
-
   function filtered() {
     let jobs = (state.jobs || []).filter(j => !state.deletedIds.has(j.id));
-    if (state.filter === 'running') jobs = jobs.filter(j => j.status === 'running' || j.status === 'queued');
-    else if (state.filter === 'done') jobs = jobs.filter(j => j.status === 'done');
-    else if (state.filter === 'error') jobs = jobs.filter(j => j.status === 'error' || j.status === 'cancelled');
-    if (state.algoFilter) {
-      // algo 字段由后端在 detector 构建时写入,job 摘要里有 j.algo。
-      // 没记录的旧 job (eg. 服务重启前的) 不出现在任何算法 chip 的过滤里。
-      const want = state.algoFilter;
-      jobs = jobs.filter(j => j.algo === want);
-    }
-    const since = rangeMs();
-    if (since > 0) jobs = jobs.filter(j => (j.created_ms || 0) >= since);
     if (state.search) {
-      const q = state.search;
-      if (state.searchMode === 'regex') {
-        let re;
-        try { re = new RegExp(q, 'i'); }
-        catch { re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'); }
-        jobs = jobs.filter(j => re.test(j.display_name || '') || re.test(j.id || ''));
-      } else {
-        const ql = q.toLowerCase();
-        jobs = jobs.filter(j => (j.display_name || '').toLowerCase().includes(ql) || (j.id || '').toLowerCase().includes(ql));
-      }
+      const ql = state.search.toLowerCase();
+      jobs = jobs.filter(j => (j.display_name || '').toLowerCase().includes(ql) || (j.id || '').toLowerCase().includes(ql));
     }
-    // 置顶优先(pin 状态来自 prefStore.pinIds),其余保持原相对顺序
     if (state.pinIds && state.pinIds.size) {
       jobs = jobs.slice().sort((a, b) => {
         const pa = state.pinIds.has(a.id) ? 0 : 1;
         const pb = state.pinIds.has(b.id) ? 0 : 1;
-        return pa - pb; // 稳定排序:相等时保持原顺序
+        return pa - pb;
       });
     }
     return jobs;
   }
 
-  function setJobs(jobs) { state.jobs = jobs; render(); }
+  /** 把任务按时间切 3 段:[{kind:'running', jobs:[...]}, {kind:'today', jobs:[...]}, {kind:'earlier', jobs:[...]}] */
+  function segmented() {
+    const list = filtered();
+    const now = Date.now();
+    const running = [], today = [], earlier = [];
+    for (const j of list) {
+      if (j.status === 'running' || j.status === 'queued') running.push(j);
+      else if ((now - (j.created_ms || 0)) < 24 * 60 * 60 * 1000) today.push(j);
+      else earlier.push(j);
+    }
+    return [
+      ...(running.length ? [{ kind: '进行', jobs: running }] : []),
+      ...(today.length   ? [{ kind: '今天', jobs: today }]   : []),
+      ...(earlier.length ? [{ kind: '较早', jobs: earlier }] : []),
+    ];
+  }
 
+  function setJobs(jobs) { state.jobs = jobs; render(); }
   function upsertJob(j) {
     if (state.deletedIds.has(j.id)) return;
     const idx = state.jobs.findIndex(x => x.id === j.id);
@@ -462,163 +216,153 @@ const sidebar = (() => {
     render();
   }
 
+  function runningCount() {
+    return (state.jobs || []).filter(j => !state.deletedIds.has(j.id) && (j.status === 'running' || j.status === 'queued')).length;
+  }
+
   function render() {
-    const list = filtered(), total = list.length;
-    utils.$('#sb-foot').textContent = `${total} 匹配 / ${state.jobs.length} 总`;
-    state.listSpacerEl.style.height = (total * ROW_H) + 'px';
-    updateFilterCounts();
+    const segs = segmented();
+    const total = segs.reduce((n, s) => n + s.jobs.length, 0);
+    const running = runningCount();
+    const footEl = utils.$('#sb-foot');
+    if (footEl) footEl.textContent = `共 ${total} 个 · ${running} 运行`;
+    const countEl = utils.$('#sb-count');
+    if (countEl) countEl.textContent = String(total);
+    const sbTotal = utils.$('#sb-total');
+    if (sbTotal) sbTotal.textContent = `${total} 任务 · ${running} 运行`;
+
+    // 高度 = 段头(n * 24px) + 任务卡(n * ROW_H)
+    let rows = 0;
+    for (const s of segs) { rows += 1 + s.jobs.length; } // 1 行段头
+    const H_PER_HEAD = 24;
+    state.listSpacerEl.style.height = (segs.length * H_PER_HEAD + total * ROW_H) + 'px';
+    state._segs = segs;
     if (state.currentJobId) {
-      const i = list.findIndex(j => j.id === state.currentJobId);
-      if (i >= 0) {
-        const targetTop = i * ROW_H - state.listScrollEl.clientHeight / 2 + ROW_H / 2;
-        const cur = state.listScrollEl.scrollTop;
-        if (Math.abs(cur - targetTop) > ROW_H) state.listScrollEl.scrollTop = Math.max(0, targetTop);
+      // 计算 current 在 spacer 中的 y 位置,需要时滚动居中
+      let y = 0;
+      for (const s of segs) {
+        const i = s.jobs.findIndex(j => j.id === state.currentJobId);
+        if (i >= 0) { y += H_PER_HEAD + i * ROW_H; break; }
+        y += H_PER_HEAD + s.jobs.length * ROW_H;
       }
+      const targetTop = y - state.listScrollEl.clientHeight / 2 + ROW_H / 2;
+      const cur = state.listScrollEl.scrollTop;
+      if (Math.abs(cur - targetTop) > ROW_H) state.listScrollEl.scrollTop = Math.max(0, targetTop);
     }
     renderVp();
   }
 
-  /** 根据未过滤的 jobs 计算每个 tab 的实时数量(忽略搜索但遵循时间范围)。 */
-  function updateFilterCounts() {
-    const buckets = { all: 0, running: 0, done: 0, error: 0 };
-    const since = rangeMs();
-    for (const j of (state.jobs || [])) {
-      if (state.deletedIds.has(j.id)) continue;
-      if (since > 0 && (j.created_ms || 0) < since) continue;
-      buckets.all++;
-      const st = j.status;
-      if (st === 'running' || st === 'queued') buckets.running++;
-      else if (st === 'done') buckets.done++;
-      else if (st === 'error' || st === 'cancelled') buckets.error++;
-    }
-    for (const k of Object.keys(buckets)) {
-      const el = document.querySelector(`.sb-filter-count[data-count="${k}"]`);
-      if (el) el.textContent = String(buckets[k]);
-    }
-  }
-
-  /**
-   * 虚拟滚动渲染路径(v0.3 性能修复):
-   *  - 元素按 id(key)复用,只在缺失时新建
-   *  - updateItem 不再全量 innerHTML 重建:签名(itemSig)相同直接跳过,
-   *    变化时仅 patch 文本/类名/src,滚动中零重排
-   *  - 可见区外的元素从 DOM 移除(与之前一致)
-   */
+  /** 虚拟滚动:段头 + 任务卡,所有元素按 (segmentId,idx) 复用。 */
   function renderVp() {
-    const list = filtered(), total = list.length;
-    const vp = state.listVpEl, scrollTop = state.listScrollEl.scrollTop, vpH = state.listScrollEl.clientHeight;
+    const segs = state._segs || [];
+    const H_PER_HEAD = 24;
+    const vp = state.listVpEl;
+    const scrollTop = state.listScrollEl.scrollTop, vpH = state.listScrollEl.clientHeight;
     const overscan = 6;
+    // 把 (segIdx, itemIdx, kind) 线性化以便算 y 区间
+    const items = []; // {kind:'h'|'j', seg, job?, y}
+    let y = 0;
+    for (let s = 0; s < segs.length; s++) {
+      items.push({ kind: 'h', label: segs[s].kind, y }); y += H_PER_HEAD;
+      for (let i = 0; i < segs[s].jobs.length; i++) {
+        items.push({ kind: 'j', seg: s, idx: i, job: segs[s].jobs[i], y }); y += ROW_H;
+      }
+    }
+    const total = items.length;
     const start = Math.max(0, Math.floor((scrollTop - overscan * ROW_H) / ROW_H));
     const end = Math.min(total, Math.ceil((scrollTop + vpH + overscan * ROW_H) / ROW_H));
     const keep = new Set();
     for (let i = start; i < end; i++) {
-      const j = list[i], id = 'sb-' + j.id;
+      const it = items[i];
+      const id = it.kind === 'h' ? `sb-h-${it.label}-${i}` : `sb-j-${it.job.id}`;
       keep.add(id);
-      let el = vp.querySelector('#' + id);
-      if (!el) { el = makeItem(j); vp.appendChild(el); }
-      updateItem(el, j);
-      el.style.transform = `translateY(${i * ROW_H}px)`;
+      let el = vp.querySelector('#' + CSS.escape(id));
+      if (!el) {
+        el = it.kind === 'h' ? makeHead(it.label) : makeItem(it.job);
+        vp.appendChild(el);
+      }
+      if (it.kind === 'h') el.style.transform = `translateY(${it.y}px)`;
+      else {
+        el.style.transform = `translateY(${it.y}px)`;
+        updateItem(el, it.job);
+      }
     }
     Array.from(vp.children).forEach(c => { if (!keep.has(c.id)) c.remove(); });
     if (total === 0) {
       if (!vp.querySelector('.sb-empty')) {
         const e = document.createElement('div');
         e.className = 'sb-empty';
-        e.innerHTML = '<div class="sb-empty-mark">🗂️</div><div>暂无任务</div><div style="margin-top:8px">点 + 新建开始识别</div>';
+        e.innerHTML = '<div class="sb-empty-mark">◐</div><div>暂无任务</div><div class="sb-empty-hint">点 + 新建开始识别</div>';
         vp.appendChild(e);
       }
     } else { const e = vp.querySelector('.sb-empty'); if (e) e.remove(); }
   }
 
+  function makeHead(label) {
+    const el = document.createElement('div');
+    el.className = 'sb-head-row';
+    el.id = 'sb-h-' + label + '-' + Math.random().toString(36).slice(2, 7);
+    el.innerHTML = `<span class="sb-head-label"></span><span class="sb-head-rule"></span>`;
+    el.querySelector('.sb-head-label').textContent = label;
+    return el;
+  }
+
   function makeItem(j) {
     const el = document.createElement('div');
-    el.id = 'sb-' + j.id; el.className = 'sb-item';
+    el.id = 'sb-j-' + j.id; el.className = 'sb-item';
     el.setAttribute('role', 'option');
-    if (j.id === state.currentJobId) el.classList.add('active');
-    if (state.selectedIds.has(j.id)) el.classList.add('selected');
     el.tabIndex = -1;
-    const id = j.id; // 元素按 id 复用,job 数据以 id 实时查
-    // 事件只绑一次(元素被复用,不再随 updateItem 重建而丢失)
-    el.addEventListener('click', (e) => {
-      // 移动端抽屉:点选任务后自动收起
-      const sb = utils.$('#sidebar');
-      if (sb && sb.classList.contains('drawer-open')) {
-        sb.classList.remove('drawer-open');
-        const back = utils.$('#drawer-backdrop');
-        if (back) back.classList.add('hidden');
-        const btn = utils.$('#tb-drawer');
-        if (btn) btn.setAttribute('aria-expanded', 'false');
-      }
-      if (batch.isActive() || e.shiftKey) { batch.toggle(id); return; }
-      preview.open(id);
-    });
-    // 右键上下文菜单(打开/置顶/重试/复制ID/删除)
+    const id = j.id;
+    el.addEventListener('click', () => preview.open(id));
     el.addEventListener('contextmenu', (e) => {
-      if (ctxMenuHidden()) return;
+      if (modalKit.anyOpen()) return;
       showJobCtxMenu(e, id);
     });
-    // 结构一次搭好,后续 updateItem 只 patch 内容
     el.innerHTML = `
-      <div class="sb-check" aria-hidden="true"><input type="checkbox" tabindex="-1"></div>
       <div class="sb-thumb"></div>
       <div class="sb-info">
         <div class="sb-name"></div>
         <div class="sb-meta">
           <span class="sb-dot"></span>
-          <span class="sb-status"></span><span>·</span>
-          <span class="sb-frames"></span><span>·</span>
+          <span class="sb-status"></span><span class="sb-sep">·</span>
           <span class="sb-faces"></span>
         </div>
-        <div class="sb-prog" data-state="idle" aria-hidden="true"><div class="sb-prog-fill"></div></div>
-      </div>
-      <button class="sb-pin-btn" type="button" tabindex="-1" aria-label="置顶/取消置顶" title="置顶/取消置顶">📌</button>`;
-    el.querySelector('.sb-pin-btn').addEventListener('click', (e) => {
-      e.stopPropagation();
-      togglePin(id);
-    });
+      </div>`;
     el._jobId = id;
     return el;
   }
 
-  /** 计算卡片内容的轻量签名:这些字段变化才需要 patch DOM。 */
   function itemSig(j) {
     const st = j.stats || {};
     return [
       j.id, j.status, j.display_name || '',
-      st.frames_processed || 0,
-      j.frame_count || 0,
       j.face_count || 0,
-      state.selectedIds.has(j.id) ? 1 : 0,
       j.id === state.currentJobId ? 1 : 0,
       state.pinIds.has(j.id) ? 1 : 0,
-      (j.cover_key || j.original_key || ''),
       state.search,
     ].join('|');
   }
 
   function updateItem(el, j) {
     const sig = itemSig(j);
-    if (el._sig === sig) return; // 内容未变:滚动中零 DOM 操作
+    if (el._sig === sig) return;
     el._sig = sig;
-    const st = j.stats || {}, fp = st.frames_processed || 0, fc = j.face_count || 0;
-    // 缩略图:运行中显示占位符;视频/流优先 cover_key(首帧标注 PNG)。
-    // 只把浏览器原生支持的格式(png/jpg/webp/gif)塞进 <img>;ppm/mp4 等
-    // 否则即便 server 200 也会 naturalWidth=0,显示破损图标。
+    el.classList.toggle('active', j.id === state.currentJobId);
+    const st = j.stats || {};
+    const fc = j.face_count || 0;
     const rawKey = j.cover_key || j.original_key;
     const thumbKey = rawKey && /\.(png|jpe?g|webp|gif|bmp)(\?|$)/i.test(rawKey) ? rawKey : null;
     const thumbSrc = thumbKey ? utils.mediaUrl(thumbKey) : null;
     const thumb = el.querySelector('.sb-thumb');
     if (thumb) {
       let inner;
-      if (j.status === 'running' || j.status === 'queued') inner = '<div style="opacity:.6">⏳</div>';
+      if (j.status === 'running' || j.status === 'queued') inner = '<div class="sb-thumb-spin">⏳</div>';
       else if (thumbSrc) inner = `<img data-src="${utils.escapeHtml(thumbSrc)}" alt="">`;
-      else inner = '<div>·</div>';
+      else inner = '<div class="sb-thumb-empty">·</div>';
       if (thumb._inner !== inner) {
-        thumb._inner = inner;
-        thumb.innerHTML = inner;
+        thumb._inner = inner; thumb.innerHTML = inner;
         const img = thumb.querySelector('img[data-src]');
         if (img) {
-          // 骨架屏保持到图片真正 load(而非 observer 刚赋 src 时)
           img.addEventListener('load', () => img.classList.add('is-loaded'), { once: true });
           img.addEventListener('error', () => img.classList.add('is-loaded'), { once: true });
           state.faceCardObserver.observe(img);
@@ -631,54 +375,44 @@ const sidebar = (() => {
       if (nameEl._html !== html) { nameEl._html = html; nameEl.innerHTML = html; nameEl.title = j.display_name || j.id; }
     }
     const statusEl = el.querySelector('.sb-status');
-    if (statusEl && statusEl.textContent !== (j.status || '·')) statusEl.textContent = j.status || '·';
-    const framesEl = el.querySelector('.sb-frames');
-    if (framesEl && framesEl.textContent !== fp + ' 帧') framesEl.textContent = fp + ' 帧';
+    if (statusEl) statusEl.textContent = statusText(j.status);
     const facesEl = el.querySelector('.sb-faces');
-    if (facesEl && facesEl.textContent !== fc + ' 脸') facesEl.textContent = fc + ' 脸';
+    if (facesEl) facesEl.textContent = `${fc} 脸`;
     const dot = el.querySelector('.sb-dot');
     if (dot) dot.className = 'sb-dot ' + (j.status || '');
-    el.classList.toggle('selected', state.selectedIds.has(j.id));
-    const check = el.querySelector('.sb-check input');
-    if (check) check.checked = state.selectedIds.has(j.id);
-    const pinned = state.pinIds.has(j.id);
-    el.classList.toggle('pinned', pinned);
-    const pinBtn = el.querySelector('.sb-pin-btn');
-    if (pinBtn) {
-      pinBtn.textContent = pinned ? '📍' : '📌';
-      pinBtn.title = pinned ? '取消置顶' : '置顶此任务';
-      pinBtn.setAttribute('aria-label', pinned ? '取消置顶' : '置顶此任务');
-      pinBtn.setAttribute('aria-pressed', pinned ? 'true' : 'false');
-    }
-    // 进度条:仅在 running / queued 时显示;done/error 折成 100% / 隐藏
-    const prog = el.querySelector('.sb-prog');
-    const progFill = prog && prog.querySelector('.sb-prog-fill');
-    if (prog && progFill) {
-      const total = j.frame_count || (st.frames_processed > 0 ? st.frames_processed : 0);
-      let pct = 0, state = 'idle';
-      if (j.status === 'running' || j.status === 'queued') {
-        if (total > 0) {
-          pct = Math.max(2, Math.min(99, Math.round((st.frames_processed / total) * 100)));
-        } else {
-          // 流任务 / 视频未拿到 total:走心跳估算(每帧约 1%)
-          pct = Math.min(95, 2 + (st.frames_processed || 0) % 95);
-        }
-        state = 'running';
-      } else if (j.status === 'done') {
-        pct = 100; state = 'done';
-      } else if (j.status === 'error' || j.status === 'cancelled') {
-        pct = 100; state = 'error';
-      }
-      if (prog.dataset.state !== state) {
-        prog.dataset.state = state;
-        prog.setAttribute('aria-hidden', state === 'idle' ? 'true' : 'false');
-      }
-      const want = pct + '%';
-      if (progFill.style.width !== want) progFill.style.width = want;
-    }
   }
 
-  /** 置顶状态持久化(pinIds 存 localStorage)。 */
+  function statusText(s) {
+    if (s === 'running') return '运行';
+    if (s === 'queued') return '排队';
+    if (s === 'done') return '完成';
+    if (s === 'error') return '错误';
+    if (s === 'cancelled') return '已停';
+    return s || '—';
+  }
+
+  function showJobCtxMenu(e, jobId) {
+    const job = (state.jobs || []).find(x => x.id === jobId);
+    if (!job) return;
+    const items = [
+      { label: '打开任务', hint: 'Enter', onPick: () => preview.open(jobId) },
+      { label: state.pinIds.has(jobId) ? '取消置顶' : '置顶任务', hint: state.pinIds.has(jobId) ? '📍' : '📌', onPick: () => togglePin(jobId) },
+      { label: '复制任务 ID', hint: '⌗', onPick: () => {
+          navigator.clipboard.writeText(job.id).then(
+            () => toast.success('已复制任务 ID'),
+            () => toast.error('复制失败'),
+          );
+        } },
+    ];
+    if (job.status === 'running' || job.status === 'queued') {
+      items.push({ label: '取消任务', hint: '⏹', danger: true, onPick: () => cancelJobById(jobId) });
+    }
+    const canRetry = !!(job.original_input || (job.kind === 'image' && job.original_key));
+    if (canRetry) items.push({ label: '重跑任务', hint: '↻', onPick: () => retryJobById(jobId) });
+    items.push({ label: '删除任务', hint: '⌫', danger: true, onPick: () => deleteJobById(jobId) });
+    ctxMenu.show(e, items);
+  }
+
   function togglePin(id) {
     if (!id) return;
     if (state.pinIds.has(id)) { state.pinIds.delete(id); toast.info('已取消置顶'); }
@@ -686,69 +420,8 @@ const sidebar = (() => {
     try {
       localStorage.setItem(prefStore.KEYS.pinIds, JSON.stringify(Array.from(state.pinIds)));
     } catch {}
-    // 让所有已渲染卡片签名失效,强制一次 patch
     utils.$$('.sb-item', state.listVpEl).forEach(el => { el._sig = null; });
     render();
-  }
-
-  /** 右键菜单是否被禁用(例如 modal 打开时)。 */
-  function ctxMenuHidden() {
-    return modalKit.anyOpen();
-  }
-
-  /** 任务卡片右键菜单:打开/置顶/重试/复制ID/删除。 */
-  function showJobCtxMenu(e, jobId) {
-    const job = (state.jobs || []).find(x => x.id === jobId);
-    if (!job) return;
-    const pinned = state.pinIds.has(jobId);
-    // 服务端限制:image 任务 retry 会 400,只在可重试时提供该菜单项
-    const canRetry = !!(job.original_input && job.kind !== 'image');
-    const items = [
-      { label: '打开任务', hint: 'Enter', onPick: () => preview.open(jobId) },
-      { label: pinned ? '取消置顶' : '置顶任务', hint: pinned ? '📍' : '📌', onPick: () => togglePin(jobId) },
-      { label: '复制任务 ID', hint: job.id.slice(0, 10) + '…', onPick: () => {
-          navigator.clipboard.writeText(job.id).then(
-            () => toast.success('已复制任务 ID'),
-            () => toast.error('复制失败'),
-          );
-        } },
-    ];
-    if (canRetry) {
-      items.push({ label: '重跑任务', hint: '↻', onPick: () => retryJobById(jobId) });
-    }
-    items.push({ label: '删除任务', hint: 'Delete', danger: true, onPick: () => deleteJobById(jobId) });
-    ctxMenu.show(e, items);
-  }
-
-  function setActive(id) {
-    utils.$$('.sb-item').forEach(e => {
-      const on = e.id === 'sb-' + id;
-      e.classList.toggle('active', on);
-    });
-    // 清除旧的键盘焦点环
-    utils.$$('.sb-item.kbd-focus').forEach(e => e.classList.remove('kbd-focus'));
-    // 在新激活项上短暂展示 kbd-focus 环(键盘可达性提示)
-    if (id) {
-      const newEl = utils.$('#sb-' + id);
-      if (newEl) {
-        newEl.classList.add('kbd-focus');
-        clearTimeout(setActive._t);
-        setActive._t = setTimeout(() => newEl.classList.remove('kbd-focus'), 900);
-      }
-    }
-    // 自动滚动到可见区域(键盘导航必需)
-    if (id) {
-      const el = utils.$('#sb-' + id);
-      const scroll = state.listScrollEl;
-      if (el && scroll) {
-        const top = parseFloat(el.style.transform.replace(/[^\d.-]/g, '') || '0');
-        const elTop = isNaN(top) ? 0 : top;
-        const elBot = elTop + ROW_H;
-        const visTop = scroll.scrollTop, visBot = visTop + scroll.clientHeight;
-        if (elTop < visTop) scroll.scrollTop = Math.max(0, elTop - 8);
-        else if (elBot > visBot) scroll.scrollTop = elBot - scroll.clientHeight + 8;
-      }
-    }
   }
 
   function nextItem(dir) {
@@ -758,7 +431,6 @@ const sidebar = (() => {
     preview.open(list[i].id);
   }
 
-  /** 跳到列表指定偏移(Home/End/PageUp/PageDown 用)。offset 为 0 = 第一项,-1 = 最后一项 */
   function gotoOffset(offset) {
     const list = filtered(); if (!list.length) return;
     let i;
@@ -768,14 +440,157 @@ const sidebar = (() => {
     preview.open(list[i].id);
   }
 
-  return { init, setJobs, upsertJob, render, setActive, nextItem, gotoOffset, filtered, togglePin };
+  return { init, setJobs, upsertJob, render, setActive: () => {}, nextItem, gotoOffset, filtered, togglePin, statusText };
 })();
 
+/** 详情预览:单视频 + 单图渲染 + 标注叠加 + 进度 + 内联一行统计 + 人脸卡片。 */
 const preview = (() => {
   let lastFrameIdx = -1, _lastAnnoFrameIdx = -1;
-  // jobId -> {w,h}:检测帧(ffmpeg scale=480)空间尺寸。
-  // 视频人脸坐标基于该空间,叠加到原视频时必须按它缩放。
-  let _detDims = {};
+  let _detDims = {}; // jobId -> {w,h}
+
+  function showEmpty() { utils.$('#pv-empty').classList.remove('hidden'); utils.$('#pv-detail').classList.add('hidden'); }
+  function showDetail() { utils.$('#pv-empty').classList.add('hidden'); utils.$('#pv-detail').classList.remove('hidden'); }
+  const showHint = t => { const h = utils.$('#pv-stage-hint'); h.textContent = t; h.classList.remove('hidden'); };
+  const hideHint = () => utils.$('#pv-stage-hint').classList.add('hidden');
+
+  function resetMedia() {
+    const img = utils.$('#pv-img'); if (img) { img.removeAttribute('src'); img.classList.add('hidden'); img.classList.remove('is-loaded'); }
+    const vid = utils.$('#pv-vid'); if (vid) { vid.removeAttribute('src'); vid.classList.add('hidden'); }
+    clearOverlay();
+    const banner = utils.$('#pv-error-banner'); if (banner) {
+      banner.classList.add('hidden');
+      const msgEl = banner.querySelector('.pv-error-msg');
+      const actEl = banner.querySelector('.pv-error-act');
+      if (msgEl) msgEl.textContent = '';
+      if (actEl) actEl.innerHTML = '';
+    }
+  }
+
+  async function open(jobId) {
+    state.currentJobId = jobId; lastFrameIdx = -1; _lastAnnoFrameIdx = -1;
+    showDetail(); showHint('加载中…'); resetMedia(); sse.detach();
+    try {
+      const job = await api.getJob(jobId);
+      state.currentJob = job; render(job);
+      if (job.status === 'running' || job.status === 'queued') sse.attach(jobId);
+    } catch (e) { toast.error('加载任务失败: ' + e.message); }
+  }
+
+  function close() {
+    state.currentJobId = null; state.currentJob = null;
+    sse.detach(); showEmpty(); resetMedia();
+  }
+
+  function render(job) {
+    utils.$('#pv-title').textContent = job.display_name || job.id;
+    const idEl = utils.$('#pv-id');
+    if (idEl) idEl.textContent = '#' + (job.id || '').slice(0, 8);
+    const st = job.stats || {};
+    const totalFrames = st.total_frames || (job.kind === 'image' ? job.frame_count : st.frames_processed) || st.frames_processed || 0;
+    utils.$('#pv-faces').textContent = `${job.face_count || 0} 张脸`;
+    utils.$('#pv-time').textContent = utils.fmtAbsTime(job.created_ms);
+    const status = job.status || 'queued';
+    const statusEl = utils.$('#pv-status'); statusEl.textContent = sidebar.statusText(status); statusEl.className = 'pv-status ' + status;
+    utils.$('#pv-dot').className = 'pv-dot ' + status;
+
+    // GPU 行(取 config 里的 embedder device)
+    const gpuEl = utils.$('#pv-gpu');
+    if (gpuEl && state.config && state.config.embedder_device) gpuEl.textContent = state.config.embedder_device;
+
+    // 错误 banner
+    const banner = utils.$('#pv-error-banner');
+    if (status === 'error' || status === 'cancelled') {
+      const label = status === 'cancelled' ? '任务已取消' : '识别失败';
+      const msg = job.error ? `${label} · ${job.error}` : label;
+      if (banner) {
+        banner.classList.remove('hidden');
+        banner.querySelector('.pv-error-msg').textContent = msg;
+        const actEl = banner.querySelector('.pv-error-act');
+        actEl.innerHTML = '';
+        if (job.error) {
+          const copy = document.createElement('button');
+          copy.className = 'pv-btn ghost';
+          copy.textContent = '复制错误';
+          copy.addEventListener('click', () => {
+            navigator.clipboard.writeText(`[${job.display_name || job.id}] ${job.error}`).then(() => toast.success('已复制'), () => toast.error('复制失败'));
+          });
+          actEl.appendChild(copy);
+        }
+        const canRetry = job.original_input || (job.kind === 'image' && job.original_key);
+        if (canRetry) {
+          const retry = document.createElement('button');
+          retry.className = 'pv-btn primary';
+          retry.textContent = '↻ 重跑';
+          retry.addEventListener('click', retryCurrent);
+          actEl.appendChild(retry);
+        }
+      }
+    } else if (banner) banner.classList.add('hidden');
+
+    if (job.kind === 'image') renderImage(job);
+    else if (job.kind === 'video') renderVideo(job);
+    else renderStream(job);
+    renderProgress(job);
+    renderFaceGrid(job);
+  }
+
+  /** FPS 估算:对当前显示的实时帧率做 EMA。终态用 elapsed_ms 算平均 fps。 */
+  function updatePerfMetrics(job) {
+    const st = job.stats || {};
+    const now = Date.now();
+    const frames = st.frames_processed || 0;
+    if (job.status === 'running' || job.status === 'queued') {
+      if (state._fpsLastAt === 0) {
+        state._fpsLastAt = now;
+        state._fpsLastFrames = frames;
+      }
+      const dt = (now - state._fpsLastAt) / 1000;
+      const inst = dt > 0 ? Math.max(0, (frames - state._fpsLastFrames) / dt) : 0;
+      if (dt >= 0.5) {
+        state._fpsSamples.push(inst);
+        if (state._fpsSamples.length > 6) state._fpsSamples.shift();
+        state._fpsLastAt = now;
+        state._fpsLastFrames = frames;
+      }
+    } else {
+      state._fpsLastAt = 0; state._fpsSamples.length = 0;
+    }
+  }
+
+  function renderImage(job) {
+    const img = utils.$('#pv-img'); if (!img) return;
+    const vid = utils.$('#pv-vid'); if (vid) vid.classList.add('hidden');
+    img.classList.remove('hidden');
+    const frames = job.frames || [];
+    const first = frames.find(f => f.original_key) || frames[0];
+    const src = (first && first.original_key) || job.original_key;
+    if (src) {
+      img.onload = () => {
+        hideHint();
+        img.classList.add('is-loaded');
+        if (first && first.annotated_key) drawOverlay(job, first, img);
+      };
+      img.onerror = () => { showHint('原图加载失败'); clearOverlay(); };
+      img.src = utils.mediaUrl(src);
+    } else { img.classList.add('hidden'); showHint('无原图'); clearOverlay(); }
+  }
+
+  function renderVideo(job) {
+    const img = utils.$('#pv-img'); if (img) img.classList.add('hidden');
+    const vid = utils.$('#pv-vid'); if (!vid) return;
+    vid.classList.remove('hidden');
+    ensureDetDims(job);
+    if (!job.original_key) { showHint('无视频源'); return; }
+    const newSrc = utils.mediaUrl(job.original_key);
+    if (!vid.src || !vid.src.includes(encodeURIComponent(job.original_key))) vid.src = newSrc;
+    const first = (job.frames || []).find(f => f.annotated_key);
+    vid.poster = first ? utils.mediaUrl(first.annotated_key) : '';
+    vid.onloadedmetadata = () => { hideHint(); syncVideoOverlay(job, vid); };
+    vid.ontimeupdate = () => syncVideoOverlay(job, vid);
+    vid.onseeked = () => syncVideoOverlay(job, vid);
+    syncVideoOverlay(job, vid);
+  }
+
   function ensureDetDims(job) {
     if (_detDims[job.id]) return;
     const first = (job.frames || []).find(f => f.annotated_key);
@@ -792,486 +607,12 @@ const preview = (() => {
     probe.src = utils.mediaUrl(first.annotated_key);
   }
 
-  const showEmpty = () => { utils.$('#pv-empty').classList.remove('hidden'); utils.$('#pv-detail').classList.add('hidden'); };
-  const showDetail = () => { utils.$('#pv-empty').classList.add('hidden'); utils.$('#pv-detail').classList.remove('hidden'); };
-  const showHint = t => { const h = utils.$('#pv-stage-hint'); h.textContent = t; h.classList.remove('hidden'); };
-  const hideHint = () => utils.$('#pv-stage-hint').classList.add('hidden');
-
-  function resetMedia() {
-    const img = utils.$('#pv-img'); if (img) { img.removeAttribute('src'); img.classList.add('hidden'); img.classList.remove('is-loaded', 'is-blur'); }
-    const vid = utils.$('#pv-vid'); if (vid) { vid.removeAttribute('src'); vid.classList.add('hidden'); }
-    const db = utils.$('#pv-double'); if (db) db.classList.add('hidden');
-    const skel = utils.$('#pv-stage-skel'); if (skel) skel.classList.add('hidden');
-    const banner = utils.$('#pv-error-banner'); if (banner) {
-      banner.classList.add('hidden');
-      const msgEl = banner.querySelector('.pv-error-msg');
-      const actEl = banner.querySelector('.pv-error-act');
-      if (msgEl) msgEl.textContent = '';
-      if (actEl) actEl.innerHTML = '';
-    }
-    clearOverlay();
-  }
-
-  async function open(jobId) {
-    state.currentJobId = jobId; lastFrameIdx = -1; _lastAnnoFrameIdx = -1;
-    sidebar.setActive(jobId); showDetail(); showHint('加载中…'); resetMedia(); sse.detach();
-    // 同步 URL hash(分享可定位)
-    if (typeof hashRouter !== 'undefined') hashRouter.setJob(jobId);
-    try {
-      const job = await api.getJob(jobId);
-      state.currentJob = job; render(job);
-      if (job.status === 'running' || job.status === 'queued') sse.attach(jobId);
-    } catch (e) { toast.error('加载任务失败: ' + e.message); }
-  }
-
-  function close() {
-    state.currentJobId = null; state.currentJob = null;
-    lastFrameIdx = -1; _lastAnnoFrameIdx = -1;
-    sse.detach(); showEmpty(); resetMedia(); sidebar.setActive(null);
-    setLanUrl(null); // 清掉 LAN URL 按钮,避免脏状态
-    if (typeof hashRouter !== 'undefined') hashRouter.clear();
-  }
-
-  function render(job) {
-    utils.$('#pv-title').textContent = job.display_name || job.id;
-    // id 元素渲染为 `#xxx...` + 可点的"复制链接"按钮
-    const idEl = utils.$('#pv-id');
-    if (idEl) {
-      idEl.classList.add('pv-id');
-      const short = '#' + (job.id || '').slice(0, 8);
-      idEl.innerHTML = '';
-      const text = document.createElement('span');
-      text.className = 'mono'; text.textContent = short;
-      idEl.appendChild(text);
-      const copy = document.createElement('button');
-      copy.className = 'pv-share-btn';
-      copy.title = '复制此任务的深链';
-      copy.textContent = '🔗';
-      copy.addEventListener('click', () => {
-        const url = location.origin + location.pathname + location.search + '#/job/' + encodeURIComponent(job.id);
-        navigator.clipboard.writeText(url).then(
-          () => toast.success('已复制深链'),
-          () => toast.error('复制失败'),
-        );
-      });
-      idEl.appendChild(copy);
-    }
-    utils.$('#pv-kind').textContent = job.kind || '?';
-    const st = job.stats || {};
-    const totalFrames = st.total_frames || (job.kind === 'image' ? job.frame_count : st.frames_processed) || st.frames_processed || 0;
-    utils.$('#pv-frames').textContent = `${st.frames_processed || 0} / ${totalFrames} 帧`;
-    utils.$('#pv-faces').textContent = `${job.face_count || 0} 张脸`;
-    utils.$('#pv-time').textContent = utils.fmtAbsTime(job.created_ms);
-    const status = job.status || 'queued';
-    const statusEl = utils.$('#pv-status'); statusEl.textContent = status; statusEl.className = 'pv-status ' + status;
-    utils.$('#pv-dot').className = 'pv-dot ' + status;
-    // v0.5:pv-cancel / pv-retry / pv-delete / pv-toggle-anno 等按钮被 kebab menu 替代,
-    // 这里只查询不再 toggle(若 DOM 不存在,直接跳过)。这些行保留是为了不破坏外部测试调用约定。
-    { const el = utils.$('#pv-cancel'); if (el) el.classList.toggle('hidden', !(status === 'running' || status === 'queued')); }
-    // Bug 2:error/cancelled 都显示原图 + 顶部红色 banner(带复制/重试按钮)
-    const banner = utils.$('#pv-error-banner');
-    if (status === 'error' || status === 'cancelled') {
-      const label = status === 'cancelled' ? '任务已取消' : '识别失败';
-      const msg = job.error ? `${label} · ${job.error}` : label;
-      if (banner) {
-        banner.classList.remove('hidden');
-        const msgEl = banner.querySelector('.pv-error-msg');
-        const actEl = banner.querySelector('.pv-error-act');
-        if (msgEl) msgEl.textContent = msg;
-        if (actEl) {
-          actEl.innerHTML = '';
-          if (job.error) {
-            const copy = document.createElement('button');
-            copy.textContent = '复制错误';
-            copy.title = '复制错误信息到剪贴板';
-            copy.addEventListener('click', () => {
-              const text = `[${(job.display_name || job.id)}] ${job.error || label}`;
-              navigator.clipboard.writeText(text).then(
-                () => toast.success('已复制错误'),
-                () => toast.error('复制失败'),
-              );
-            });
-            actEl.appendChild(copy);
-          }
-          const canRetry = job.original_input || (job.kind === 'image' && job.original_key);
-          if (canRetry) {
-            const retry = document.createElement('button');
-            retry.className = 'primary';
-            retry.textContent = '↻ 重跑';
-            retry.addEventListener('click', retryCurrent);
-            actEl.appendChild(retry);
-          }
-        }
-      }
-    } else if (banner) {
-      banner.classList.add('hidden');
-    }
-    const canRetry = job.original_input || (job.kind === 'image' && job.original_key);
-    { const retryBtn = utils.$('#pv-retry'); if (retryBtn) retryBtn.classList.toggle('hidden', !canRetry); }
-    if (job.error && status === 'error') {
-      if (state.currentJob && state.currentJob.id === job.id && state.currentJob.status !== 'error') {
-        toast.error('任务错误: ' + job.error);
-      }
-    }
-    updatePerfMetrics(job);
-    renderDispatch(job);
-    if (job.kind === 'image') renderImage(job);
-    else if (job.kind === 'video') renderVideo(job);
-    else renderStream(job);
-    renderProgress(job); renderBreakdown(job); renderFaceGrid(job);
-    if (typeof timeline !== 'undefined') timeline.render(job.frames || [], job.id);
-    // 已经存在的任务(刷新 / 切换 / 直链):如果 original_key 已经落 S3,直接显示 LAN URL。
-    if (job.original_key) setLanUrl(utils.mediaUrl(job.original_key));
-    else setLanUrl(null);
-  }
-
-  /**
-   * 计算并显示 FPS / 已用时长。FPS 用最近 5 秒的 frames_processed 增量估出,
-   * 任务未运行时显式置为 "— fps"。
-   */
-  function updatePerfMetrics(job) {
-    const st = job.stats || {};
-    const now = Date.now();
-    const fpsEl = utils.$('#pv-fps');
-    const elapsedEl = utils.$('#pv-elapsed');
-    const frames = st.frames_processed || 0;
-    if (job.status === 'running' || job.status === 'queued') {
-      if (state._fpsLastAt === 0) {
-        state._fpsLastAt = now;
-        state._fpsLastFrames = frames;
-      }
-      const dt = (now - state._fpsLastAt) / 1000;
-      const inst = dt > 0 ? Math.max(0, (frames - state._fpsLastFrames) / dt) : 0;
-      if (dt >= 0.5) {
-        state._fpsSamples.push(inst);
-        if (state._fpsSamples.length > 6) state._fpsSamples.shift();
-        state._fpsLastAt = now;
-        state._fpsLastFrames = frames;
-      }
-      const fps = state._fpsSamples.length
-        ? state._fpsSamples.reduce((a, b) => a + b, 0) / state._fpsSamples.length
-        : inst;
-      if (fpsEl) { fpsEl.textContent = `${fps.toFixed(1)} fps`; fpsEl.classList.remove('idle'); }
-    } else {
-      // 终态:用 (frames / elapsed_ms) 算平均 fps
-      const ms = st.elapsed_ms || 1;
-      const avg = ms > 0 ? (frames * 1000) / ms : 0;
-      if (fpsEl) { fpsEl.textContent = avg > 0 ? `${avg.toFixed(1)} fps avg` : '— fps'; fpsEl.classList.toggle('idle', avg <= 0); }
-      state._fpsLastAt = 0; state._fpsSamples.length = 0;
-    }
-    if (elapsedEl) {
-      const ms = st.elapsed_ms || 0;
-      elapsedEl.textContent = ms < 1000 ? `${ms} ms` : ms < 60000 ? `${(ms/1000).toFixed(1)} s` : `${(ms/60000).toFixed(1)} m`;
-    }
-  }
-
-  // GPU/CPU dispatch 拆分 + fps 折线(只在有 dispatch 字段的 job 上画)。
-  function renderDispatch(job) {
-    const wrap = utils.$('#pv-dispatch');
-    if (!wrap) return;
-    const d = job.dispatch;
-    const algo = job.algo || (job.stats && job.stats.algo) || '';
-    const algoEl = utils.$('#pv-dispatch-algo');
-    if (algoEl) {
-      algoEl.textContent = algo ? algo.toUpperCase() : '—';
-      algoEl.dataset.algo = algo || '';
-    }
-    if (!d || (d.gpu_levels + d.cpu_levels) === 0) {
-      wrap.classList.add('hidden');
-      return;
-    }
-    wrap.classList.remove('hidden');
-    const gpuPct = Math.max(0, Math.min(100, Math.round(d.gpu_pct || 0)));
-    const gpuEl = utils.$('#pv-dispatch-gpu');
-    const cpuEl = utils.$('#pv-dispatch-cpu');
-    if (gpuEl) {
-      gpuEl.textContent = `GPU ${d.gpu_levels} (${gpuPct}%)`;
-      gpuEl.style.flex = String(d.gpu_levels);
-    }
-    if (cpuEl) {
-      cpuEl.textContent = `CPU ${d.cpu_levels} (${100 - gpuPct}%)`;
-      cpuEl.style.flex = String(d.cpu_levels);
-    }
-    const rate = d.cascade_pass_rate || 0;
-    const rateEl = utils.$('#pv-dispatch-rate');
-    if (rateEl) {
-      rateEl.textContent = rate > 0
-        ? `通过率 ${(rate * 100).toFixed(2)}%`
-        : `通过率 —`;
-    }
-    // sparkline: 从 stats.fps_window 读(后端每 500ms 推一次)
-    const fw = (job.perf && job.perf.fps_window) || (job.stats && job.stats.fps_window) || [];
-    const spark = utils.$('#pv-dispatch-spark');
-    if (spark && fw.length > 1) {
-      const w = spark.width, h = spark.height;
-      const ctx = spark.getContext('2d');
-      if (ctx) {
-        ctx.clearRect(0, 0, w, h);
-        const max = Math.max(1, ...fw);
-        ctx.lineWidth = 1.2;
-        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#4fc3f7';
-        ctx.beginPath();
-        const step = w / (fw.length - 1);
-        for (let i = 0; i < fw.length; i++) {
-          const x = i * step;
-          const y = h - (fw[i] / max) * (h - 2) - 1;
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-      }
-    }
-  }
-
-  function setBar(id, val, opts) {
-    const el = utils.$(id); if (!el) return;
-    const v = el.querySelector('.v'); if (!v) return;
-    v.textContent = val;
-    if (opts && opts.pulse) v.classList.add('pulse'); else v.classList.remove('pulse');
-  }
-
-  function renderBreakdown(job) {
-    const st = job.stats || {};
-    const frames = (job.frames || []).length;
-    const processed = st.frames_processed || 0;
-    const withFace = st.frames_with_face || 0;
-    const det = st.total_detections || job.face_count || 0;
-    const rate = processed > 0 ? (withFace / processed * 100) : 0;
-    let topScore = 0;
-    for (const f of job.frames || []) for (const fa of f.faces || []) if ((fa.score || 0) > topScore) topScore = fa.score;
-    const algo = (state.config && (state.config.algo || state.config.mode)) || (job.algo) || 'haar';
-    setBar('#pv-bb-det', String(det));
-    setBar('#pv-bb-fwf', processed > 0 ? `${withFace} / ${processed}` : '0');
-    setBar('#pv-bb-rate', processed > 0 ? `${rate.toFixed(1)}%` : '—');
-    setBar('#pv-bb-top', topScore > 0 ? topScore.toFixed(2) : '—');
-    setBar('#pv-bb-cluster', processed > 0 ? String(clusterFaces(collectFaces(job)).length) : '0');
-    setBar('#pv-bb-algo', algo);
-  }
-
-  function collectFaces(job) {
-    const out = [];
-    for (const f of job.frames || []) for (const fa of f.faces || []) {
-      out.push({ ts: f.timestamp_ms, x: fa.x, y: fa.y, w: fa.w, h: fa.h, score: fa.score, key: fa.key, frame: f });
-    }
-    return out;
-  }
-
-  function renderImage(job) {
-    const img = utils.$('#pv-img');
-    const dbl = utils.$('#pv-double');
-    const sc = utils.$('#pv-shared-controls');
-    if (!img) return;
-    if (dbl) dbl.classList.add('hidden');
-    if (sc) sc.classList.add('hidden');
-    img.classList.remove('hidden');
-    const frames = job.frames || [];
-    const first = frames.find(f => f.original_key) || frames[0];
-    // 优先用 frame.original_key;没有时降级到 job.original_key(error 时只有这个)
-    const src = (first && first.original_key) || job.original_key;
-    if (src) {
-      img.onload = () => {
-        hideHint();
-        img.classList.add('is-loaded');       // blur-up:清晰后淡入
-        const skel = utils.$('#pv-stage-skel');
-        if (skel) skel.classList.add('hidden');
-        if (first && first.annotated_key) drawOverlay(job, first, img);
-      };
-      img.onerror = () => {
-        showHint('原图加载失败'); clearOverlay();
-        const skel = utils.$('#pv-stage-skel');
-        if (skel) skel.classList.add('hidden');
-      };
-      // blur-up:先骨架屏,src 变化时重置加载态
-      const skel = utils.$('#pv-stage-skel');
-      if (skel) skel.classList.remove('hidden');
-      img.classList.remove('is-loaded');
-      img.classList.add('is-blur');
-      img.src = utils.mediaUrl(src);
-      img.ondblclick = () => {
-        const frame = (job.frames || []).find(f => f.original_key) || job.frames[0];
-        if (frame && typeof lightbox !== 'undefined' && lightbox && lightbox.open) lightbox.open(frame);
-      };
-    } else { img.classList.add('hidden'); showHint('无原图'); clearOverlay(); }
-  }
-
-  function renderVideo(job) {
-    const img = utils.$('#pv-img');
-    const vid = utils.$('#pv-vid');
-    if (!vid) return;
-    if (img) img.classList.add('hidden');
-    vid.classList.remove('hidden');
-    ensureDetDims(job);
-    if (!job.original_key) { showHint('无视频源'); return; }
-    const newSrc = utils.mediaUrl(job.original_key);
-    if (!vid.src || !vid.src.includes(encodeURIComponent(job.original_key))) vid.src = newSrc;
-    const first = (job.frames || []).find(f => f.annotated_key);
-    vid.poster = first ? utils.mediaUrl(first.annotated_key) : '';
-    vid.onloadedmetadata = () => {
-      hideHint();
-      syncVideoOverlay(job, vid);
-    };
-    vid.ontimeupdate = () => syncVideoOverlay(job, vid);
-    vid.onseeked = () => syncVideoOverlay(job, vid);
-    syncVideoOverlay(job, vid);
-  }
-
-  function syncVideoOverlayDual(job) {
-    const orig = utils.$('#pv-orig'); if (!orig) return;
-    const frames = job.frames || []; if (!frames.length) return;
-    const cur = orig.currentTime * 1000;
-    // 视频任务只有检测到人脸的帧才入库;找时间上最接近当前播放位置的帧。
-    // 允许 +80ms 前瞻(与检测帧对齐)和 400ms 后窗;超出后窗说明当前
-    // 处于无脸区间,必须清掉上一帧残留的框。
-    let best = null;
-    for (const f of frames) {
-      if (f.annotated_key && f.timestamp_ms <= cur + 80) best = f;
-      else if (f.timestamp_ms > cur + 80) break;
-    }
-    if (best && cur - best.timestamp_ms <= 400 && best.index !== _lastAnnoFrameIdx) {
-      _lastAnnoFrameIdx = best.index;
-      drawOverlayOnAnno(job, best);
-    } else if ((!best || cur - best.timestamp_ms > 400) && _lastAnnoFrameIdx !== -1) {
-      _lastAnnoFrameIdx = -1;
-      clearOverlay();
-    }
-  }
-  function syncOrigByAnnoTime(job) {
-    const anno = utils.$('#pv-anno'), orig = utils.$('#pv-orig');
-    if (!anno || !orig) return;
-    if (Math.abs(orig.currentTime - anno.currentTime) > 0.4) orig.currentTime = anno.currentTime;
-  }
-  function drawOverlayOnAnno(job, frame) {
-    if (!state.annoVisible) return clearOverlay();
-    const anno = utils.$('#pv-anno'), c = utils.$('#pv-overlay'), stage = utils.$('#pv-stage');
-    if (!anno || !c || !stage) return;
-    const rect = stage.getBoundingClientRect(), m = anno.getBoundingClientRect();
-    c.style.left = (m.left - rect.left) + 'px';
-    c.style.top = (m.top - rect.top) + 'px';
-    c.style.width = m.width + 'px'; c.style.height = m.height + 'px';
-    c.width = m.width; c.height = m.height;
-    // 人脸坐标是检测帧(ffmpeg scale=480)空间,不是原视频空间。
-    // 检测帧尺寸异步从首张标注帧 PNG 读(_detDims);拿到前用坐标
-    // 上界兜底(避免首屏画错位置)。
-    const dims = _detDims[job.id];
-    const natW = dims ? dims.w : (frame.faces[0] ? frame.faces[0].w * 2 : 480);
-    const natH = dims ? dims.h : 270;
-    drawBoxes(c, frame, natW, natH);
-  }
-
-  function refreshSharedProgress() {
-    const o = utils.$('#pv-orig'), a = utils.$('#pv-anno');
-    const fill = utils.$('#pv-shared-fill'); if (!fill) return;
-    const dur = (o && o.duration) || (a && a.duration) || 0;
-    const t = (o && o.currentTime) || (a && a.currentTime) || 0;
-    const pct = dur > 0 ? (t / dur) * 100 : 0;
-    fill.style.width = pct + '%';
-    const handle = utils.$('#pv-shared-handle'); if (handle) handle.style.left = pct + '%';
-    const time = utils.$('#pv-shared-time'); if (time) time.textContent = `${utils.fmtTime(t * 1000)} / ${utils.fmtTime(dur * 1000)}`;
-    const marks = utils.$('#pv-shared-marks'); if (marks && state.currentJob) {
-      marks.innerHTML = '';
-      const frames = (state.currentJob.frames || []).filter(f => f.faces && f.faces.length);
-      const max = 60; const step = Math.max(1, Math.floor(frames.length / max));
-      for (let i = 0; i < frames.length; i += step) {
-        const f = frames[i];
-        const pctTs = dur > 0 ? (f.timestamp_ms / 1000 / dur) * 100 : 0;
-        if (pctTs > 100) continue;
-        const m = document.createElement('div');
-        m.className = 'pv-shared-mark';
-        m.style.left = pctTs + '%';
-        m.title = utils.fmtTime(f.timestamp_ms);
-        m.addEventListener('click', () => {
-          if (o) { o.currentTime = f.timestamp_ms / 1000; o.play().catch(() => {}); }
-        });
-        marks.appendChild(m);
-      }
-    }
-  }
-
-  // 双 video 互锁同步 play/pause/seeked/ratechange/ended
-  function bindSync(a, b) {
-    if (a._syncBoundTo === b) return;
-    a._syncBoundTo = b; b._syncBoundTo = a;
-    let locked = false;
-    const mirror = (src, dst) => () => {
-      if (locked) return;
-      locked = true;
-      try {
-        if (src.playbackRate && dst.playbackRate !== src.playbackRate) dst.playbackRate = src.playbackRate;
-        if (Math.abs((dst.currentTime || 0) - (src.currentTime || 0)) > 0.12) dst.currentTime = src.currentTime;
-        if (!src.paused && dst.paused) dst.play().catch(() => {});
-        if (src.paused && !dst.paused) dst.pause();
-      } finally {
-        requestAnimationFrame(() => { locked = false; });
-      }
-    };
-    a.addEventListener('play', mirror(a, b));
-    a.addEventListener('pause', mirror(a, b));
-    a.addEventListener('seeked', mirror(a, b));
-    a.addEventListener('ratechange', mirror(a, b));
-    a.addEventListener('ended', mirror(a, b));
-    b.addEventListener('play', mirror(b, a));
-    b.addEventListener('pause', mirror(b, a));
-    b.addEventListener('seeked', mirror(b, a));
-    b.addEventListener('ratechange', mirror(b, a));
-    b.addEventListener('ended', mirror(b, a));
-  }
-
-  function initSharedControls() {
-    const play = utils.$('#pv-shared-play');
-    const track = utils.$('#pv-shared-track');
-    const rate = utils.$('#pv-shared-rate');
-    if (play) play.addEventListener('click', () => {
-      const o = utils.$('#pv-orig'); if (!o) return;
-      if (o.paused) o.play().catch(() => {}); else o.pause();
-    });
-    if (track) track.addEventListener('click', (e) => {
-      const o = utils.$('#pv-orig'); if (!o || !o.duration) return;
-      const rect = track.getBoundingClientRect();
-      const x = (e.clientX - rect.left) / rect.width;
-      o.currentTime = Math.max(0, Math.min(1, x)) * o.duration;
-    });
-    if (rate) rate.addEventListener('change', () => {
-      const v = parseFloat(rate.value) || 1;
-      const o = utils.$('#pv-orig'), a = utils.$('#pv-anno');
-      if (o) o.playbackRate = v;
-      if (a) a.playbackRate = v;
-    });
-    const o = utils.$('#pv-orig');
-    if (o) {
-      o.addEventListener('play', () => { const b = utils.$('#pv-shared-play'); if (b) b.textContent = '⏸'; });
-      o.addEventListener('pause', () => { const b = utils.$('#pv-shared-play'); if (b) b.textContent = '▶'; });
-    }
-  }
-
-  function initDivider() {
-    const div = utils.$('#pv-divider'); const dbl = utils.$('#pv-double');
-    const left = utils.$('#pv-half-orig'); const right = utils.$('#pv-half-anno');
-    if (!div || !dbl || !left || !right) return;
-    let dragging = false;
-    div.addEventListener('pointerdown', (e) => { dragging = true; div.setPointerCapture(e.pointerId); });
-    div.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
-      const rect = dbl.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const lpct = Math.max(0.15, Math.min(0.85, x / rect.width));
-      left.style.flex = `0 0 calc(${lpct * 100}% - 2px)`;
-      right.style.flex = '1 1 0';
-      const job = state.currentJob;
-      if (job && _lastAnnoFrameIdx !== -1) {
-        const cur = (job.frames || []).find(fr => fr.index === _lastAnnoFrameIdx);
-        if (cur) drawOverlayOnAnno(job, cur);
-      }
-    });
-    div.addEventListener('pointerup', (e) => { dragging = false; div.releasePointerCapture(e.pointerId); });
-  }
-
   function syncVideoOverlay(job, vid) {
     const frames = job.frames || []; if (!frames.length) return;
     const cur = vid.currentTime * 1000;
-    // 视频任务只入库检测到人脸的帧;取时间上最接近播放位置的帧。
-    // 允许 +80ms 前瞻、400ms 后窗;超出后窗属于无脸区间,清掉残留框。
     let best = null;
     for (const f of frames) {
-      if (f.timestamp_ms <= cur + 80) best = f;
+      if (f.annotated_key && f.timestamp_ms <= cur + 80) best = f;
       else if (f.timestamp_ms > cur + 80) break;
     }
     if (best && cur - best.timestamp_ms <= 400) {
@@ -1285,16 +626,12 @@ const preview = (() => {
 
   function renderStream(job) {
     const img = utils.$('#pv-img');
-    const dbl = utils.$('#pv-double');
-    const sc = utils.$('#pv-shared-controls');
+    const vid = utils.$('#pv-vid'); if (vid) vid.classList.add('hidden');
     if (!img) return;
-    if (dbl) dbl.classList.add('hidden');
-    if (sc) sc.classList.add('hidden');
     img.classList.remove('hidden');
     const frames = job.frames || [];
     const last = [...frames].reverse().find(f => f.original_key) || frames[frames.length - 1];
     if (!last) {
-      // 没有 frame 时降级到 job.original_key
       if (job.original_key) {
         img.onload = () => hideHint();
         img.onerror = () => showHint('原图加载失败');
@@ -1307,13 +644,10 @@ const preview = (() => {
     img.onload = () => {
       hideHint();
       img.classList.add('is-loaded');
-      const skel = utils.$('#pv-stage-skel');
-      if (skel) skel.classList.add('hidden');
       drawOverlay(job, last, img);
     };
     img.onerror = () => { showHint('原图加载失败'); };
     img.classList.remove('is-loaded');
-    img.classList.add('is-blur');
     img.src = utils.mediaUrl(last.original_key) + (last.original_key && last.original_key.includes('?') ? '&' : '?') + 'v=' + last.index;
   }
 
@@ -1335,8 +669,6 @@ const preview = (() => {
     drawBoxes(c, frame, mediaEl.naturalWidth || mediaEl.videoWidth, mediaEl.naturalHeight || mediaEl.videoHeight);
   }
 
-  // 视频任务的叠加:人脸坐标基于检测帧(ffmpeg scale=480)空间,必须按
-  // _detDims 缩放,而不是视频原始分辨率。
   function drawVideoOverlay(job, frame, vid) {
     if (!state.annoVisible) return clearOverlay();
     const c = utils.$('#pv-overlay'), stage = utils.$('#pv-stage');
@@ -1355,7 +687,6 @@ const preview = (() => {
   function drawBoxes(canvas, frame, natW, natH) {
     const ctx = canvas.getContext('2d'); if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (!state.annoVisible) return;
     const faces = (frame && frame.faces) || []; if (!faces.length) return;
     const s = Math.min(canvas.width / natW, canvas.height / natH);
     ctx.lineWidth = 2; ctx.strokeStyle = '#4fc3f7';
@@ -1400,623 +731,77 @@ const preview = (() => {
     utils.$('#pv-prog-fill').style.width = pct + '%';
     utils.$('#pv-prog-text').textContent = `${processed} / ${total}`;
     utils.$('#pv-prog-pct').textContent = pct.toFixed(0) + '%';
-    const marks = utils.$('#pv-prog-marks'); if (marks) marks.innerHTML = '';
-    if (total > 0) {
-      const max = 80, step = Math.max(1, Math.floor((job.frames || []).length / max));
-      let count = 0;
-      for (let i = 0; i < (job.frames || []).length; i += step) {
-        const f = job.frames[i];
-        if (f.faces && f.faces.length) {
-          const m = document.createElement('div');
-          m.className = 'pv-prog-mark';
-          m.style.left = ((f.index / total) * 100) + '%';
-          marks.appendChild(m);
-          if (++count > max) break;
-        }
-      }
-    }
   }
 
   function renderFaceGrid(job) {
-    const grid = utils.$('#pv-faces-grid');
-    const all = [];
+    const grid = utils.$('#pv-faces-grid'); if (!grid) return;
+    const faces = [];
     for (const f of job.frames || []) {
       for (const face of (f.faces || [])) {
-        all.push({ ts: f.timestamp_ms, key: face.key, score: face.score, frame: f, x: face.x, y: face.y, w: face.w, h: face.h });
+        faces.push({ ts: f.timestamp_ms, key: face.key, score: face.score, frame: f, x: face.x, y: face.y, w: face.w, h: face.h });
       }
     }
-    const filtered = all.filter(f => (f.score || 0) >= state.faceScoreMin);
-    const sorters = {
-      'time':       (a, b) => a.ts - b.ts,
-      'score-desc': (a, b) => b.score - a.score,
-      'score-asc':  (a, b) => a.score - b.score,
-      'size-desc':  (a, b) => (b.w * b.h) - (a.w * a.h),
-    };
-    filtered.sort(sorters[state.faceSort] || sorters.time);
-    const clusters = clusterFaces(filtered);
-    const totalClusters = clusterFaces(all).length;
-    utils.$('#pv-faces-count').textContent = filtered.length === all.length
-      ? (clusters.length ? `${all.length} 张 · ${clusters.length} 组` : '—')
-      : `${filtered.length} / ${all.length} 张 · ${clusters.length}/${totalClusters} 组`;
-    if (!filtered.length) {
-      const msg = all.length ? '当前阈值过滤掉所有结果' : '尚未出现人脸';
-      grid.innerHTML = `<div class="empty">${msg}</div>`;
+    if (!faces.length) {
+      grid.innerHTML = '<div class="empty">尚未出现人脸</div>';
       return;
     }
-    const useClusters = state.faceSort === 'time';
-    // DocumentFragment 批插入:避免 N 次 layout reflow。
-    // 100 张脸卡的场景下,逐 appendChild 触发 ~100 次 style recalc;
-    // 用 fragment 只触发 1 次。
+    // 简版 cluster:按 ts 增量 < 2s 视为同一人
+    const clusters = [];
+    let cur = [faces[0]];
+    for (let i = 1; i < faces.length; i++) {
+      const dt = faces[i].ts - faces[i - 1].ts;
+      if (dt >= 0 && dt < 2000) cur.push(faces[i]);
+      else { clusters.push(cur); cur = [faces[i]]; }
+    }
+    clusters.push(cur);
     const frag = document.createDocumentFragment();
-    const cards = [];
-    if (useClusters) {
-      for (const cl of clusters) {
-        const rep = cl.rep;
-        const card = makeFaceCard(rep, cl.members.length);
-        card.addEventListener('click', () => seekToFrame(rep.frame));
-        // 双击打开 lightbox(单双击共存:单击跳视频,双击看大图)
-        card.addEventListener('dblclick', () => lightbox.open(rep.frame));
-        frag.appendChild(card); cards.push(card);
-      }
-    } else {
-      // 按其他排序时不聚类(否则代表帧错位),逐条渲染
-      for (const f of filtered) {
-        const card = makeFaceCard(f, 1);
-        card.addEventListener('click', () => seekToFrame(f.frame));
-        card.addEventListener('dblclick', () => lightbox.open(f.frame));
-        frag.appendChild(card); cards.push(card);
-      }
+    for (const cl of clusters) {
+      const rep = cl[Math.floor(cl.length / 2)];
+      const card = document.createElement('div');
+      card.className = 'face-card';
+      card.innerHTML = `
+        <div class="fc-img-wrap">
+          <div class="fc-skel"></div>
+          <img loading="lazy" decoding="async" data-src="${utils.escapeHtml(utils.mediaUrl(rep.key))}" alt="人脸">
+          ${rep.frame ? `<div class="fc-idx">#${rep.frame.index}</div>` : ''}
+          <div class="fc-time">⏱ ${utils.fmtTime(rep.ts)}</div>
+          ${cl.length > 1 ? `<div class="fc-badge">×${cl.length}</div>` : ''}
+        </div>
+        <div class="fc-score">score <span>${rep.score.toFixed(2)}</span></div>`;
+      const img = card.querySelector('img');
+      if (img) img.addEventListener('load', () => {
+        img.classList.add('is-loaded');
+        const skel = card.querySelector('.fc-skel');
+        if (skel) skel.classList.add('is-done');
+      });
+      card.addEventListener('click', () => seekToFrame(rep.frame));
+      frag.appendChild(card);
+      if (state.faceCardObserver) state.faceCardObserver.observe(img);
     }
-    grid.replaceChildren(frag); // 单次 reflow
-    // IntersectionObserver 一次性 observe,不要再走 querySelectorAll
-    if (state.faceCardObserver) {
-      for (const c of cards) {
-        const img = c.querySelector('img[data-src]');
-        if (img) state.faceCardObserver.observe(img);
-      }
-    }
-  }
-
-  function makeFaceCard(rep, members) {
-    const card = document.createElement('div');
-    card.className = 'face-card';
-    const idxText = rep.frame ? `#${rep.frame.index}` : '';
-    card.innerHTML = `
-      <div class="fc-img-wrap">
-        <div class="fc-skel"></div>
-        <img loading="lazy" decoding="async" data-src="${utils.escapeHtml(utils.mediaUrl(rep.key))}" alt="人脸缩略图">
-        ${idxText ? `<div class="fc-idx">${idxText}</div>` : ''}
-        <div class="fc-time">⏱ ${utils.fmtTime(rep.ts)}</div>
-        ${members > 1 ? `<div class="fc-badge">×${members}</div>` : ''}
-      </div>
-      <div class="fc-score">score <span>${rep.score.toFixed(2)}</span></div>`;
-    // blur-up:img 加载完成后淡入 + 隐藏骨架屏
-    const img = card.querySelector('img');
-    if (img) img.addEventListener('load', () => {
-      img.classList.add('is-loaded');
-      const skel = card.querySelector('.fc-skel');
-      if (skel) skel.classList.add('is-done');
-    });
-    return card;
+    grid.replaceChildren(frag);
   }
 
   function seekToFrame(frame) {
     if (!frame) return;
-    const job = state.currentJob;
-    if (!job) return;
+    const job = state.currentJob; if (!job) return;
     if (job.kind === 'video') {
-      const o = utils.$('#pv-orig') || utils.$('#pv-vid');
-      if (o) { o.currentTime = frame.timestamp_ms / 1000; o.play().catch(() => {}); }
-    } else if (job.kind === 'image' || job.kind === 'stream') {
-      // 图片 / 流任务没有时间轴,seek = 打开 lightbox 直接看标注帧。
-      if (typeof lightbox !== 'undefined' && lightbox && lightbox.open) lightbox.open(frame);
+      const v = utils.$('#pv-vid'); if (v) { v.currentTime = frame.timestamp_ms / 1000; v.play().catch(() => {}); }
     }
-  }
-
-  function initFaceFilters() {
-    const score = utils.$('#pv-ff-score');
-    const scoreVal = utils.$('#pv-ff-score-val');
-    const sort = utils.$('#pv-ff-sort');
-    // 从持久化值同步到 UI
-    if (score) score.value = String(Math.round(state.faceScoreMin * 100));
-    if (scoreVal) scoreVal.textContent = state.faceScoreMin.toFixed(2);
-    if (sort) sort.value = state.faceSort;
-    if (score) score.addEventListener('input', () => {
-      state.faceScoreMin = (parseInt(score.value, 10) || 0) / 100;
-      if (scoreVal) scoreVal.textContent = state.faceScoreMin.toFixed(2);
-      prefStore.write(prefStore.KEYS.faceScoreMin, state.faceScoreMin);
-      if (state.currentJob) renderFaceGrid(state.currentJob);
-    });
-    if (sort) sort.addEventListener('change', () => {
-      state.faceSort = sort.value;
-      prefStore.write(prefStore.KEYS.faceSort, state.faceSort);
-      if (state.currentJob) renderFaceGrid(state.currentJob);
-    });
-  }
-
-  function clusterFaces(raw) {
-    if (!raw.length) return [];
-    const DT_MS = 2000, DIST_PX = 140;
-    const clusters = []; let cur = [raw[0]];
-    for (let i = 1; i < raw.length; i++) {
-      const prev = cur[cur.length - 1], f = raw[i], dt = f.ts - prev.ts;
-      const pcx = (prev.x || 0) + (prev.w || 0) / 2, pcy = (prev.y || 0) + (prev.h || 0) / 2;
-      const fcx = (f.x || 0) + (f.w || 0) / 2, fcy = (f.y || 0) + (f.h || 0) / 2;
-      // 同一帧(dt==0)里的多张人脸一定是不同身份,不能合并;
-      // 跨帧且时间连续、位置接近才视为同一个人的轨迹。
-      if (dt > 0 && dt < DT_MS && Math.hypot(fcx - pcx, fcy - pcy) < DIST_PX) cur.push(f);
-      else { clusters.push(cur); cur = [f]; }
-    }
-    clusters.push(cur);
-    return clusters.map(c => ({ rep: c[Math.floor(c.length / 2)], members: c }));
   }
 
   function toggleAnno() {
     state.annoVisible = !state.annoVisible;
     prefStore.write(prefStore.KEYS.annoVisible, state.annoVisible ? '1' : '0');
-    const btn = utils.$('#pv-toggle-anno');
-    if (btn) {
-      btn.textContent = state.annoVisible ? '结果' : '原片';
-      btn.setAttribute('aria-pressed', state.annoVisible ? 'true' : 'false');
-    }
     if (state.currentJob) {
       if (state.annoVisible) render(state.currentJob);
       else clearOverlay();
     }
   }
 
-  /**
-   * 更新 preview 的 LAN URL 状态。用于视频 URL 导入后等 run_job 落 S3 的过程:
-   * upload.submitVideoUrl → pollLanUrl() → 命中时调本函数。
-   * LAN URL 是 `/media/<encoded key>` 形式,浏览器在同网段访问 20080 即可播放。
-   */
-  function setLanUrl(url) {
-    state.currentLanUrl = url || null;
-    const btn = utils.$('#pv-copy-lan');
-    const link = utils.$('#pv-open-lan');
-    if (url) {
-      if (btn) btn.classList.remove('hidden');
-      if (link) {
-        link.href = url;
-        link.classList.remove('hidden');
-      }
-      if (window.__track) window.__track('lan_url_ready', { kind: 'video' });
-    } else {
-      if (btn) btn.classList.add('hidden');
-      if (link) link.classList.add('hidden');
-    }
-  }
-
-  return { open, close, render, toggleAnno, showEmpty, showDetail, setLanUrl, initSharedControls, initDivider, initFaceFilters, updatePerfMetrics, renderDispatch, renderProgress, renderFaceGrid };
+  return { open, close, render, showEmpty, showDetail, toggleAnno, updatePerfMetrics };
 })();
 
-const upload = (() => {
-  function init() {
-    const on = (sel, fn) => { const el = utils.$(sel); if (el) el.addEventListener('click', fn); };
-    on('#tb-new', openModal);
-    on('#tb-help', () => utils.$('#modal-help').classList.remove('hidden'));
-    utils.$$('.new-type').forEach(b => b.addEventListener('click', () => selectType(b.dataset.type)));
-    // data-close 点击委托已由 modalKit.init() 统一处理
-    setupDropzone('#dz-image', '#file-image', files => {
-      if (typeof dropzonePreview !== 'undefined') dropzonePreview.renderImage(files);
-      if (files.length > 1) for (const f of files) submitImage(f); else submitImage(files[0]);
-      closeAllModals();
-    }, { accept: f => dropzonePreview.isImageFile(f), label: '图片' });
-    setupDropzone('#dz-video', '#file-video', files => {
-      if (typeof dropzonePreview !== 'undefined') dropzonePreview.renderVideo(files);
-      submitVideo(files[0]); closeAllModals();
-    }, { accept: f => (f.type && f.type.startsWith('video/')) || /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(f.name || ''), label: '视频' });
-    on('#video-url-go', () => {
-      const url = utils.$('#video-url').value.trim();
-      if (!url) return toast.warn('请输入视频 URL');
-      submitVideoUrl(url); closeAllModals();
-    });
-    utils.$('#video-url').addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); utils.$('#video-url-go').click(); }
-    });
-    on('#stream-go', () => {
-      const url = utils.$('#stream-url').value.trim();
-      if (!url) return toast.warn('请输入流地址');
-      submitStream(url); closeAllModals();
-    });
-    utils.$('#stream-url').addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); utils.$('#stream-go').click(); }
-    });
-    // 复制 LAN URL 按钮(可选,精简模板默认不渲染)
-    on('#pv-copy-lan', copyLanUrl);
-    // 上传队列:"清空" 按钮移除已完成 / 失败项
-    const uqClear = utils.$('#upload-queue-clear');
-    if (uqClear) uqClear.addEventListener('click', (e) => {
-      e.stopPropagation();
-      uploadQueue.clearDone();
-    });
-    setupGlobalDrop(); setupGlobalPaste();
-  }
-
-  const openModal = () => { utils.$('#modal-new').classList.remove('hidden'); selectType('image'); };
-  const closeAllModals = () => modalKit.closeAll();
-  /** 复制 LAN URL — 兼容 Clipboard API + execCommand fallback。 */
-  async function copyLanUrl() {
-    const url = state.currentLanUrl;
-    if (!url) return;
-    try {
-      await navigator.clipboard.writeText(url);
-      toast.success('已复制 LAN 链接');
-    } catch {
-      const ta = document.createElement('textarea');
-      ta.value = url; document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); toast.success('已复制 LAN 链接'); }
-      catch { toast.error('复制失败,请手动复制'); }
-      document.body.removeChild(ta);
-    }
-  }
-  function selectType(t) {
-    utils.$$('.new-type').forEach(b => {
-      const on = b.dataset.type === t; b.classList.toggle('active', on);
-    });
-    utils.$$('.new-pane').forEach(p => p.classList.add('hidden'));
-    const pane = utils.$('#pane-' + t); if (pane) pane.classList.remove('hidden');
-  }
-  /** 把一个或多个图片文件提交到上传队列(走 upload-queue.js)。
-   *  等价于旧的 submitImage(file),但走可见 UI + 并发控制 + 失败重试。 */
-  function submitImageFiles(files) {
-    if (!files || !files.length) return [];
-    const ids = uploadQueue.enqueue(files, 'image');
-    if (files.length >= 1) closeAllModals();
-    return ids;
-  }
-  /** 单文件图片上传(老 API;被 paste / emptyPaste / 对外暴露使用)。 */
-  function submitImage(file) { return submitImageFiles([file]); }
-  /** 视频文件:走 import/video;也走队列。 */
-  function submitVideoFiles(files) {
-    if (!files || !files.length) return [];
-    const ids = uploadQueue.enqueue(files, 'video');
-    closeAllModals();
-    return ids;
-  }
-  function submitVideo(file) { return submitVideoFiles([file]); }
-  async function loadConfig() {
-    const cfg = await api.getConfig();
-    state.config = cfg;
-    renderRuntimeChip(cfg);
-    // 用后端 available_algos 填充分享给图片/视频/流的上传算法下拉框。
-    // 注意:不要清掉"默认 (env / 配置)"选项(它在 HTML 里 hardcoded 为首项)。
-    const sel = utils.$('#new-algo-select');
-    if (sel && cfg && Array.isArray(cfg.available_algos)) {
-      while (sel.options.length > 1) sel.remove(1);
-      for (const a of cfg.available_algos) {
-        const opt = document.createElement('option');
-        opt.value = a; opt.textContent = a;
-        sel.appendChild(opt);
-      }
-    }
-  }
-  function renderRuntimeChip(cfg) {
-    const el = utils.$('#tb-runtime');
-    if (!el) return;
-    const dev = (cfg && cfg.embedder_device) || '';
-    if (!dev) { el.hidden = true; el.textContent = ''; el.removeAttribute('data-state'); return; }
-    el.hidden = false;
-    el.textContent = 'embedder · ' + dev;
-    // Sighted cue so an operator can tell at a glance whether the platform
-    // is actually running on the accelerator (cuda / tensorrt) or whether
-    // a graph / driver miss silently fell back to CPU.
-    let state = 'cpu';
-    if (dev.includes('cuda') || dev.includes('tensorrt')) state = 'gpu';
-    else if (dev === 'coreml' || dev === 'directml') state = 'accel';
-    el.setAttribute('data-state', state);
-  }
-  function setupDropzone(zoneSel, inputSel, handler, opts) {
-    const zone = utils.$(zoneSel), input = utils.$(inputSel); if (!zone || !input) return;
-    const accept = (opts && opts.accept) || (() => true);
-    const label  = (opts && opts.label) || '文件';
-    zone.addEventListener('click', e => { if (!e.target.closest('input')) input.click(); });
-    input.addEventListener('change', () => { if (input.files.length) handler(Array.from(input.files)); input.value = ''; });
-    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
-    zone.addEventListener('dragleave', e => { if (!zone.contains(e.relatedTarget)) zone.classList.remove('dragover'); });
-    // 修复(历史 bug):drop 到 modal 内 dropzone 也要真正上传(原来只 preventDefault)
-    // + 目录拖入支持:用 dropzonePreview.collectFromDataTransfer 递归 walk。
-    zone.addEventListener('drop', async e => {
-      e.preventDefault();
-      e.stopPropagation();
-      zone.classList.remove('dragover');
-      if (!e.dataTransfer) return;
-      const collected = await dropzonePreview.collectFromDataTransfer(e.dataTransfer, { accept });
-      if (!collected.length) {
-        toast.warn(`未识别到${label},请重试`);
-        return;
-      }
-      if (collected.length > 1) {
-        toast.info(`目录共 ${collected.length} 个${label},将作为单独任务依次提交`);
-      }
-      handler(collected.map(c => c.file));
-    });
-  }
-  /** 全屏拖放:dragenter 显示遮罩(#dropzone-overlay),drop 时按类型分发。 */
-  function setupGlobalDrop() {
-    let dragDepth = 0; // dragenter/leave 会成对触发,用计数避免闪烁
-    let hideTimer = null;
-    const overlay = () => utils.$('#dropzone-overlay');
-    const showOverlay = () => {
-      const o = overlay(); if (!o) return;
-      clearTimeout(hideTimer);
-      o.classList.remove('hidden');
-      o.setAttribute('aria-hidden', 'false');
-    };
-    const hideOverlay = () => {
-      const o = overlay(); if (!o) return;
-      hideTimer = setTimeout(() => { o.classList.add('hidden'); o.setAttribute('aria-hidden', 'true'); }, 60);
-    };
-    document.addEventListener('dragenter', e => {
-      if (!e.dataTransfer || Array.from(e.dataTransfer.types || []).indexOf('Files') < 0) return;
-      e.preventDefault();
-      dragDepth++;
-      // 新建 modal 已打开时,遮罩让位于 modal 内部的 dropzone
-      if (!utils.$('#modal-new').classList.contains('hidden')) return;
-      showOverlay();
-    });
-    document.addEventListener('dragover', e => {
-      if (e.dataTransfer) { e.preventDefault(); if (e.dataTransfer.dropEffect) e.dataTransfer.dropEffect = 'copy'; }
-    });
-    document.addEventListener('dragleave', e => {
-      if (!e.dataTransfer) return;
-      dragDepth = Math.max(0, dragDepth - 1);
-      if (dragDepth === 0) hideOverlay();
-    });
-    document.addEventListener('drop', async e => {
-      e.preventDefault();
-      dragDepth = 0;
-      hideOverlay();
-      if (!e.dataTransfer) return;
-      // modal 内的 dropzone 自己处理(z-index 更高,事件先到 modal)
-      if (!utils.$('#modal-new').classList.contains('hidden')) return;
-      // 目录拖入支持:先 walk 出文件清单,按扩展名/MIME 分发到图片/视频队列
-      const collected = await dropzonePreview.collectFromDataTransfer(e.dataTransfer);
-      const VIDEO_EXTS = /\.(mp4|mov|mkv|webm|avi|m4v)$/i;
-      const images = collected.filter(c => c.file.type ? c.file.type.startsWith('image/') : /\.(jpe?g|png|pgm|ppm|bmp|webp|tiff?)$/i.test(c.file.name));
-      const videos = collected.filter(c => c.file.type ? c.file.type.startsWith('video/') : VIDEO_EXTS.test(c.file.name));
-      const others = collected.length - images.length - videos.length;
-      if (images.length) {
-        submitImageFiles(images.map(c => c.file));
-        if (images.length > 1) toast.info(`目录中 ${images.length} 张图片将作为单独任务依次提交`);
-      }
-      if (videos.length) {
-        // 视频走单任务路径,只取第一个
-        submitVideoFiles([videos[0].file]);
-        if (videos.length > 1) toast.warn(`目录共 ${videos.length} 个视频,仅取第一个`);
-      }
-      if (!images.length && !videos.length) {
-        toast.warn('目录中没有可识别的图片或视频');
-      } else if (others > 0) {
-        toast.warn(`已忽略 ${others} 个不支持的文件`);
-      }
-    });
-  }
-  /** 全局粘贴:图片文件 → 图片任务;http(s)/rtsp URL 文本 → 流任务。 */
-  function setupGlobalPaste() {
-    document.addEventListener('paste', async e => {
-      if (e.target && e.target.matches && e.target.matches('input, textarea, [contenteditable]')) return;
-      const cd = e.clipboardData; if (!cd) return;
-      // 1) 剪贴板图片 → 直接建图片任务
-      for (const it of cd.items || []) {
-        if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
-          const f = it.getAsFile(); if (f) { e.preventDefault(); submitImage(f); return; }
-        }
-      }
-      // 2) 剪贴板文本是媒体 URL → 建流/视频任务
-      const text = (cd.getData && cd.getData('text')) || '';
-      const url = text.trim();
-      if (url && /^https?:\/\/\S+$/i.test(url) || (url && /^rtsp:\/\/\S+$/i.test(url))) {
-        // 图片扩展名 → 图片 URL 不支持直接建图(服务端只收文件),按流任务处理
-        e.preventDefault();
-        const isRtsp = url.startsWith('rtsp://');
-        if (!await confirmModal.open(
-          isRtsp ? '粘贴检测流地址' : '粘贴视频 URL',
-          `检测剪贴板中的地址:\n${url.slice(0, 120)}${url.length > 120 ? '…' : ''}\n\n是否创建${isRtsp ? '直播流' : '视频'}检测任务?`,
-          { okText: '创建任务' },
-        )) return;
-        submitStream(url);
-      }
-    });
-  }
-  // 从 modal 里的 #new-algo-select 读取用户当前选择的算法。空字符串
-  // 表示不覆盖 — 后端走 env / 默认。返回 undefined 时也不发送字段。
-  function getAlgoChoice() {
-    const sel = utils.$('#new-algo-select');
-    if (!sel) return undefined;
-    const v = (sel.value || '').trim();
-    return v ? v : undefined;
-  }
-  /** (单文件 submitImage / submitVideo 已上移;走 upload-queue 统一管理。) */
-  /** 视频 URL 导入:服务端 ffmpeg 拉取 + 一次性 Video job,处理完返回 S3 LAN URL。 */
-  async function submitVideoUrl(url) {
-    try {
-      const t0 = Date.now();
-      toast.info(`正在拉取 ${url.slice(0, 60)}…`);
-      const data = await api.importVideoUrl(url, getAlgoChoice());
-      if (data.error) {
-        if (window.__track) window.__track('upload_failed', { kind: 'video_url' });
-        // 后端新版契约带 error_hint(可读修复提示) + error_code(机器化),
-        // 优先展示 hint(若有)。
-        const msg = utils.explainError(data, '服务端错误');
-        return toast.error('导入失败: ' + msg);
-      }
-      apiCache.bustAll();
-      toast.success('已拉取,开始识别 #' + (data.job_id || '').slice(0, 8));
-      const job = await api.getJob(data.job_id);
-      sidebar.upsertJob(job); preview.open(job.id);
-      // 在 preview 打开后,定时轮询 /api/import/{id}/urls 直到 original_url 非空,
-      // 这样可以拿到 S3 LAN URL 然后显示"复制/打开"按钮。
-      pollLanUrl(data.job_id);
-    } catch (e) {
-      if (window.__track) window.__track('upload_exception', { kind: 'video_url', message: String(e.message || e).slice(0, 128) });
-      toast.error('导入失败: ' + e.message);
-    }
-  }
-  /** 当前 LAN URL 轮询句柄:切换/重复导入时先清掉旧的,避免多个定时器叠加。 */
-  let activeLanTimer = null;
-  /** 轮询 LAN URL 端点(轻量,只查内存);拿到后更新 preview。 */
-  function pollLanUrl(jobId) {
-    if (activeLanTimer) { clearInterval(activeLanTimer); activeLanTimer = null; }
-    let tries = 0;
-    const max = 60; // 60s 内
-    const t = setInterval(async () => {
-      tries++;
-      // 预览已关闭或切换到别的任务:立即停止,避免把 URL 写到无关任务上。
-      if (state.currentJobId !== jobId) {
-        clearInterval(t); activeLanTimer = null; return;
-      }
-      if (tries > max) { clearInterval(t); activeLanTimer = null; return; }
-      try {
-        const u = await api.importUrls(jobId);
-        if (u && u.original_url) {
-          preview.setLanUrl(u.original_url);
-          if (u.is_terminal) { clearInterval(t); activeLanTimer = null; }
-        }
-      } catch {}
-    }, 1000);
-    activeLanTimer = t;
-  }
-  async function submitStream(url) {
-    try {
-      const data = await api.postStream(url, getAlgoChoice());
-      if (data.error) {
-        if (window.__track) window.__track('upload_failed', { kind: 'stream' });
-        return toast.error('启动失败: ' + data.error);
-      }
-      if (window.__track) window.__track('upload_submitted', { kind: 'stream', algo: getAlgoChoice() || null });
-      apiCache.bustAll();
-      toast.success('已启动流 #' + (data.job_id || '').slice(0, 8));
-      const job = await api.getJob(data.job_id);
-      sidebar.upsertJob(job); preview.open(job.id);
-    } catch (e) {
-      if (window.__track) window.__track('upload_exception', { kind: 'stream', message: String(e.message || e).slice(0, 128) });
-      toast.error('启动失败: ' + e.message);
-    }
-  }
-  return { init, openModal, loadConfig, copyLanUrl,
-           submitImage: f => submitImage(f),
-           submitVideoUrl: u => submitVideoUrl(u),
-           submitStream: u => submitStream(u) };
-})();
-
-/**
- * Inspector 抽屉(右侧,v0.5 新增):
- *  - 默认收起,90% 用户不需要看到 Compare / Recognize / Stats;
- *  - 顶栏 tb-inspector / 快捷键 i / 点开后展开;
- *  - 在抽屉内切换对比 / 识别 / 统计 三个 tab。
- *  Compare / Recognize / Dashboard 模块原本注入到 #pv-detail;现在
- * 改注入到 #inspector [data-ins=...] 三个 panel(各自 module 文件已更新 host 选择器)。
- */
-const inspector = (() => {
-  let _open = false;
-  let _active = 'compare';
-  function open() {
-    _open = true;
-    document.body.classList.add('inspector-open');
-    const el = utils.$('#inspector'); if (el) el.setAttribute('aria-hidden', 'false');
-    const btn = utils.$('#tb-inspector'); if (btn) btn.setAttribute('aria-pressed', 'true');
-    activate(_active);
-    // Stats 是异步渲染,默认进来就拉一次(空 job 时无意义但 cheap)
-    if (_active === 'stats') dashboard.refresh();
-  }
-  function close() {
-    _open = false;
-    document.body.classList.remove('inspector-open');
-    const el = utils.$('#inspector'); if (el) el.setAttribute('aria-hidden', 'true');
-    const btn = utils.$('#tb-inspector'); if (btn) btn.setAttribute('aria-pressed', 'false');
-  }
-  function toggle() { _open ? close() : open(); }
-  function activate(name) {
-    _active = name;
-    utils.$$('#inspector .ins-tab').forEach(b => {
-      const on = b.dataset.ins === name;
-      b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false');
-    });
-    utils.$$('#inspector .ins-panel').forEach(p => {
-      p.classList.toggle('hidden', p.dataset.ins !== name);
-      p.classList.toggle('active', p.dataset.ins === name);
-    });
-  }
-  function init() {
-    utils.$$('#inspector .ins-tab').forEach(b => b.addEventListener('click', () => activate(b.dataset.ins)));
-    const closeBtn = utils.$('#ins-close');
-    if (closeBtn) closeBtn.addEventListener('click', close);
-  }
-  return { open, close, toggle, activate, init, get isOpen() { return _open; }, get active() { return _active; } };
-})();
-
-/**
- * 详情页 Tabs(结果 / 帧 / 统计 / 导出,v0.5 新增):
- *  - 默认 Tab 是「结果」 — 99% 用户进来就想看「这个人脸在哪」
- *  - 数字键 1/2/3/4 切换(全局快捷键)
- *  - 切换后调对应 panel 的渲染钩子(暂未实现 panel lazy render,直接显示/隐藏)
- */
-const tabs = (() => {
-  let _active = 'results';
-  const ORDER = ['results', 'frames', 'stats', 'export'];
-  function activate(name) {
-    if (!ORDER.includes(name)) return;
-    _active = name;
-    utils.$$('#pv-tabs .pv-tab').forEach(b => {
-      const on = b.dataset.tab === name;
-      b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false');
-    });
-    utils.$$('#pv-detail .pv-tab-panel').forEach(p => {
-      p.classList.toggle('active', p.dataset.panel === name);
-      p.classList.toggle('hidden', p.dataset.panel !== name);
-    });
-    // 切换到「统计」时,如果当前 job 有 dispatch 数据,重画一次
-    if (name === 'stats' && state.currentJob && typeof preview.renderDispatch === 'function') {
-      preview.renderDispatch(state.currentJob);
-    }
-  }
-  function next(dir) {
-    const i = ORDER.indexOf(_active);
-    activate(ORDER[(i + dir + ORDER.length) % ORDER.length]);
-  }
-  function init() {
-    utils.$$('#pv-tabs .pv-tab').forEach(b => b.addEventListener('click', () => activate(b.dataset.tab)));
-  }
-  return { activate, next, init, get active() { return _active; } };
-})();
-
-/**
- * 任务详情 kebab menu(⋯ 按钮,v0.5 新增):
- *  - 收纳「取消 / 重跑 / 标注切换 / 导出 JSON/CSV/ZIP / 复制深链 / 删除」
- *  - 保留顶部一行只有 title + status + LAN,核心信息密度低
- */
-const taskMenu = (() => {
-  function open(e) {
-    if (!state.currentJob) return;
-    const job = state.currentJob;
-    const items = [
-      { label: state.annoVisible ? '隐藏人脸标注' : '显示人脸标注', hint: 'A', onPick: () => preview.toggleAnno() },
-      { label: '复制任务深链', hint: '#', onPick: () => {
-        const url = location.origin + location.pathname + location.search + '#/job/' + encodeURIComponent(job.id);
-        navigator.clipboard.writeText(url).then(
-          () => toast.success('已复制深链'),
-          () => toast.error('复制失败'));
-      } },
-    ];
-    if (job.status === 'running' || job.status === 'queued') {
-      items.push({ label: '取消任务', hint: '⏹', danger: true, onPick: () => cancelCurrent() });
-    }
-    const canRetry = !!(job.original_input || (job.kind === 'image' && job.original_key));
-    if (canRetry) items.push({ label: '重跑任务', hint: '↻', onPick: () => retryCurrent() });
-    items.push({ label: '导出 JSON', hint: 'JSON', onPick: () => exportJSON() });
-    items.push({ label: '导出 CSV',  hint: 'CSV',  onPick: () => exportCSV() });
-    items.push({ label: '下载 ZIP',  hint: 'ZIP',  onPick: () => exportZip() });
-    items.push({ label: '删除任务',  hint: 'Del', danger: true, onPick: () => deleteCurrent() });
-    ctxMenu.show(e, items);
-  }
-  function init() {
-    const btn = utils.$('#pv-menu');
-    if (btn) btn.addEventListener('click', open);
-  }
-  return { init, open };
-})();
-
+/** SSE:服务端主动推 frame / heartbeat / done 事件。 */
 const sse = (() => {
   const scheduleRefresh = utils.throttleRaf(async () => {
     if (!state.currentJobId) return;
@@ -2027,37 +812,6 @@ const sse = (() => {
     } catch {}
   });
 
-  // 把后端 heartbeat 合并到 state.currentJob,触发便宜 DOM 更新,
-  // 不再每次都去拉 /api/jobs/:id。
-  // 期望 msg = { type:"heartbeat", fps, frames_processed,
-  //              gpu_levels, cpu_levels, gpu_pct,
-  //              cascade_evals, cascade_passes, fps_window? }
-  function applyHeartbeat(msg) {
-    const job = state.currentJob;
-    if (!job) return;
-    if (!job.stats) job.stats = {};
-    if (!job.dispatch) job.dispatch = {};
-    if (!job.perf) job.perf = { fps_window: [] };
-    if (msg.fps !== undefined) {
-      job.stats.frames_processed = msg.frames_processed || job.stats.frames_processed || 0;
-      const fw = job.perf.fps_window;
-      fw.push(msg.fps);
-      if (fw.length > 60) fw.shift();
-    }
-    if (msg.gpu_levels !== undefined) job.dispatch.gpu_levels = msg.gpu_levels;
-    if (msg.cpu_levels !== undefined) job.dispatch.cpu_levels = msg.cpu_levels;
-    if (msg.gpu_pct     !== undefined) job.dispatch.gpu_pct     = msg.gpu_pct;
-    if (msg.cascade_evals !== undefined) job.dispatch.cascade_evals = msg.cascade_evals;
-    if (msg.cascade_passes !== undefined) {
-      job.dispatch.cascade_passes = msg.cascade_passes;
-      const ev = job.dispatch.cascade_evals || 0;
-      job.dispatch.cascade_pass_rate = ev > 0 ? job.dispatch.cascade_passes / ev : 0;
-    }
-    // 局部刷新预览页的 dispatch / fps 单元
-    preview.updatePerfMetrics(job);
-    preview.renderDispatch(job);
-  }
-
   function attach(jobId) {
     detach();
     if (!('EventSource' in window)) return;
@@ -2066,47 +820,26 @@ const sse = (() => {
     es.onmessage = (ev) => {
       let msg; try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.type === 'frame') {
-        // 增量更新:不再为每帧触发一次 /api/jobs/{id} 全量重拉。
-        // 视频 / 流任务每 15fps 触发 scheduleRefresh 会给 server 带来 15 GET/s
-        // 的风暴;改成纯前端追加帧 + 调一次 preview 内部轻量 renderProgress。
         if (state.currentJob && msg.frame) {
           if (!Array.isArray(state.currentJob.frames)) state.currentJob.frames = [];
-          // 去重:后端偶尔会重发同一帧 index(并发批次边界),保留先到的。
           const idx = msg.frame.index;
           const dup = state.currentJob.frames.some(f => f && f.index === idx);
           if (!dup) state.currentJob.frames.push(msg.frame);
-          // inline:// 兜底 base64(优雅降级场景):让 preview 后续能直渲染。
           if (msg.inline) state.currentInline = msg.inline;
-          preview.renderProgress(state.currentJob);
-          preview.renderFaceGrid(state.currentJob);
+          preview.render(state.currentJob);
         }
-        // 单帧事件限频:旧逻辑走 rAF throttle;这里保持相同节流,把
-        // 重型的 preview.render() 降到 60fps 即可。
         scheduleRefresh();
       }
-      else if (msg.type === 'heartbeat') applyHeartbeat(msg);
-      else if (msg.type === 'detector') {
-        // 后端在任务启动时推 detector 事件:把 algo 记进 job.stats,
-        // 侧栏算法过滤 chips(stats.algo)依赖它。
-        if (state.currentJob) {
-          if (!state.currentJob.stats) state.currentJob.stats = {};
-          state.currentJob.stats.algo = msg.algo || msg.mode || state.currentJob.stats.algo;
-          sidebar.upsertJob({ id: state.currentJob.id, stats: { ...state.currentJob.stats } });
-          preview.renderDispatch(state.currentJob);
-        }
+      else if (msg.type === 'heartbeat') {
+        preview.updatePerfMetrics(state.currentJob || {});
+        scheduleRefresh();
       }
       else if (msg.type === 'done' || msg.type === 'cancelled' || msg.type === 'error') {
-        // 终态:不仅 detach + 刷新当前 job,还要 bust apiCache.listJobs 并
-        // 主动拉一次列表 — 否则 sidebar 仍会显示 stale "running",直到用户
-        // 切 tab 或手刷才会更新(visibility 触发)。
         detach();
         apiCache.bust('listJobs');
         scheduleRefresh();
-        // 异步刷新 sidebar,失败静默(KPI 2s 轮询兜底)
         if (api && api.listJobs && sidebar && sidebar.setJobs) {
-          api.listJobs().then(jobs => {
-            try { sidebar.setJobs(jobs); } catch {}
-          }).catch(() => {});
+          api.listJobs().then(jobs => { try { sidebar.setJobs(jobs); } catch {} }).catch(() => {});
         }
         if (msg.type === 'done') toast.success('任务完成');
         else if (msg.type === 'cancelled') toast.info('已停止');
@@ -2116,257 +849,267 @@ const sse = (() => {
     es.onerror = () => { /* browser auto-retry */ };
   }
   function detach() { if (state.eventSource) { state.eventSource.close(); state.eventSource = null; } }
-  return { attach, detach, applyHeartbeat };
+  return { attach, detach };
 })();
 
-/**
- * 人脸 lightbox:点击人脸卡片或双击主图打开。
- * - 展示当前 frame 的 annotated_key(后端已画好检测框)+ 框选详情
- * - 跨 frame 翻页:同一 job 内所有有脸帧都可导航
- * - 视频任务提供"跳到视频"按钮,定位到该时间戳
- */
-const lightbox = (() => {
-  const els = {};
-  let _frames = [];   // 当前 job 的所有 frame(只含带脸帧)
-  let _idx = 0;
-  // 缩放/平移状态
-  let _scale = 1, _tx = 0, _ty = 0;
-  let _activeFace = -1; // 当前高亮的 face index
-
+/** 上传:统一入口(图片 / 视频 / 流)— 走 uploadQueue。 */
+const upload = (() => {
   function init() {
-    els.modal = utils.$('#modal-lightbox');
-    els.img = utils.$('#lb-img');
-    els.overlay = utils.$('#lb-overlay');
-    els.stage = utils.$('#lb-stage');
-    els.skel = utils.$('#lb-skel');
-    els.meta = utils.$('#lb-meta');
-    els.pos = utils.$('#lb-pos');
-    els.prev = utils.$('#lb-prev');
-    els.next = utils.$('#lb-next');
-    els.seek = utils.$('#lb-seek');
-    els.zoomReset = utils.$('#lb-zoom-reset');
-    els.rail = utils.$('#lb-rail');
-    els.railCount = utils.$('#lb-rail-count');
-    els.railList = utils.$('#lb-rail-list');
-    if (!els.modal) return;
-    els.prev && els.prev.addEventListener('click', () => step(-1));
-    els.next && els.next.addEventListener('click', () => step(+1));
-    els.seek && els.seek.addEventListener('click', () => {
-      const f = _frames[_idx];
-      if (!f || !state.currentJob || state.currentJob.kind !== 'video') return;
-      const o = utils.$('#pv-orig') || utils.$('#pv-vid');
-      if (o) { o.currentTime = (f.timestamp_ms || 0) / 1000; o.play().catch(() => {}); }
-      close();
+    const on = (sel, fn) => { const el = utils.$(sel); if (el) el.addEventListener('click', fn); };
+    on('#tb-home', () => preview.close());
+    on('#pv-empty-new', () => openModal());
+    on('#pv-kebab', (e) => {
+      if (!state.currentJob) return;
+      const job = state.currentJob;
+      const items = [
+        { label: state.annoVisible ? '隐藏标注' : '显示标注', hint: 'A', onPick: () => preview.toggleAnno() },
+        { label: '复制任务 ID', hint: '⌗', onPick: () => {
+            navigator.clipboard.writeText(job.id).then(() => toast.success('已复制'), () => toast.error('复制失败'));
+          } },
+      ];
+      if (job.status === 'running' || job.status === 'queued') items.push({ label: '取消任务', hint: '⏹', danger: true, onPick: () => cancelCurrent() });
+      const canRetry = !!(job.original_input || (job.kind === 'image' && job.original_key));
+      if (canRetry) items.push({ label: '重跑任务', hint: '↻', onPick: () => retryCurrent() });
+      items.push({ label: '导出 JSON', hint: 'JSON', onPick: () => exportJSON() });
+      items.push({ label: '删除任务', hint: '⌫', danger: true, onPick: () => deleteCurrent() });
+      ctxMenu.show(e, items);
     });
-    els.zoomReset && els.zoomReset.addEventListener('click', () => resetZoom());
-    // 缩放 / 平移
-    els.stage && els.stage.addEventListener('wheel', onWheel, { passive: false });
-    els.stage && els.stage.addEventListener('pointerdown', onPointerDown);
-    // 键盘 ←/→ 翻页,Esc 关闭(已经在全局 initKeys 里统一处理 modal,这里只防重复)
-    document.addEventListener('keydown', (e) => {
-      if (els.modal.classList.contains('hidden')) return;
+    // 单一 dropzone:接受所有(图片 + 视频),按 MIME 分发
+    setupDropzone('#dz-unified', '#file-unified', files => {
+      const imgs = [], vids = [];
+      for (const f of files) {
+        if (f.type && f.type.startsWith('image/')) imgs.push(f);
+        else if (f.type && f.type.startsWith('video/')) vids.push(f);
+        else if (/\.(jpe?g|png|webp|bmp|gif)$/i.test(f.name || '')) imgs.push(f);
+        else if (/\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(f.name || '')) vids.push(f);
+      }
+      if (imgs.length) uploadQueue.enqueue(imgs, 'image');
+      if (vids.length) uploadQueue.enqueue([vids[0]], 'video'); // 视频一次一个
+      if (!imgs.length && !vids.length) toast.warn('未识别到可处理文件');
+      closeAllModals();
+    });
+    // URL 输入行:支持 http/https/m3u8 → 视频流 / rtsp → 流任务
+    const urlGo = utils.$('#unified-url');
+    if (urlGo) urlGo.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const url = urlGo.value.trim(); if (!url) return;
+        if (/^rtsp:\/\//i.test(url)) submitStream(url);
+        else submitVideoUrl(url);
+        closeAllModals();
+      }
+    });
+    setupGlobalDrop();
+    setupGlobalPaste();
+  }
+
+  function openModal() { utils.$('#modal-new').classList.remove('hidden'); setTimeout(() => utils.$('#unified-url')?.focus(), 50); }
+  function closeAllModals() { modalKit.closeAll(); }
+
+  function submitVideoUrl(url) {
+    toast.info(`正在拉取 ${url.slice(0, 60)}…`);
+    api.importVideoUrl(url).then(data => {
+      if (data.error) return toast.error('导入失败: ' + utils.explainError(data, '服务端错误'));
+      apiCache.bustAll();
+      toast.success('已拉取,开始识别 #' + (data.job_id || '').slice(0, 8));
+      api.getJob(data.job_id).then(job => { sidebar.upsertJob(job); preview.open(job.id); });
+    }).catch(e => toast.error('导入失败: ' + e.message));
+  }
+
+  function submitStream(url) {
+    api.postStream(url).then(data => {
+      if (data.error) return toast.error('启动失败: ' + data.error);
+      apiCache.bustAll();
+      toast.success('已启动流 #' + (data.job_id || '').slice(0, 8));
+      api.getJob(data.job_id).then(job => { sidebar.upsertJob(job); preview.open(job.id); });
+    }).catch(e => toast.error('启动失败: ' + e.message));
+  }
+
+  function setupDropzone(zoneSel, inputSel, handler) {
+    const zone = utils.$(zoneSel), input = utils.$(inputSel); if (!zone || !input) return;
+    zone.addEventListener('click', e => { if (!e.target.closest('input')) input.click(); });
+    input.addEventListener('change', () => { if (input.files.length) handler(Array.from(input.files)); input.value = ''; });
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+    zone.addEventListener('dragleave', e => { if (!zone.contains(e.relatedTarget)) zone.classList.remove('dragover'); });
+    zone.addEventListener('drop', async e => {
+      e.preventDefault(); e.stopPropagation(); zone.classList.remove('dragover');
+      if (!e.dataTransfer) return;
+      const collected = await dropzonePreview.collectFromDataTransfer(e.dataTransfer);
+      if (!collected.length) return toast.warn('未识别到文件,请重试');
+      handler(collected.map(c => c.file));
+    });
+  }
+
+  function setupGlobalDrop() {
+    let dragDepth = 0;
+    const showOverlay = () => utils.$('#dropzone-overlay')?.classList.remove('hidden');
+    const hideOverlay = () => utils.$('#dropzone-overlay')?.classList.add('hidden');
+    document.addEventListener('dragenter', e => {
+      if (!e.dataTransfer || Array.from(e.dataTransfer.types || []).indexOf('Files') < 0) return;
+      e.preventDefault(); dragDepth++;
+      if (!utils.$('#modal-new').classList.contains('hidden')) return;
+      showOverlay();
+    });
+    document.addEventListener('dragover', e => { if (e.dataTransfer) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+    document.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (dragDepth === 0) hideOverlay(); });
+    document.addEventListener('drop', async e => {
+      e.preventDefault(); dragDepth = 0; hideOverlay();
+      if (!e.dataTransfer) return;
+      if (!utils.$('#modal-new').classList.contains('hidden')) return;
+      const collected = await dropzonePreview.collectFromDataTransfer(e.dataTransfer);
+      const imgs = collected.filter(c => c.file.type?.startsWith('image/') || /\.(jpe?g|png|webp|bmp|gif)$/i.test(c.file.name));
+      const vids = collected.filter(c => c.file.type?.startsWith('video/') || /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(c.file.name));
+      if (imgs.length) uploadQueue.enqueue(imgs.map(c => c.file), 'image');
+      if (vids.length) uploadQueue.enqueue([vids[0].file], 'video');
+      if (!imgs.length && !vids.length) toast.warn('目录中没有可识别的图片/视频');
+    });
+  }
+
+  function setupGlobalPaste() {
+    document.addEventListener('paste', async e => {
       if (e.target && e.target.matches && e.target.matches('input, textarea, [contenteditable]')) return;
-      if (e.key === 'ArrowLeft')  { e.preventDefault(); step(-1); }
-      if (e.key === 'ArrowRight') { e.preventDefault(); step(+1); }
-      if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomAt(1.2, null); }
-      if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomAt(1 / 1.2, null); }
-      if (e.key === '0') { e.preventDefault(); resetZoom(); }
+      const cd = e.clipboardData; if (!cd) return;
+      for (const it of cd.items || []) {
+        if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
+          const f = it.getAsFile(); if (f) { e.preventDefault(); uploadQueue.enqueue([f], 'image'); return; }
+        }
+      }
+      const text = (cd.getData && cd.getData('text')) || '';
+      const url = text.trim();
+      if (/^https?:\/\/\S+$/i.test(url) || /^rtsp:\/\/\S+$/i.test(url)) {
+        if (!await confirmModal.open('粘贴 URL', `创建 ${/^rtsp/.test(url) ? '直播流' : '视频'} 任务?\n${url.slice(0, 100)}${url.length > 100 ? '…' : ''}`, { okText: '创建' })) return;
+        if (/^rtsp/.test(url)) submitStream(url); else submitVideoUrl(url);
+      }
     });
   }
 
-  function open(frame) {
-    const job = state.currentJob; if (!job || !els.modal) return;
-    _frames = (job.frames || []).filter(f => f.faces && f.faces.length);
-    _idx = Math.max(0, _frames.findIndex(f => f.index === frame.index));
-    if (_idx < 0) _idx = 0;
-    _activeFace = -1;
-    resetZoom();
-    showCurrent();
-    els.modal.classList.remove('hidden');
+  function loadConfig() {
+    api.getConfig().then(cfg => {
+      state.config = cfg || {};
+      const dev = state.config.embedder_device || '';
+      const el = utils.$('#tb-runtime');
+      if (el) {
+        if (!dev) { el.hidden = true; el.textContent = ''; el.removeAttribute('data-state'); }
+        else {
+          el.hidden = false;
+          el.textContent = dev;
+          let s = 'cpu';
+          if (dev.includes('cuda') || dev.includes('tensorrt')) s = 'gpu';
+          else if (dev === 'coreml' || dev === 'directml') s = 'accel';
+          el.setAttribute('data-state', s);
+        }
+      }
+    }).catch(() => {});
   }
 
-  function close() {
-    if (els.modal) els.modal.classList.add('hidden');
-    resetZoom();
-    _activeFace = -1;
-  }
+  return { init, openModal, loadConfig, submitVideoUrl, submitStream };
+})();
 
-  function resetZoom() {
-    _scale = 1; _tx = 0; _ty = 0;
-    applyTransform();
-    if (els.zoomReset) els.zoomReset.hidden = true;
-  }
-
-  function applyTransform() {
-    if (!els.img) return;
-    els.img.style.transform = `translate(${_tx}px, ${_ty}px) scale(${_scale})`;
-    if (els.zoomReset) {
-      els.zoomReset.hidden = _scale === 1;
-      els.zoomReset.textContent = `${Math.round(_scale * 100)}%`;
+/** 全局快捷键 + 任务级操作(cancel / retry / 导出 JSON)。 */
+function initKeys() {
+  document.addEventListener('keydown', e => {
+    const inField = e.target && e.target.matches && e.target.matches('input, textarea, [contenteditable]');
+    if (e.key === 'Escape') {
+      let closed = false;
+      utils.$$('.modal').forEach(m => { if (!m.classList.contains('hidden')) { m.classList.add('hidden'); closed = true; } });
+      if (closed) { e.preventDefault(); return; }
+      if (state.currentJobId) { preview.close(); e.preventDefault(); return; }
     }
-    // 同步 overlay 位置
-    if (els.overlay && els.stage) drawOverlay();
-  }
-
-  function onWheel(e) {
-    if (els.modal.classList.contains('hidden')) return;
-    e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-    zoomAt(factor, { x: e.clientX, y: e.clientY });
-  }
-
-  function zoomAt(factor, anchor) {
-    const old = _scale;
-    const next = Math.max(0.5, Math.min(6, _scale * factor));
-    if (next === _scale) return;
-    if (anchor && els.stage) {
-      const rect = els.stage.getBoundingClientRect();
-      const ax = anchor.x - rect.left - rect.width / 2;
-      const ay = anchor.y - rect.top - rect.height / 2;
-      // 调整 tx/ty 使 anchor 点在缩放后仍对齐
-      _tx = ax - (ax - _tx) * (next / old);
-      _ty = ay - (ay - _ty) * (next / old);
-    }
-    _scale = next;
-    if (els.img) els.img.classList.add('zooming');
-    applyTransform();
-    clearTimeout(els.img._t);
-    els.img._t = setTimeout(() => els.img && els.img.classList.remove('zooming'), 180);
-  }
-
-  function onPointerDown(e) {
-    if (els.modal.classList.contains('hidden')) return;
-    if (_scale <= 1) return; // 没放大时不启动拖动
-    els.stage.setPointerCapture(e.pointerId);
-    els.stage.classList.add('dragging');
-    const startX = e.clientX, startY = e.clientY;
-    const baseTx = _tx, baseTy = _ty;
-    const onMove = (ev) => {
-      _tx = baseTx + (ev.clientX - startX);
-      _ty = baseTy + (ev.clientY - startY);
-      applyTransform();
-    };
-    const onUp = (ev) => {
-      els.stage.releasePointerCapture(ev.pointerId);
-      els.stage.classList.remove('dragging');
-      els.stage.removeEventListener('pointermove', onMove);
-      els.stage.removeEventListener('pointerup', onUp);
-    };
-    els.stage.addEventListener('pointermove', onMove);
-    els.stage.addEventListener('pointerup', onUp);
-  }
-
-  function drawOverlay() {
-    const f = _frames[_idx]; if (!f || !els.overlay || !els.stage) return;
-    const c = els.overlay;
-    const rect = els.stage.getBoundingClientRect();
-    c.width = rect.width; c.height = rect.height;
-    c.style.width = rect.width + 'px';
-    c.style.height = rect.height + 'px';
-    const ctx = c.getContext('2d'); if (!ctx) return;
-    ctx.clearRect(0, 0, c.width, c.height);
-    const img = els.img;
-    if (!img) return;
-    const natW = img.naturalWidth || 640;
-    const natH = img.naturalHeight || 360;
-    // 计算 img 实际绘制区域(object-fit: contain)
-    const ar = natW / natH, sar = rect.width / rect.height;
-    let dw, dh, dx, dy;
-    if (ar > sar) { dw = rect.width; dh = rect.width / ar; dx = 0; dy = (rect.height - dh) / 2; }
-    else          { dh = rect.height; dw = rect.height * ar; dy = 0; dx = (rect.width - dw) / 2; }
-    const s = dw / natW;
-    const faces = f.faces || [];
-    for (let i = 0; i < faces.length; i++) {
-      const fa = faces[i];
-      const x = dx + (fa.x || 0) * s, y = dy + (fa.y || 0) * s;
-      const w = (fa.w || 0) * s, h = (fa.h || 0) * s;
-      const isActive = i === _activeFace;
-      ctx.lineWidth = isActive ? 3 : 2;
-      ctx.strokeStyle = isActive ? '#f0c674' : '#4fc3f7';
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.55)'; ctx.shadowBlur = isActive ? 6 : 4;
-      ctx.strokeRect(x, y, w, h);
-      const txt = (fa.score || 0).toFixed(2);
-      ctx.font = `${isActive ? 'bold ' : ''}12px ui-monospace, monospace`;
-      const tw = ctx.measureText(txt).width + 8;
-      ctx.fillStyle = isActive ? '#f0c674' : '#4fc3f7';
-      ctx.fillRect(x, y - 16, tw, 16);
-      ctx.fillStyle = '#001520'; ctx.fillText(txt, x + 4, y - 4);
-    }
-  }
-
-  function showCurrent() {
-    const f = _frames[_idx]; if (!f) return;
-    _activeFace = -1;
-    const img = els.img, skel = els.skel;
-    if (skel) skel.style.display = '';
-    const src = f.annotated_key || f.original_key;
-    if (img) {
-      img.onload = () => {
-        if (skel) skel.style.display = 'none';
-        applyTransform();
-      };
-      img.onerror = () => {
-        if (skel) skel.style.display = 'none';
-        toast.warn('标注帧加载失败');
-      };
-      img.src = utils.mediaUrl(src);
-    }
-    if (els.meta) {
-      const ts = utils.fmtTime(f.timestamp_ms || 0);
-      const n = (f.faces || []).length;
-      const topScore = Math.max(0, ...(f.faces || []).map(x => x.score || 0));
-      els.meta.textContent = `#${f.index} · ${ts} · ${n} 张脸 · 最高分 ${topScore.toFixed(2)}`;
-    }
-    if (els.pos) els.pos.textContent = `${_idx + 1} / ${_frames.length}`;
-    if (els.prev) els.prev.disabled = _idx <= 0;
-    if (els.next) els.next.disabled = _idx >= _frames.length - 1;
-    const job = state.currentJob;
-    if (els.seek) els.seek.classList.toggle('hidden', !job || job.kind !== 'video');
-    // 右侧人脸列表面板
-    renderRail(f);
-  }
-
-  function renderRail(f) {
-    if (!els.railList) return;
-    const faces = f.faces || [];
-    if (els.railCount) els.railCount.textContent = String(faces.length);
-    els.railList.innerHTML = '';
-    if (!faces.length) {
-      els.railList.innerHTML = '<div class="lb-rail-item" style="color:var(--fg-dim);cursor:default">本帧无人脸</div>';
+    if (inField) return;
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault();
+      const s = utils.$('#tb-search'); if (s) { s.focus(); s.select(); }
       return;
     }
-    faces.forEach((fa, i) => {
-      const it = document.createElement('div');
-      it.className = 'lb-rail-item' + (i === _activeFace ? ' active' : '');
-      it.innerHTML = `<span class="lb-rail-i">#${i + 1}</span><span class="lb-rail-s">${(fa.score || 0).toFixed(2)}</span><span style="color:var(--fg-dim);font-size:10px">${fa.w}×${fa.h}</span>`;
-      it.addEventListener('click', () => {
-        _activeFace = (_activeFace === i) ? -1 : i;
-        renderRail(f);
-        drawOverlay();
-      });
-      els.railList.appendChild(it);
-    });
-  }
+    if (e.key === 'n' || e.key === 'N') { upload.openModal(); e.preventDefault(); return; }
+    if (e.key === 'ArrowDown') { sidebar.nextItem(1); e.preventDefault(); return; }
+    if (e.key === 'ArrowUp')   { sidebar.nextItem(-1); e.preventDefault(); return; }
+    if (e.key === 'j' || e.key === 'J') { sidebar.nextItem(1); e.preventDefault(); return; }
+    if (e.key === 'k' || e.key === 'K') { sidebar.nextItem(-1); e.preventDefault(); return; }
+    if (e.key === 'Home') { sidebar.gotoOffset(0); e.preventDefault(); return; }
+    if (e.key === 'End')  { sidebar.gotoOffset(-1); e.preventDefault(); return; }
+    if (e.key === 'PageDown' || e.key === 'PageUp') {
+      const rowH = state.itemHeight + state.itemGap;
+      const step = Math.max(1, Math.floor((state.listScrollEl ? state.listScrollEl.clientHeight : 400) / rowH) - 1);
+      const list = sidebar.filtered();
+      const cur = list.findIndex(j => j.id === state.currentJobId);
+      if (cur < 0) sidebar.gotoOffset(0);
+      else if (e.key === 'PageDown') sidebar.gotoOffset(cur + step);
+      else sidebar.gotoOffset(cur - step);
+      e.preventDefault(); return;
+    }
+    if (e.key === 'a' || e.key === 'A') { preview.toggleAnno(); e.preventDefault(); return; }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && state.currentJobId) { deleteCurrent(); e.preventDefault(); return; }
+  });
+}
 
-  function step(d) {
-    const n = _idx + d;
-    if (n < 0 || n >= _frames.length) return;
-    _idx = n; showCurrent();
-  }
+function cancelCurrent() {
+  if (!state.currentJobId) return;
+  api.cancelJob(state.currentJobId).then(() => toast.info('已发送停止信号')).catch(e => toast.error('取消失败: ' + e.message));
+}
 
-  return { init, open, close };
-})();
+async function cancelJobById(id) {
+  if (!id) return;
+  try { await api.cancelJob(id); toast.info('已发送停止信号'); }
+  catch (e) { toast.error('取消失败: ' + e.message); }
+}
 
-// dashboard 模块已拆分至 dashboard.js(本文件之前加载)
+async function deleteCurrent() {
+  if (!state.currentJobId) return;
+  const id = state.currentJobId;
+  const name = state.currentJob ? (state.currentJob.display_name || id) : id;
+  if (!await confirmModal.open('删除任务', `确认删除 "${name}"?此操作不可恢复。`)) return;
+  try {
+    await api.deleteJob(id);
+    state.deletedIds.add(id);
+    state.pinIds.delete(id);
+    try { localStorage.setItem(prefStore.KEYS.pinIds, JSON.stringify(Array.from(state.pinIds))); } catch {}
+    if (state.currentJobId === id) preview.close();
+    sidebar.render();
+    toast.success('任务已删除');
+  } catch (e) { toast.error('删除失败: ' + e.message); }
+}
 
-function downloadBlob(content, filename, mime) {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 500);
+async function deleteJobById(id) {
+  if (!id) return;
+  const job = (state.jobs || []).find(x => x.id === id);
+  const name = job ? (job.display_name || id) : id;
+  if (!await confirmModal.open('删除任务', `确认删除 "${name}"?此操作不可恢复。`)) return;
+  try {
+    await api.deleteJob(id);
+    state.deletedIds.add(id);
+    state.pinIds.delete(id);
+    try { localStorage.setItem(prefStore.KEYS.pinIds, JSON.stringify(Array.from(state.pinIds))); } catch {}
+    if (state.currentJobId === id) preview.close();
+    sidebar.render();
+    toast.success('任务已删除');
+  } catch (e) { toast.error('删除失败: ' + e.message); }
+}
+
+async function retryCurrent() {
+  if (!state.currentJobId) return;
+  if (!await confirmModal.open('重跑任务', '将用原 URL/输入重新创建一个任务。继续?')) return;
+  try {
+    const r = await api.retryJob(state.currentJobId);
+    toast.success('已重跑,新任务 #' + (r.job_id || '').slice(0, 8));
+    if (r.job_id) {
+      const job = await api.getJob(r.job_id);
+      sidebar.upsertJob(job); preview.open(job.id);
+    }
+  } catch (e) { toast.error('重跑失败: ' + e.message); }
+}
+
+async function retryJobById(id) {
+  if (!id) return;
+  if (!await confirmModal.open('重跑任务', '将用原 URL/输入重新创建一个任务。继续?')) return;
+  try {
+    const r = await api.retryJob(id);
+    toast.success('已重跑,新任务 #' + (r.job_id || '').slice(0, 8));
+    if (r.job_id) {
+      const job = await api.getJob(r.job_id);
+      sidebar.upsertJob(job); preview.open(job.id);
+    }
+  } catch (e) { toast.error('重跑失败: ' + e.message); }
 }
 
 function exportJSON() {
@@ -2387,187 +1130,22 @@ function exportJSON() {
       })),
     })),
   };
-  downloadBlob(JSON.stringify(summary, null, 2), `job-${job.id}.json`, 'application/json');
+  const blob = new Blob([JSON.stringify(summary, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = `job-${job.id}.json`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 500);
   toast.success(`已下载 JSON (${summary.frame_count} 帧)`);
-}
-
-function exportCSV() {
-  const job = state.currentJob;
-  if (!job) return toast.warn('没有可导出的任务');
-  const rows = [['frame_idx', 'timestamp_ms', 'x', 'y', 'w', 'h', 'score', 'face_url']];
-  let n = 0;
-  for (const f of job.frames || []) {
-    for (const face of f.faces || []) {
-      rows.push([f.index, f.timestamp_ms, face.x, face.y, face.w, face.h, face.score, utils.mediaUrl(face.key)]); n++;
-    }
-  }
-  const csv = rows.map(r => r.map(v => {
-    const s = String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  }).join(',')).join('\n');
-  downloadBlob(csv, `faces-${job.id}.csv`, 'text/csv');
-  toast.success(`已下载 CSV (${n} 行)`);
-}
-
-async function exportZip() {
-  const job = state.currentJob;
-  if (!job) return toast.warn('没有可导出的任务');
-  if (job.kind === 'image' && !job.original_key) {
-    return toast.warn('该任务没有可下载的内容');
-  }
-  // 直接通过 <a> 触发后端 zip 端点,Content-Disposition 强制下载。
-  const url = '/api/jobs/' + encodeURIComponent(job.id) + '/download.zip';
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = ''; // 让浏览器尊重 Content-Disposition
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => a.remove(), 100);
-  toast.success(`已请求下载 ${job.kind} 结果包(annotated + faces + manifest.json)`);
-}
-
-async function cancelCurrent() {
-  if (!state.currentJobId) return;
-  try { await api.cancelJob(state.currentJobId); toast.info('已发送停止信号'); }
-  catch (e) { toast.error('取消失败: ' + e.message); }
-}
-
-async function deleteCurrent() {
-  if (!state.currentJobId) return;
-  const id = state.currentJobId;
-  const name = state.currentJob ? (state.currentJob.display_name || id) : id;
-  if (!await confirmModal.open('删除任务', `确认删除 "${name}"?此操作不可恢复。`)) return;
-  try {
-    await api.deleteJob(id);
-    state.deletedIds.add(id);
-    if (state.currentJobId === id) preview.close();
-    sidebar.render();
-    toast.success('任务已删除');
-  } catch (e) { toast.error('删除失败: ' + e.message); }
-}
-
-async function retryCurrent() {
-  if (!state.currentJobId) return;
-  await retryJobById(state.currentJobId, true);
-}
-
-/** 按 id 重跑任务(侧栏右键菜单 / pv 重跑按钮共用)。confirm 控制是否弹确认。 */
-async function retryJobById(id, confirmFirst) {
-  if (!id) return;
-  if (confirmFirst !== false) {
-    if (!await confirmModal.open('重跑任务', '将用原 URL/输入重新创建一个任务。继续?')) return;
-  }
-  try {
-    const r = await api.retryJob(id);
-    toast.success('已重跑,新任务 #' + (r.job_id || '').slice(0, 8));
-    if (r.job_id) {
-      const job = await api.getJob(r.job_id);
-      sidebar.upsertJob(job); preview.open(job.id);
-    }
-  } catch (e) { toast.error('重跑失败: ' + e.message); }
-}
-
-/** 按 id 删除任务(侧栏右键菜单 / Delete 键共用),带确认。 */
-async function deleteJobById(id) {
-  if (!id) return;
-  const job = (state.jobs || []).find(x => x.id === id);
-  const name = job ? (job.display_name || id) : id;
-  if (!await confirmModal.open('删除任务', `确认删除 "${name}"?此操作不可恢复。`)) return;
-  try {
-    await api.deleteJob(id);
-    state.deletedIds.add(id);
-    state.pinIds.delete(id);
-    try { localStorage.setItem(prefStore.KEYS.pinIds, JSON.stringify(Array.from(state.pinIds))); } catch {}
-    if (state.currentJobId === id) preview.close();
-    sidebar.render();
-    toast.success('任务已删除');
-  } catch (e) { toast.error('删除失败: ' + e.message); }
-}
-
-function initKeys() {
-  document.addEventListener('keydown', e => {
-    const inField = e.target && e.target.matches && e.target.matches('input, textarea, [contenteditable]');
-    if (e.key === 'Escape') {
-      let closed = false;
-      utils.$$('.modal').forEach(m => { if (!m.classList.contains('hidden')) { m.classList.add('hidden'); closed = true; } });
-      if (closed) { e.preventDefault(); return; }
-      if (batch.isActive()) { batch.exit(); e.preventDefault(); return; }
-      if (state.currentJobId) { preview.close(); e.preventDefault(); return; }
-    }
-    if (inField) return;
-    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
-      e.preventDefault();
-      const s = utils.$('#tb-search'); if (s) { s.focus(); s.select(); }
-      return;
-    }
-    if (e.key === 'n' || e.key === 'N') { upload.openModal(); e.preventDefault(); return; }
-    if (e.key === 'ArrowDown') { sidebar.nextItem(1); e.preventDefault(); return; }
-    if (e.key === 'ArrowUp')   { sidebar.nextItem(-1); e.preventDefault(); return; }
-    // vim 风格 j/k 上下选择(与 ↑/↓ 等价)
-    if (e.key === 'j' || e.key === 'J') { sidebar.nextItem(1); e.preventDefault(); return; }
-    if (e.key === 'k' || e.key === 'K') { sidebar.nextItem(-1); e.preventDefault(); return; }
-    // Enter:打开当前任务的 lightbox(已打开时仍跳到首张带脸帧),
-    // 让键盘可达用户在不离开主区的情况下查看标注细节。
-    if (e.key === 'Enter' && state.currentJobId && state.currentJob) {
-      if (e.target && e.target.matches && e.target.matches('button, a[href], select, input')) return;
-      const job = state.currentJob;
-      const firstFaceFrame = (job.frames || []).find(f => f.faces && f.faces.length);
-      if (firstFaceFrame && typeof lightbox !== 'undefined' && lightbox && lightbox.open) {
-        lightbox.open(firstFaceFrame);
-        e.preventDefault();
-      }
-      return;
-    }
-    // Home / End / PageUp / PageDown:整段跳
-    if (e.key === 'Home') {
-      sidebar.gotoOffset(0); e.preventDefault(); return;
-    }
-    if (e.key === 'End') {
-      sidebar.gotoOffset(-1); e.preventDefault(); return;
-    }
-    if (e.key === 'PageDown' || e.key === 'PageUp') {
-      // 修复(历史 bug):ROW_H 是 sidebar IIFE 内的局部 const,这里用 state 直接算
-      const rowH = state.itemHeight + state.itemGap;
-      const step = Math.max(1, Math.floor(
-        (state.listScrollEl ? state.listScrollEl.clientHeight : 400) / rowH) - 1);
-      const list = sidebar.filtered();
-      const cur = list.findIndex(j => j.id === state.currentJobId);
-      if (cur < 0) { sidebar.gotoOffset(0); }
-      else if (e.key === 'PageDown') sidebar.gotoOffset(cur + step);
-      else sidebar.gotoOffset(cur - step);
-      e.preventDefault(); return;
-    }
-    if (e.key === 'a' || e.key === 'A') { preview.toggleAnno(); e.preventDefault(); return; }
-    // Delete / Backspace(macOS 无 Delete 键)删除当前任务,带确认
-    if ((e.key === 'Delete' || e.key === 'Backspace') && state.currentJobId) { deleteCurrent(); e.preventDefault(); return; }
-    if (e.key === '?') { utils.$('#modal-help').classList.remove('hidden'); e.preventDefault(); return; }
-    if (e.key === 'b' || e.key === 'B') { if (!batch.isActive()) batch.enter(); else batch.exit(); e.preventDefault(); return; }
-    // p:置顶/取消置顶当前任务
-    if (e.key === 'p' || e.key === 'P') {
-      if (state.currentJobId) { sidebar.togglePin(state.currentJobId); e.preventDefault(); }
-      return;
-    }
-  });
 }
 
 async function init() {
   theme.init(); modalKit.init();
   if (typeof uploadQueue !== 'undefined' && uploadQueue && typeof uploadQueue.init === 'function') uploadQueue.init();
   if (typeof dropzonePreview !== 'undefined' && dropzonePreview && typeof dropzonePreview.init === 'function') dropzonePreview.init();
-  sidebar.init(); upload.init(); batch.init(); confirmModal.init();
+  sidebar.init(); upload.init(); confirmModal.init();
   initKeys();
-  visibilityCtl.init();
-  if (typeof lightbox.init === 'function') lightbox.init();
-  const bind = (sel, fn) => { const el = utils.$(sel); if (el) el.addEventListener('click', fn); };
-  bind('#pv-toggle-anno', preview.toggleAnno);
-  bind('#pv-cancel', cancelCurrent);
-  bind('#pv-retry', retryCurrent);
-  bind('#pv-export-json', exportJSON);
-  bind('#pv-delete', deleteCurrent);
-  bind('#pv-close', preview.close);
-  const emptyNew = utils.$('#pv-empty-new');
-  if (emptyNew) emptyNew.addEventListener('click', () => upload.openModal());
-  // 移动端抽屉侧栏
+  if (typeof visibilityCtl !== 'undefined' && visibilityCtl && typeof visibilityCtl.init === 'function') visibilityCtl.init();
+  // 抽屉(窄屏)
   const drawerBtn = utils.$('#tb-drawer');
   const drawerBack = utils.$('#drawer-backdrop');
   if (drawerBtn && drawerBack) {
@@ -2578,72 +1156,21 @@ async function init() {
     };
     drawerBtn.addEventListener('click', () => setDrawer(!utils.$('#sidebar').classList.contains('drawer-open')));
     drawerBack.addEventListener('click', () => setDrawer(false));
-    window.addEventListener('resize', () => {
-      if (window.innerWidth > 768) setDrawer(false);
-    });
+    window.addEventListener('resize', () => { if (window.innerWidth > 768) setDrawer(false); });
+    drawerBtn.hidden = false;
   }
-  // URL hash 深链
-  hashRouter.bind();
   try {
     const jobs = await api.listJobs();
     sidebar.setJobs(jobs);
-    hashRouter.maybeOpen();
   } catch (e) { toast.error('加载任务列表失败: ' + e.message); }
   upload.loadConfig().catch(() => {});
 }
 
-/**
- * URL hash 路由:
- *  - 打开 job: #/job/<id>    →  自动 preview.open(id)
- *  - 关闭 job: #/              →  preview.close()
- *  - 浏览器前进/后退自动同步
- *  - 任务打开/关闭时主动更新 hash(replaceState,避免污染历史)
- */
-const hashRouter = (() => {
-  function parse() {
-    const h = location.hash.replace(/^#\/?/, '');
-    const m = h.match(/^job\/(.+)$/);
-    return m ? { kind: 'job', id: m[1] } : null;
-  }
-  function setJob(id, replace = true) {
-    const want = '#/job/' + encodeURIComponent(id);
-    if (location.hash === want) return;
-    if (replace) history.replaceState(null, '', want);
-    else location.hash = want;
-  }
-  function clear(replace = true) {
-    if (!location.hash) return;
-    if (replace) history.replaceState(null, '', location.pathname + location.search);
-    else location.hash = '';
-  }
-  function bind() {
-    window.addEventListener('hashchange', () => {
-      const r = parse();
-      if (r && r.kind === 'job' && r.id !== state.currentJobId) preview.open(r.id);
-      else if (!r && state.currentJobId) preview.close();
-    });
-  }
-  function maybeOpen() {
-    const r = parse();
-    if (r && r.kind === 'job' && r.id) {
-      // 等待 listJobs 完成 → preview 自动打开
-      preview.open(r.id);
-    }
-  }
-  return { bind, setJob, clear, parse, maybeOpen };
-})();
-
 document.addEventListener('DOMContentLoaded', init);
 window.__rsface = {
-  state, api, sidebar, preview, sse, batch, theme, toast, lightbox, hashRouter,
-  modalKit, confirmModal,
-  dashboard: (typeof dashboard !== 'undefined') ? dashboard : null,
-  kpi: (typeof kpi !== 'undefined') ? kpi : null,
-  visibilityCtl: (typeof visibilityCtl !== 'undefined') ? visibilityCtl : null,
-  ctxMenu: (typeof ctxMenu !== 'undefined') ? ctxMenu : null,
-  inspector: (typeof inspector !== 'undefined') ? inspector : null,
-  tabs: (typeof tabs !== 'undefined') ? tabs : null,
-  taskMenu: (typeof taskMenu !== 'undefined') ? taskMenu : null,
+  state, api, sidebar, preview, sse, theme, toast,
+  modalKit, confirmModal, ctxMenu,
   uploadQueue: (typeof uploadQueue !== 'undefined') ? uploadQueue : null,
   dropzonePreview: (typeof dropzonePreview !== 'undefined') ? dropzonePreview : null,
+  visibilityCtl: (typeof visibilityCtl !== 'undefined') ? visibilityCtl : null,
 };
