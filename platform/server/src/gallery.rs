@@ -1224,3 +1224,30 @@ impl EmbeddingIo for Embedding {
 // file; the unused-import lint otherwise drops it.
 #[allow(dead_code)]
 fn _rgb_marker(_: &RgbImage) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsface::embedding::MatchConfig;
+
+    /// Legacy EmbedNet is always CPU — a regression here would let an
+    /// operator accidentally trust on-GPU embeddings from a graph that
+    /// never had one (the docs explicitly call the 128-d fallback
+    /// "no real accuracy").
+    #[test]
+    fn legacy_embedder_reports_cpu_device() {
+        let kind = EmbedderKind::Legacy(Arc::new(EmbedNet::new(7)));
+        assert_eq!(kind.device(), "cpu");
+    }
+
+    /// The runtime chip in `/api/config` reads through
+    /// `GalleryState::device()`. empty_for_tests uses the Legacy
+    /// EmbedNet by construction, so the chip must say "cpu" — anything
+    /// else means the device info path is leaking through and the chip
+    /// could lie about the soft-fallback path.
+    #[test]
+    fn empty_gallery_state_device_round_trips_for_legacy() {
+        let gs = GalleryState::empty_for_tests(7, MatchConfig::default());
+        assert_eq!(gs.device(), "cpu");
+    }
+}
