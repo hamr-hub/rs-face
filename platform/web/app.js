@@ -1678,6 +1678,7 @@ const upload = (() => {
   async function loadConfig() {
     const cfg = await api.getConfig();
     state.config = cfg;
+    renderRuntimeChip(cfg);
     // 用后端 available_algos 填充分享给图片/视频/流的上传算法下拉框。
     // 注意:不要清掉"默认 (env / 配置)"选项(它在 HTML 里 hardcoded 为首项)。
     const sel = utils.$('#new-algo-select');
@@ -1689,6 +1690,21 @@ const upload = (() => {
         sel.appendChild(opt);
       }
     }
+  }
+  function renderRuntimeChip(cfg) {
+    const el = utils.$('#tb-runtime');
+    if (!el) return;
+    const dev = (cfg && cfg.embedder_device) || '';
+    if (!dev) { el.hidden = true; el.textContent = ''; el.removeAttribute('data-state'); return; }
+    el.hidden = false;
+    el.textContent = 'embedder · ' + dev;
+    // Sighted cue so an operator can tell at a glance whether the platform
+    // is actually running on the accelerator (cuda / tensorrt) or whether
+    // a graph / driver miss silently fell back to CPU.
+    let state = 'cpu';
+    if (dev.includes('cuda') || dev.includes('tensorrt')) state = 'gpu';
+    else if (dev === 'coreml' || dev === 'directml') state = 'accel';
+    el.setAttribute('data-state', state);
   }
   function setupDropzone(zoneSel, inputSel, handler, opts) {
     const zone = utils.$(zoneSel), input = utils.$(inputSel); if (!zone || !input) return;

@@ -94,6 +94,31 @@ body {
 .tb-titles { display: flex; align-items: baseline; gap: 8px; }
 .tb-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .3px; }
 .tb-sub { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+/* Live runtime chip — "embedder · cuda" / "embedder · tensorrt" / "embedder · cpu".
+   States: green when the GPU EP is up, amber when a host accelerator
+   (CoreML/DirectML) is in use, dim when the platform silently fell back
+   to CPU (the failure mode operators most often need to spot). */
+.tb-runtime {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-left: 4px; padding: 3px 9px;
+  font: 11px/1 var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  letter-spacing: .3px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--fg-dim);
+  user-select: none;
+  white-space: nowrap;
+}
+.tb-runtime::before {
+  content: "";
+  width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; opacity: .9;
+}
+.tb-runtime[data-state="gpu"]   { color: #21b87a; border-color: rgba(33,184,122,.45); }
+.tb-runtime[data-state="accel"] { color: #d99821; border-color: rgba(217,152,33,.45); }
+.tb-runtime[data-state="cpu"]   { color: var(--fg-dim); }
+.tb-runtime[hidden] { display: none !important; }
 .tb-mini-btn {
   background: var(--bg-3); color: var(--accent);
   border: 1px solid var(--border); border-radius: var(--radius);

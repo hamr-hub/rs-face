@@ -423,6 +423,7 @@ async fn config_info(
             "cascade_status": cascade_status,
         },
         "min_face_size": state.cfg.min_face_size,
+        "embedder_device": state.gallery.device(),
     });
     let bytes = serde_json::to_vec(&body).unwrap_or_default();
     caches.config_json.put(bytes.clone());

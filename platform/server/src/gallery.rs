@@ -82,6 +82,22 @@ impl EmbedderKind {
     fn is_arcface(&self) -> bool {
         matches!(self, EmbedderKind::ArcFace { .. })
     }
+
+    /// Live ONNX session device for the active embedder. Mirrors the line
+    /// the gallery already logs at startup; surfaced here so the
+    /// `/api/config` payload can answer "which EP are we actually using?"
+    /// without scraping startup logs.
+    ///
+    /// `ArcFace` reports the ONNX session's resolved device (cuda /
+    /// tensorrt / cpu / auto). `Legacy` (the EmbedNet soft-fallback) is a
+    /// pure-CPU stack, so we say "cpu" — the embeddings aren't comparable
+    /// to an ArcFace cosine anyway.
+    pub fn device(&self) -> &'static str {
+        match self {
+            EmbedderKind::ArcFace { arcface, .. } => arcface.device().as_str(),
+            EmbedderKind::Legacy(_) => "cpu",
+        }
+    }
 }
 
 /// One persisted gallery state, kept in memory and synced with the DB.
@@ -150,6 +166,12 @@ impl GalleryState {
 
     pub fn cfg(&self) -> &MatchConfig {
         &self.cfg
+    }
+
+    /// ONNX session device backing the live embedder. See
+    /// [`EmbedderKind::device`] for the ArcFace-vs-legacy contract.
+    pub fn device(&self) -> &'static str {
+        self.embedder.device()
     }
 
     /// Whether a liveness backend was successfully loaded.

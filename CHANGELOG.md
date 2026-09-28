@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — embedder runtime chip on `/api/config` and the web topbar
+- **`/api/config` now reports the live ONNX session device in
+  `embedder_device`** (`cuda` / `tensorrt` / `cpu` / `coreml` /
+  `directml` / `auto`). The value flows from `EmbedderKind::device()`,
+  which mirrors the line the gallery already logs at startup — that
+  log is now redundant for operators who only watch the HTTP API.
+- **A small runtime chip now appears next to the topbar title** in
+  `platform/web/`, showing `embedder · <device>`. The dot is green
+  for GPU EPs (cuda / tensorrt), amber for other accelerators
+  (CoreML / DirectML), and dim when the platform silently fell
+  back to CPU — the failure mode operators most often need to
+  spot at a glance.
+
 ### Added — ArcFace `Device` accessor and per-test device override
 - **`ArcFaceRecognizer::device()` and `ArcFace::device()` now report the live
   runtime device (CUDA / TensorRT / CPU) of the underlying ONNX session.**
