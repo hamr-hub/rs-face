@@ -21,6 +21,10 @@ mkdir -p "$LIB"
 #     (Ubuntu 24.04), so swapping it in breaks every dynamic loader.
 #   - linker scripts (*.so without a SONAME, which glibc would otherwise
 #     try to execute as ELFs)
+#   - libcurl*/libnghttp2*: the host (22.04) libcurl is older than the
+#     container's and its curl_global_trace symbol is missing, which
+#     breaks every binary in this dir's LD_LIBRARY_PATH (notably the
+#     healthcheck curl). ORT never needs them.
 # The host paths are bind-mounted read-only at:
 #   /opt/jetson-tensorrt/lib-host  → /usr/lib/aarch64-linux-gnu
 #   /opt/jetson-tensorrt/lib-cuda  → /usr/local/cuda-12.6/targets/aarch64-linux/lib
@@ -35,6 +39,14 @@ link_from() {
             ld-*|libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|\
             libstdc++.so.*|libgcc_s.so.*|libnsl.so.*|libutil.so.*|libcrypt.so.*|\
             libattr.so.*|libcap.so.*|libpcre.so.*|libffi.so.*) continue ;;
+            # Host curl/nghttp2 shadows the container's newer libcurl and
+            # breaks every dynamically-linked binary (curl_global_trace
+            # symbol lookup failure). ORT doesn't need them.
+            libcurl*|libnghttp2*) continue ;;
+            # Host ffmpeg stack (22.04: libav* 58 / libsw* 5) shadows the
+            # image's own ffmpeg 6 and pulls in host-only pulseaudio deps
+            # (libpulsecommon), breaking the server's ffmpeg upload prep.
+            libav*|libsw*|libpostproc*|libvpx*|libx264*|libx265*|libpulse*|libdav1d*|libmp3lame*|libvorbis*|libogg*) continue ;;
           esac
         base=$(basename "$f")
         ln -sf "$f" "$LIB/$base" 2>/dev/null || true
@@ -44,14 +56,20 @@ link_from() {
 link_from /opt/jetson-tensorrt/lib-host
 link_from /opt/jetson-tensorrt/lib-cuda
 
-# Sanity: require libnvinfer + libonnxruntime to be resolvable through $LIB.
+# Sanity: require the TensorRT/cuDNN/CUDA stack to be resolvable through $LIB.
+# Note: libonnxruntime itself ships in the image at /opt/onnxruntime/lib
+# (from the vendored Jetson wheel) — it is NOT expected here.
 missing=0
-for lib in libnvinfer.so.10 libnvonnxparser.so.10 libcudnn.so.9 libcudart.so.12 libcublas.so.12 libonnxruntime.so.1.24.0; do
+for lib in libnvinfer.so.10 libnvonnxparser.so.10 libcudnn.so.9 libcudart.so.12 libcublas.so.12; do
     if [ ! -e "$LIB/$lib" ]; then
         echo "[entrypoint] WARNING: missing $lib in $LIB" >&2
         missing=$((missing + 1))
     fi
 done
+if [ ! -e /opt/onnxruntime/lib/libonnxruntime.so.1.24.0 ]; then
+    echo "[entrypoint] WARNING: missing libonnxruntime.so.1.24.0 in /opt/onnxruntime/lib" >&2
+    missing=$((missing + 1))
+fi
 if [ "$missing" -gt 0 ]; then
     echo "[entrypoint] $missing lib(s) missing; ORT TensorRT/CUDA EP will fail to load." >&2
 fi

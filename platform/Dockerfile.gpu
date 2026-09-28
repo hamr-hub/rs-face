@@ -107,6 +107,6 @@ EXPOSE 8080
 
 # 容器级健康检查(镜像已带 curl)。
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
-    CMD curl -sf http://127.0.0.1:8080/api/health || exit 1
+    CMD env -u LD_LIBRARY_PATH curl -sf http://127.0.0.1:8080/api/health || exit 1
 
 CMD ["/usr/local/bin/docker-entrypoint.sh"]

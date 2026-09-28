@@ -154,7 +154,11 @@ services:
               count: all
               capabilities: [gpu, utility, compute]
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/api/health || exit 1"]
+      # Strip LD_LIBRARY_PATH: it points at the host-lib symlink dir, whose
+      # host libcurl used to shadow the container's own (curl_global_trace
+      # symbol error). entrypoint no longer links curl in, but clearing it
+      # here keeps the healthcheck immune to future link-dir changes.
+      test: ["CMD-SHELL", "env -u LD_LIBRARY_PATH curl -sf http://127.0.0.1:8080/api/health || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 3
