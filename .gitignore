@@ -99,14 +99,19 @@ platform/.env
 # Nested Cargo build output for standalone tool crates under tools/
 tools/*/target/
 
-# ---- vendor/ort-jetson: only the staged .so ships ----
+# ---- vendor/ort-jetson: tracked .so's, fetched wheel+CUDA provider ----
 # tools/fetch_ort_jetson.sh downloads the wheel into a mktemp dir and
 # cleans up; the wheel and any extracted/ scratch left at the vendor
-# root are local-only artifacts and must not be committed. The five
-# .so files actually baked into platform/Dockerfile.gpu live under
+# root are local-only artifacts and must not be committed. Four of the
+# five .so files actually baked into platform/Dockerfile.gpu live under
 # vendor/ort-jetson/lib/onnxruntime/ and are tracked explicitly.
+# The fifth — libonnxruntime_providers_cuda.so, currently ~167 MB —
+# exceeds GitHub's 100 MB hard cap, so it stays local-only too: bring
+# the GPU stack up by running tools/fetch_ort_jetson.sh, which stages
+# every .so where Dockerfile.gpu expects it.
 vendor/ort-jetson/*.whl
 vendor/ort-jetson/extracted/
+vendor/ort-jetson/lib/onnxruntime/libonnxruntime_providers_cuda.so
 
 # ---- Local tooling / OS junk ----
 .meta.yaml

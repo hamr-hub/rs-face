@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   graph relies on a cuDNN version that doesn't always match the host,
   and the dedicated container path is the supported GPU route.
 
+### Fixed — untrack the 161 MB ORT CUDA provider so the repo can push
+- **`vendor/ort-jetson/lib/onnxruntime/libonnxruntime_providers_cuda.so`
+  is no longer checked in.** The wheel bundle's CUDA provider weighs
+  ~167 MB, which violates GitHub's 100 MB hard cap and blocked every
+  push to `main`. The `.so` is reproducible from
+  `tools/fetch_ort_jetson.sh` (the same script that already stages the
+  other four), so this commit moves it to `.gitignore`. The file
+  remains on the working tree on this machine and on the bind-mount
+  path for the GPU container; fresh clones run `tools/fetch_ort_jetson.sh`
+  once to restore it. No build-time change on hosted CI (the GPU stack
+  isn't built there).
+
 ### Fixed — Docker GPU stack no longer shadows host `libcurl` / `libav*`
 - **`platform/docker-entrypoint.sh` no longer symlinks `libcurl*`,
   `libnghttp2*`, or any of the ffmpeg stack (`libav*`, `libsw*`,
