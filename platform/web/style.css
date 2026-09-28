@@ -714,6 +714,25 @@ button { font-family: inherit; cursor: pointer; }
 }
 .algo-link:hover { color: var(--accent); }
 
+/* 全屏拖入遮罩 */
+.dropzone-overlay {
+  position: fixed; inset: 0;
+  background: rgba(4, 7, 13, 0.55);
+  backdrop-filter: blur(4px);
+  z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.dropzone-overlay-card {
+  padding: 24px 48px;
+  background: var(--bg-2);
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-2);
+  font-size: 16px;
+  color: var(--fg);
+}
+[data-theme="light"] .dropzone-overlay { background: rgba(255, 255, 255, 0.5); }
+
 /* ============ 减弱动效 ============ */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
