@@ -41,7 +41,9 @@ fn detector() -> LivenessDetector {
         Some(&models::LIVENESS_MINIFASNET_V2),
         &p_v1se,
         Some(&models::LIVENESS_MINIFASNET_V1SE),
-        &SessionConfig::default(),
+        // Host cuDNN (9.3) may not match the prebuilt ORT package; Docker is
+        // the standard GPU path. CPU here validates the model graph/logic.
+        &SessionConfig::default().with_device(rsface::onnx::Device::Cpu),
         LivenessConfig::default(),
         rsface::quality::QualityConfig::default(),
     )

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — ArcFace `Device` accessor and per-test device override
+- **`ArcFaceRecognizer::device()` and `ArcFace::device()` now report the live
+  runtime device (CUDA / TensorRT / CPU) of the underlying ONNX session.**
+  The gallery startup log replaces the backend-only line with
+  `backend=… device=…` so operators can see at a glance whether a request
+  actually lands on GPU or silently fell back to CPU.
+- **`RSFACE_TEST_DEVICE=cpu` lets integration tests skip GPU and run on a
+  host without a free CUDA device** (the default keeps GPU coverage in CI).
+  `tests::liveness_e2e` now forces CPU unconditionally — its prebuilt ORT
+  graph relies on a cuDNN version that doesn't always match the host,
+  and the dedicated container path is the supported GPU route.
+
+### Fixed — Docker GPU stack no longer shadows host `libcurl` / `libav*`
+- **`platform/docker-entrypoint.sh` no longer symlinks `libcurl*`,
+  `libnghttp2*`, or any of the ffmpeg stack (`libav*`, `libsw*`,
+  `libpostproc*`, `libvpx*`, `libx264*`, `libx265*`, `libpulse*`,
+  `libdav1d*`, `libmp3lame*`, `libvorbis*`, `libogg*`) into the
+  `$LIB` directory the container's binaries resolve through
+  `$LD_LIBRARY_PATH`.** The 22.04 host's `libcurl.so` is older than the
+  container's and is missing `curl_global_trace`, which used to crash
+  every dynamically-linked binary that resolved through the symlink
+  dir — most visibly the healthcheck `curl`, the platform's media
+  upload prep, and any tool that touched `libcurl` transitively.
+  Dropping ffmpeg from the symlink set also stops the host's pulseaudio
+  deps from leaking into the server at upload time. ORT itself never
+  needed these libraries; only `libonnxruntime.so` (vendored from the
+  Jetson wheel into `/opt/onnxruntime/lib`), `libnvinfer`,
+  `libnvonnxparser`, `libcudnn`, `libcudart`, `libcublas` do. The
+  startup sanity check now treats `/opt/onnxruntime/lib/...` separately
+  so the warning message points at the right location.
+- **The Docker GPU healthcheck now runs with `LD_LIBRARY_PATH` cleared.**
+  `curl` itself was the most visible casualty of the host-symlink issue
+  above; `env -u LD_LIBRARY_PATH curl ...` keeps the probe immune to
+  any future changes in which host libs the entrypoint decides to
+  expose.
+
 ### Fixed — UI: panel placement and key bindings
 - **Algorithm compare and identity consensus panels now live below the playback
   area, not inside it.** Previously the panels were appended to `pv-stage`,

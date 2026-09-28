@@ -377,8 +377,9 @@ impl EmbedderKind {
             ));
         }
         tracing::info!(
-            "[arcface] pipeline ready: backend={} dim={} standard_dim={}",
+            "[arcface] pipeline ready: backend={} device={} dim={} standard_dim={}",
             arcface.backend().as_str(),
+            arcface.device().as_str(),
             512,
             arcface.is_standard_dim()
         );

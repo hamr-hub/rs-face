@@ -35,7 +35,7 @@ use rsface::arcface_recognizer::ArcFaceRecognizer;
 use rsface::face::Landmarks;
 use rsface::image::RgbImage;
 use rsface::models::{self, ARCFACE_W600K_R50};
-use rsface::onnx::{Backend, SessionConfig};
+use rsface::onnx::{Backend, Device, SessionConfig};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -93,6 +93,14 @@ impl ArcFace {
     /// Backend actually used at open time (useful for diagnostics + smoke logs).
     pub fn backend(&self) -> ArcFaceBackend {
         self.backend
+    }
+
+    /// Device (CUDA / TensorRT / CPU) the recogniser session actually runs on.
+    pub fn device(&self) -> Device {
+        self.recognizer
+            .lock()
+            .map(|r| r.device())
+            .unwrap_or(Device::Cpu)
     }
 
     /// True iff the loaded graph is the standard 512-d ArcFace backbone.

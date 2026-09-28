@@ -26,7 +26,7 @@ use crate::embedding::{Embedding, Gallery, MatchOutcome, ARCFACE_EMBEDDING_DIM};
 use crate::face::{FaceDetection, Landmarks};
 use crate::image::RgbImage;
 use crate::models::{ModelKind, ModelSpec};
-use crate::onnx::{open_session, Inference, OnnxError, SessionConfig};
+use crate::onnx::{open_session, Device, Inference, OnnxError, SessionConfig};
 use std::path::Path;
 
 /// ArcFace-family recogniser backed by an ONNX session.
@@ -95,6 +95,11 @@ impl ArcFaceRecognizer {
     /// Embedding dimension this model produces.
     pub fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// Device (CUDA / TensorRT / CPU) the underlying session actually runs on.
+    pub fn device(&self) -> Device {
+        self.session.device()
     }
 
     /// Whether this model produces the standard 512-d ArcFace embedding.

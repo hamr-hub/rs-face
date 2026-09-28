@@ -59,6 +59,7 @@ fn kind_label(k: &ModelKind) -> &'static str {
     match k {
         ModelKind::Detector => "detector",
         ModelKind::Recognizer => "recogniser",
+        ModelKind::Liveness => "liveness",
     }
 }
 
