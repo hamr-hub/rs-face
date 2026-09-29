@@ -194,7 +194,8 @@ async fn main() {
     // 旧路径每个 running job 各 spawn 一个 tokio task + 两条独立 UPDATE,
     // N=10 并发时是 4 calls/s,N=50 是 20 calls/s。新路径固定 1 call/5s,
     // 与 N 无关。janitor 看到的"alive"时间窗同样紧(5s 节奏)。
-    let _heartbeat = jobs::spawn_heartbeat_coalescer(db.clone(), state.clone(), state.shutdown.clone());
+    let _heartbeat =
+        jobs::spawn_heartbeat_coalescer(db.clone(), state.clone(), state.shutdown.clone());
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)
         .await

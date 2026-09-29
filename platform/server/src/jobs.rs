@@ -375,7 +375,11 @@ impl JobRegistry {
     /// `self: &Arc<Self>` 是为了让 Job 持 `Weak<JobRegistry>`,set_status
     /// 把状态变化推到聚合计数时不需要走回 caller 又拿一次 Arc。所有调用点
     /// 都是 `Arc<JobRegistry>::create(...)` 直接调用,Rust 自动 borrow。
-    pub fn create(self: &Arc<Self>, kind: JobKind, display_name: String) -> Result<Arc<Job>, QueueFull> {
+    pub fn create(
+        self: &Arc<Self>,
+        kind: JobKind,
+        display_name: String,
+    ) -> Result<Arc<Job>, QueueFull> {
         let max_q = self.cfg.max_queue_depth;
         if max_q > 0 {
             // fetch_add 先占坑再判断:并发下最多短暂超限 1,可接受。
@@ -528,7 +532,9 @@ impl JobRegistry {
     /// `finalize` 之后调一次(写 stats.elapsed_ms 的同帧)。
     pub fn record_terminal_elapsed(&self, elapsed_ms: u64) {
         if elapsed_ms > 0 {
-            self.agg.elapsed_sum_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+            self.agg
+                .elapsed_sum_ms
+                .fetch_add(elapsed_ms, Ordering::Relaxed);
             self.agg.timed_count.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1547,11 +1553,7 @@ impl JobRegistry {
                 // /api/metrics /api/jobs/stats 还要扫 registry。
                 // 算法名在 run_job 早期 build_detector 后已确定并迁移过桶。
                 let dets_inc = detections.len() as u64;
-                self.bump_frame_counters(
-                    1,
-                    if has_face { 1 } else { 0 },
-                    dets_inc,
-                );
+                self.bump_frame_counters(1, if has_face { 1 } else { 0 }, dets_inc);
                 self.bump_liveness_counters(frame_spoof, frame_blocked);
                 self.bump_algo_detections(&algo_name, dets_inc);
             }
@@ -2666,7 +2668,10 @@ mod tests {
             .unwrap()
             .total
             .load(Ordering::SeqCst);
-        assert_eq!(pending_after, 0, "migrate from pending must drain pending.total");
+        assert_eq!(
+            pending_after, 0,
+            "migrate from pending must drain pending.total"
+        );
         assert_eq!(haar_after, 1, "migrate to haar must populate haar.total");
 
         // 4) 帧级增量。

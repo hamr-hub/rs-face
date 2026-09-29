@@ -74,7 +74,11 @@ const CASES: &[(&str, usize, usize)] = &[
 ];
 
 fn psnr_and_max_err(got: &[u8], want: &[u8]) -> (f64, u32) {
-    assert_eq!(got.len(), want.len(), "decoded length differs from reference");
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "decoded length differs from reference"
+    );
     let n = got.len() as f64;
     let mut se = 0.0f64;
     let mut max_err = 0u32;
@@ -108,8 +112,8 @@ fn decodes_to_match_the_libjpeg_reference() {
             Err(e) => panic!("missing reference {name}.raw: {e}"),
         };
 
-        let img = decode_jpeg_rgb(&jpg)
-            .unwrap_or_else(|e| panic!("{name}: decode failed outright: {e}"));
+        let img =
+            decode_jpeg_rgb(&jpg).unwrap_or_else(|e| panic!("{name}: decode failed outright: {e}"));
 
         assert_eq!(
             (img.width(), img.height()),
@@ -149,9 +153,8 @@ fn vertical_intensity_profile_is_smooth() {
     let img = decode_jpeg_rgb(&jpg).expect("decode");
     let (w, h) = (img.width(), img.height());
     let s = img.as_slice();
-    let row_mean = |y: usize| -> f64 {
-        (0..w).map(|x| s[(y * w + x) * 3] as f64).sum::<f64>() / w as f64
-    };
+    let row_mean =
+        |y: usize| -> f64 { (0..w).map(|x| s[(y * w + x) * 3] as f64).sum::<f64>() / w as f64 };
     let profile: Vec<f64> = (0..h).map(row_mean).collect();
     for y in 1..h {
         let diff = (profile[y] - profile[y - 1]).abs();

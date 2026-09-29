@@ -126,7 +126,9 @@ fn parse_manifest(text: &str) -> Manifest {
 }
 
 fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
-    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r') {
+    while i < bytes.len()
+        && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r')
+    {
         i += 1;
     }
     i
@@ -191,10 +193,11 @@ fn load_rgb(root: &Path, rel: &str) -> RgbImage {
 }
 
 fn best_detection(dets: &[FaceDetection]) -> Option<&FaceDetection> {
-    dets.iter().fold(None, |acc: Option<&FaceDetection>, d| match acc {
-        Some(a) if a.score >= d.score => Some(a),
-        _ => Some(d),
-    })
+    dets.iter()
+        .fold(None, |acc: Option<&FaceDetection>, d| match acc {
+            Some(a) if a.score >= d.score => Some(a),
+            _ => Some(d),
+        })
 }
 
 struct ProbeResult {
@@ -272,7 +275,9 @@ fn main() -> ExitCode {
     let backend = preferred_backend();
     eprintln!("backend: {}", backend.as_str());
 
-    let session_cfg = SessionConfig::default().with_backend(backend).with_threads(1);
+    let session_cfg = SessionConfig::default()
+        .with_backend(backend)
+        .with_threads(1);
     let det_spec = models::REGISTRY
         .iter()
         .find(|s| s.file_name == "det_10g.onnx")
@@ -281,12 +286,18 @@ fn main() -> ExitCode {
         .iter()
         .find(|s| s.file_name == "w600k_r50.onnx")
         .expect("w600k_r50 spec");
-    let detector = ScrfdDetector::open(&det_path, Some(det_spec), &session_cfg, ScrfdConfig::default())
-        .expect("load SCRFD");
+    let detector = ScrfdDetector::open(
+        &det_path,
+        Some(det_spec),
+        &session_cfg,
+        ScrfdConfig::default(),
+    )
+    .expect("load SCRFD");
     let recognizer =
         ArcFaceRecognizer::open(&rec_path, Some(rec_spec), &session_cfg).expect("load ArcFace");
 
-    let manifest_text = std::fs::read_to_string(split.join("manifest.json")).expect("read manifest");
+    let manifest_text =
+        std::fs::read_to_string(split.join("manifest.json")).expect("read manifest");
     let manifest = parse_manifest(&manifest_text);
     eprintln!(
         "manifest: {} gallery entries, {} probe entries",
@@ -341,9 +352,9 @@ fn main() -> ExitCode {
             .probes
             .iter()
             .filter(|e| {
-                filter.iter().any(|needle| {
-                    e.file.contains(needle) || e.identity.contains(needle)
-                })
+                filter
+                    .iter()
+                    .any(|needle| e.file.contains(needle) || e.identity.contains(needle))
             })
             .cloned()
             .collect()
@@ -456,16 +467,20 @@ fn main() -> ExitCode {
     );
 
     // Per-probe deltas: which cases flipped between correct and wrong?
-    let mut fixed: Vec<&ProbeResult> = results
-        .iter()
-        .filter(|r| !r.single.2 && r.tta.2)
-        .collect();
-    let mut broken: Vec<&ProbeResult> = results
-        .iter()
-        .filter(|r| r.single.2 && !r.tta.2)
-        .collect();
-    fixed.sort_by(|a, b| b.tta.1.partial_cmp(&a.tta.1).unwrap_or(std::cmp::Ordering::Equal));
-    broken.sort_by(|a, b| b.tta.1.partial_cmp(&a.tta.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut fixed: Vec<&ProbeResult> = results.iter().filter(|r| !r.single.2 && r.tta.2).collect();
+    let mut broken: Vec<&ProbeResult> = results.iter().filter(|r| r.single.2 && !r.tta.2).collect();
+    fixed.sort_by(|a, b| {
+        b.tta
+            .1
+            .partial_cmp(&a.tta.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    broken.sort_by(|a, b| {
+        b.tta
+            .1
+            .partial_cmp(&a.tta.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     println!();
     println!("TTA flipped {} probe(s) wrong → right:", fixed.len());
     for r in &fixed {

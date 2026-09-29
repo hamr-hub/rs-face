@@ -43,7 +43,10 @@ fn require(file: &str) -> Option<PathBuf> {
     if p.exists() {
         Some(p)
     } else {
-        eprintln!("SKIP: {} not found; run tools/fetch_models.sh --all", p.display());
+        eprintln!(
+            "SKIP: {} not found; run tools/fetch_models.sh --all",
+            p.display()
+        );
         None
     }
 }
@@ -133,11 +136,7 @@ fn main() {
         match a.as_str() {
             "--video" => video = PathBuf::from(args.next().expect("--video <PATH>")),
             "--max-frames" => {
-                max_frames = args
-                    .next()
-                    .expect("--max-frames <N>")
-                    .parse()
-                    .expect("u64")
+                max_frames = args.next().expect("--max-frames <N>").parse().expect("u64")
             }
             "--help" | "-h" => {
                 println!("usage: accuracy-e2e [--video <PATH>] [--max-frames <N>]");
@@ -177,11 +176,8 @@ fn main() {
             return;
         }
     };
-    let rec = match ArcFaceRecognizer::open(
-        &rpath,
-        models::find("arcface_w600k_r50"),
-        &session_cfg,
-    ) {
+    let rec = match ArcFaceRecognizer::open(&rpath, models::find("arcface_w600k_r50"), &session_cfg)
+    {
         Ok(r) => r,
         Err(e) => {
             eprintln!("ArcFace load failed: {e}");
@@ -231,7 +227,8 @@ fn main() {
                     per_frame.push(emb);
                 }
             }
-            st.embed_ms.push(embed_start.elapsed().as_secs_f64() * 1000.0);
+            st.embed_ms
+                .push(embed_start.elapsed().as_secs_f64() * 1000.0);
             st.all_per_frame.push(per_frame);
         }
         st.frames += 1;
