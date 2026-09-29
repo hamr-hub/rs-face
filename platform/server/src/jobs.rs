@@ -23,6 +23,7 @@
 //! - SSE 每 15 秒发注释 `:keepalive` 帧,防中间代理切断。
 
 use crate::config::Config;
+use crate::metrics::PlatformMetrics;
 use crate::persist::Db;
 use crate::s3::S3Client;
 use rsface::cnn::{CnnConfig, CnnDetector, CnnWeights};
@@ -146,6 +147,11 @@ pub struct Job {
     /// 重新上传)→ 旧 key 不命中,自动重建。
     /// 锁粒度:识别 handler 只短持锁 clone body,不会拖住 spawn_blocking。
     pub recognize_cache: Mutex<Option<RecognizeCache>>,
+    /// 弱引用回 registry,仅 `set_status` 用来 bump 聚合计数。
+    /// 弱引用是为了不形成 `Arc<Registry> → HashMap<_, Arc<Job>> → Job →
+    /// Arc<Registry>` 的环。Registry 在 set_status 时若已被 drop,
+    /// `upgrade()` 返回 None,直接跳过即可,不影响 job 状态。
+    pub registry: std::sync::Weak<JobRegistry>,
 }
 
 /// `/recognize` per-job 缓存实体。`body` 是可直接返回给前端的 JSON Value,
@@ -164,7 +170,17 @@ impl Job {
     }
 
     pub fn set_status(&self, s: JobStatus) {
+        // 老实现裸写,这里加一层:把状态变化推到 registry 聚合计数。
+        // 调用方原本就只调 `set_status` 一处,所以取旧值 / 写新值 / 推计数
+        // 都在这里,语义对外不变。
+        let prev = *self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if prev == s {
+            return;
+        }
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = s;
+        if let Some(reg) = self.registry.upgrade() {
+            reg.transition_status_counter(prev, s);
+        }
     }
 
     pub fn emit(&self, payload: &str) {
@@ -250,23 +266,64 @@ pub struct JobRegistry {
     pub started_at: std::time::Instant,
     /// 停机信号:true 后 spawn_run 不再接收新任务,运行中的收到 cancel。
     pub shutdown: Arc<AtomicBool>,
-    /// 已加载的人脸画廊(懒加载)。`/api/jobs/{id}/recognize` 第一次请求时
-    /// 从 `cfg.gallery_dir` 训练三个识别器(LBPH/Eigenface/Fisherface),
-    /// 后续请求复用;空目录或目录不存在 → 缓存为 `None`,API 返回 `no_gallery`。
-    /// 每条 entry = (gallery_dir 路径, 加载时刻, `Arc<GalleryBundle>`)。
-    /// 锁粒度:整个 registry 一把 Mutex,识别请求之间的争抢极短(<10µs),
-    /// 不需要更细粒度(读路径只 clone Arc)。
-    pub gallery_cache: Mutex<
-        Option<(
-            std::path::PathBuf,
-            std::time::SystemTime,
-            Arc<crate::recognition::GalleryBundle>,
-        )>,
-    >,
     /// Persistent gallery state (DB-backed persons + faces). Powers
     /// /api/persons and /api/identify. Hydrated from PG on startup;
     /// writes go straight to PG (the in-memory cache is rebuilt lazily).
     pub gallery: Arc<crate::gallery::GalleryState>,
+    /// 增量聚合计数器:由 `metrics` / `job_stats` 端点直接读 O(1),
+    /// 不再每次扫描 registry 里全部 job。状态计数在 create / set_status
+    /// 同步路径维护,帧计数在 run_job 的 stats 更新分支维护
+    /// (per-job stats lock 已经在那里拿过,顺带 bump 原子计数零额外锁开销)。
+    /// 读侧 0 次 mutex + 0 次 per-job lock = 缓存未命中也是 O(1)。
+    pub agg: Arc<MetricsAgg>,
+    /// Per-algo 聚合计数器,按算法名分桶。algo 决定前(`run_job` 早期)
+    /// 暂记入 "pending",`build_detector` 成功后迁移到正确 algo 名。
+    /// 锁粒度:lazy insert 时短暂持锁,atomic 读 / 写都走 Arc clone。
+    pub algo_aggs: Mutex<std::collections::BTreeMap<String, Arc<AlgoAggAtomics>>>,
+}
+
+/// 平台级 KPI 聚合的原子容器。`/api/metrics` / `/api/jobs/stats` /
+/// `PlatformMetrics::current()` 全都从这里读 O(1),不再扫 registry。
+///
+/// 一致性:
+/// - 状态计数(create / mark_started / set_status)用 SeqCst 顺序,
+///   状态机的合法转移是线性的(queued → running → terminal),
+///   计数器错一格就把前端 KPI 弄脏;
+/// - 帧计数在 run_job 主循环维护,各 job 独立的累加路径,Relaxed
+///   就够了 —— 单调递增、无回退语义,聚合时短暂偏差可接受。
+#[derive(Debug, Default)]
+pub struct MetricsAgg {
+    pub total_jobs: AtomicU64,
+    pub running: AtomicU64,
+    pub queued: AtomicU64,
+    pub done: AtomicU64,
+    pub errored: AtomicU64,
+    pub cancelled: AtomicU64,
+    pub total_frames_processed: AtomicU64,
+    pub total_frames_with_face: AtomicU64,
+    pub total_detections: AtomicU64,
+    pub total_spoof_detections: AtomicU64,
+    pub total_blocked_detections: AtomicU64,
+    /// 终态 job 的 elapsed_ms 累加,`avg_job_ms = sum / timed_count`。
+    pub elapsed_sum_ms: AtomicU64,
+    pub timed_count: AtomicU64,
+}
+
+/// Per-algo 原子聚合,与 `algo_aggs` BTreeMap 配合使用。
+/// `Arc` 包裹是为了 lazy insert 后即便 BTreeMap 重新 hash,atomic
+/// 地址仍然稳定 —— 计数在 run_job 主循环里增量写,地址变一次就丢更新。
+///
+/// `active` 不单独存:`active = total - done - cancelled - error`,
+/// 读侧算法表达。增量路径里少一个 atomic,迁移逻辑也少一处。
+#[derive(Debug, Default)]
+pub struct AlgoAggAtomics {
+    pub total: AtomicU64,
+    pub done: AtomicU64,
+    pub cancelled: AtomicU64,
+    pub error: AtomicU64,
+    pub elapsed_sum_ms: AtomicU64,
+    pub timed_count: AtomicU64,
+    pub detections: AtomicU64,
 }
 
 /// 终态判断:done/cancelled/error 视为已结束,queued/running 仍在跑。
@@ -314,7 +371,11 @@ impl JobRegistry {
     /// 创建 job 并登记。背压:`max_queue_depth > 0` 且当前排队数已达上限时
     /// 返回 Err(调用方应回 429)。排队数 = 已创建但还没拿到 semaphore permit
     /// 的任务(不含 running)。
-    pub fn create(&self, kind: JobKind, display_name: String) -> Result<Arc<Job>, QueueFull> {
+    ///
+    /// `self: &Arc<Self>` 是为了让 Job 持 `Weak<JobRegistry>`,set_status
+    /// 把状态变化推到聚合计数时不需要走回 caller 又拿一次 Arc。所有调用点
+    /// 都是 `Arc<JobRegistry>::create(...)` 直接调用,Rust 自动 borrow。
+    pub fn create(self: &Arc<Self>, kind: JobKind, display_name: String) -> Result<Arc<Job>, QueueFull> {
         let max_q = self.cfg.max_queue_depth;
         if max_q > 0 {
             // fetch_add 先占坑再判断:并发下最多短暂超限 1,可接受。
@@ -330,8 +391,16 @@ impl JobRegistry {
             // 不限排队深度时也计数,供 /api/metrics 观察。
             self.queued_jobs.fetch_add(1, Ordering::SeqCst);
         }
+        // O(1) KPI:total_jobs + queued + 算法桶 pre-seed "pending"。
+        // 全部走 atomic,单条 create 路径不引入新锁。
+        self.agg.total_jobs.fetch_add(1, Ordering::SeqCst);
+        self.agg.queued.fetch_add(1, Ordering::SeqCst);
+        self.algo_aggs_inc("pending", |a| {
+            a.total.fetch_add(1, Ordering::SeqCst);
+        });
         let (tx, _rx) = broadcast::channel(256);
         let dn_for_db = display_name.clone();
+        let registry_weak: std::sync::Weak<JobRegistry> = Arc::downgrade(self);
         let job = Arc::new(Job {
             id: new_id(),
             kind,
@@ -350,6 +419,7 @@ impl JobRegistry {
             event_tx: tx,
             worker: Mutex::new(None),
             recognize_cache: Mutex::new(None),
+            registry: registry_weak,
         });
         self.jobs
             .lock()
@@ -371,18 +441,288 @@ impl JobRegistry {
     fn mark_started(&self) {
         self.queued_jobs.fetch_sub(1, Ordering::SeqCst);
         self.running_jobs.fetch_add(1, Ordering::SeqCst);
+        self.agg.queued.fetch_sub(1, Ordering::SeqCst);
+        self.agg.running.fetch_add(1, Ordering::SeqCst);
+        // algo_aggs 不动:queued→running 不涉及桶迁移
+        // (algo 在 run_job 早期 build_detector 后才确定,那时
+        // 不论 job 当前是 queued 还是 running,都一次性把桶从 pending
+        // 迁到具体 algo —— `transition_algo_bucket` 处理)。
     }
 
     /// 任务线程退出(任何终态)时调用。
     fn mark_finished(&self) {
         self.running_jobs.fetch_sub(1, Ordering::SeqCst);
+        self.agg.running.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// 排队阶段即被取消:不进入 running,只回退 queued 计数。
     fn mark_abandoned(&self) {
         self.queued_jobs.fetch_sub(1, Ordering::SeqCst);
+        self.agg.queued.fetch_sub(1, Ordering::SeqCst);
+        // pending.total 也要回退 1,因为本 job 永远不会进入 run_job 走迁移。
+        // 注意:只在 mark_abandoned 路径减 pending.total;transition_algo_bucket
+        // 不动(没新桶接收)。让 pending.total 始终准确。
+        self.algo_aggs_inc("pending", |a| {
+            a.total.fetch_sub(1, Ordering::SeqCst);
+        });
     }
 
+    /// Job 状态转移时(由 `Job::set_status` 调)同步更新聚合计数。
+    /// `prev == s` 时调用方已 short-circuit,这里不再判等。
+    ///
+    /// 只关心 terminal 转移(running → done/cancelled/error),因为 queued
+    /// 和 running 的 active 计数已经在 mark_started / mark_abandoned 维护。
+    fn transition_status_counter(&self, prev: JobStatus, s: JobStatus) {
+        // 仅在 prev=Running → s=Terminal 这条路径上有意义。
+        if prev == JobStatus::Running && is_terminal(s) {
+            match s {
+                JobStatus::Done => {
+                    self.agg.done.fetch_add(1, Ordering::SeqCst);
+                }
+                JobStatus::Cancelled => {
+                    self.agg.cancelled.fetch_add(1, Ordering::SeqCst);
+                }
+                JobStatus::Error => {
+                    self.agg.errored.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// 帧级增量:在 run_job 主循环的 stats 更新分支同步 bump。
+    /// 调用方已经持 per-job stats lock,bump 一次 atomic 不再额外加锁。
+    pub fn bump_frame_counters(&self, frames_inc: u64, faces_inc: u64, dets_inc: u64) {
+        if frames_inc > 0 {
+            self.agg
+                .total_frames_processed
+                .fetch_add(frames_inc, Ordering::Relaxed);
+        }
+        if faces_inc > 0 {
+            self.agg
+                .total_frames_with_face
+                .fetch_add(faces_inc, Ordering::Relaxed);
+        }
+        if dets_inc > 0 {
+            self.agg
+                .total_detections
+                .fetch_add(dets_inc, Ordering::Relaxed);
+        }
+    }
+
+    /// 活体 / 拦截统计增量:spoof 和 blocked 在 liveness 路径上 bump。
+    pub fn bump_liveness_counters(&self, spoof_inc: u64, blocked_inc: u64) {
+        if spoof_inc > 0 {
+            self.agg
+                .total_spoof_detections
+                .fetch_add(spoof_inc, Ordering::Relaxed);
+        }
+        if blocked_inc > 0 {
+            self.agg
+                .total_blocked_detections
+                .fetch_add(blocked_inc, Ordering::Relaxed);
+        }
+    }
+
+    /// Job 进入终态时:把 elapsed_ms 累加进 avg 计数器。
+    /// `finalize` 之后调一次(写 stats.elapsed_ms 的同帧)。
+    pub fn record_terminal_elapsed(&self, elapsed_ms: u64) {
+        if elapsed_ms > 0 {
+            self.agg.elapsed_sum_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+            self.agg.timed_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Per-algo 桶的 helper:`algo_aggs` 锁内 lazy insert + 持锁外调用
+    /// 用户给定的 closure 对 atomics 做修改。读侧 `algo_aggs_snapshot` 直接
+    /// 复制 BTreeMap 内容 + clone Arc。
+    fn algo_aggs_inc(&self, name: &str, f: impl FnOnce(&AlgoAggAtomics)) {
+        let mut map = self.algo_aggs.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = map
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(AlgoAggAtomics::default()))
+            .clone();
+        drop(map);
+        f(&entry);
+    }
+
+    /// 把 job 从 `pending` 桶迁到具体算法桶。`run_job` `build_detector`
+    /// 成功后调一次。active 不单独存(读侧算法表达 total - 终态),所以
+    /// 这里只搬 `total`:pending 减 1,新 algo 加 1。
+    ///
+    /// 重复调用(同 job)幂等保护:已迁移过的 pending.total 减过头。`old`
+    /// 是 `Job::algo` 当前值(可能就是 "pending",也可能已经是某 algo 名,
+    /// 取决于调用方)。重复调用 old == new 时 short-circuit。
+    pub fn transition_algo_bucket(&self, old: &str, new: &str) {
+        if old == new {
+            return;
+        }
+        // 旧桶减 1,新桶加 1。两者都可能 lazy 创建。
+        self.algo_aggs_inc(old, |a| {
+            a.total.fetch_sub(1, Ordering::SeqCst);
+        });
+        self.algo_aggs_inc(new, |a| {
+            a.total.fetch_add(1, Ordering::SeqCst);
+        });
+    }
+
+    /// 给 job 的具体 algo 桶加 detection 计数(`run_job` 主循环里同步 bump)。
+    /// 老 path 走 `aggregate_algo_stats` 一次性扫 + 加,这里换成增量。
+    pub fn bump_algo_detections(&self, algo: &str, dets_inc: u64) {
+        if dets_inc == 0 {
+            return;
+        }
+        self.algo_aggs_inc(algo, |a| {
+            a.detections.fetch_add(dets_inc, Ordering::Relaxed);
+        });
+    }
+
+    /// 终态时把 elapsed_ms 推到具体 algo 桶(供 per-algo avg)。
+    pub fn record_algo_elapsed(&self, algo: &str, elapsed_ms: u64) {
+        if elapsed_ms == 0 {
+            return;
+        }
+        self.algo_aggs_inc(algo, |a| {
+            a.elapsed_sum_ms.fetch_add(elapsed_ms, Ordering::Relaxed);
+            a.timed_count.fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    /// 终态 done / cancelled / error 时,把对应 algo 桶的状态转移走完。
+    /// active 已经在 transition_algo_bucket + mark_finished 路径里减过,
+    /// 这里只 bump done/cancelled/error 桶。
+    pub fn finalize_algo_status(&self, algo: &str, terminal: JobStatus) {
+        match terminal {
+            JobStatus::Done => self.algo_aggs_inc(algo, |a| {
+                a.done.fetch_add(1, Ordering::SeqCst);
+            }),
+            JobStatus::Cancelled => self.algo_aggs_inc(algo, |a| {
+                a.cancelled.fetch_add(1, Ordering::SeqCst);
+            }),
+            JobStatus::Error => self.algo_aggs_inc(algo, |a| {
+                a.error.fetch_add(1, Ordering::SeqCst);
+            }),
+            _ => {}
+        }
+    }
+
+    /// 读侧:O(1) 快照,把 BTreeMap 复制成一对 (name, snapshot) 的 Vec。
+    /// 每个 snapshot 是 `AlgoAgg`(从原子读回,见下)。
+    pub fn algo_aggs_snapshot(&self) -> Vec<(String, AlgoAgg)> {
+        let map = self.algo_aggs.lock().unwrap_or_else(|e| e.into_inner());
+        map.iter()
+            .map(|(name, atomics)| {
+                let a = atomics;
+                let total = a.total.load(Ordering::Relaxed);
+                let done = a.done.load(Ordering::Relaxed);
+                let cancelled = a.cancelled.load(Ordering::Relaxed);
+                let error = a.error.load(Ordering::Relaxed);
+                let active = total.saturating_sub(done + cancelled + error);
+                (
+                    name.clone(),
+                    AlgoAgg {
+                        total,
+                        done,
+                        cancelled,
+                        error,
+                        active,
+                        elapsed_ms_sum: a.elapsed_sum_ms.load(Ordering::Relaxed),
+                        timed_count: a.timed_count.load(Ordering::Relaxed),
+                        detections: a.detections.load(Ordering::Relaxed),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// O(1) 平台级 KPI 快照:`/api/metrics` 直接返回这个,无 registry 扫描。
+    pub fn metrics_snapshot(&self) -> PlatformMetrics {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let started_ms = now_ms.saturating_sub(self.started_at.elapsed().as_millis() as u64);
+        let a = &self.agg;
+        let total_jobs = a.total_jobs.load(Ordering::SeqCst);
+        let running = a.running.load(Ordering::SeqCst);
+        let queued = a.queued.load(Ordering::SeqCst);
+        let done = a.done.load(Ordering::SeqCst);
+        let errored = a.errored.load(Ordering::SeqCst);
+        let cancelled = a.cancelled.load(Ordering::SeqCst);
+        let total_frames_processed = a.total_frames_processed.load(Ordering::Relaxed);
+        let total_frames_with_face = a.total_frames_with_face.load(Ordering::Relaxed);
+        let total_detections = a.total_detections.load(Ordering::Relaxed);
+        let total_spoof_detections = a.total_spoof_detections.load(Ordering::Relaxed);
+        let total_blocked_detections = a.total_blocked_detections.load(Ordering::Relaxed);
+        let elapsed_sum_ms = a.elapsed_sum_ms.load(Ordering::Relaxed);
+        let timed_count = a.timed_count.load(Ordering::Relaxed);
+        // 高级字段仍未在 `MetricsAgg` 上建模(预留),保持 0 兼容前端契约。
+        let total_gpu_levels = 0u64;
+        let total_cpu_levels = 0u64;
+        let total_gpu_skipped_levels = 0u64;
+        let total_levels = total_gpu_levels + total_cpu_levels;
+        let gpu_pct = if total_levels > 0 {
+            (total_gpu_levels as f32) * 100.0 / (total_levels as f32)
+        } else {
+            0.0
+        };
+        let live_fps_max = 0.0f32;
+        let live_fps_avg = 0.0f32;
+        let total_cascade_evals = 0u64;
+        let total_cascade_passes = 0u64;
+        let cascade_pass_rate = if total_cascade_evals > 0 {
+            total_cascade_passes as f32 / total_cascade_evals as f32
+        } else {
+            0.0
+        };
+        let avg_job_ms = if timed_count > 0 {
+            elapsed_sum_ms as f64 / timed_count as f64
+        } else {
+            0.0
+        };
+        let max_conc = self.cfg.max_concurrent_jobs as u32;
+        let concurrency = running.min(max_conc as u64) as u32;
+        let mode = std::env::var("RSFACE_ALGO")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if self.cfg.use_cnn || self.cfg.cnn_weights.is_some() {
+                    "cnn".into()
+                } else {
+                    "haar".into()
+                }
+            });
+        PlatformMetrics {
+            started_ms,
+            now_ms,
+            total_jobs,
+            running,
+            queued,
+            done,
+            errored,
+            cancelled,
+            total_frames_processed,
+            total_frames_with_face,
+            total_detections,
+            total_spoof_detections,
+            total_blocked_detections,
+            total_gpu_levels,
+            total_cpu_levels,
+            total_gpu_skipped_levels,
+            gpu_pct,
+            live_fps_max,
+            live_fps_avg,
+            total_cascade_evals,
+            total_cascade_passes,
+            cascade_pass_rate,
+            avg_job_ms,
+            concurrency,
+            max_concurrency: max_conc,
+            db_enabled: self.db.pool.is_some(),
+            s3_endpoint: self.cfg.s3_endpoint.clone(),
+            mode,
+        }
+    }
     /// 删除任务媒体:fire-and-forget 地在 blocking 线程枚举并删除
     /// S3 对象 + 本地 media/tmp 目录。任务已先从索引移除,清理结果
     /// 不影响删除响应;个别对象删除失败只在服务端日志告警。
@@ -708,31 +1048,19 @@ impl JobRegistry {
             });
         }
 
-        // heartbeat:每 5s 写一次 `heartbeat_at = now()` + `last_heartbeat_ts = now()`。
-        // - `heartbeat_at` 走 30s 节奏对 startup-reaper 够用,但与 5s 实时心跳合并到
-        //   同一 task 后,reaper 看到的"alive"时间窗更紧(30s → 5s),更不容易误判长
-        //   任务为僵尸。同一任务里两个 `UPDATE` 顺序执行,DB 写入次数仍是 1 round-trip
-        //   一次,合并不引入额外开销。
-        // - `last_heartbeat_ts` 5s 刷新,服务于运行时 janitor(30s 阈值)。
-        //
-        // 任务合并:旧实现是两条独立 `tokio::spawn` 任务,每 5s/30s 各占一次 DB
-        // 连接槽位(共 2 条 in-flight tokio task)。现在两条 DB 写入 + 一次 SSE 推
-        // 帧(`heartbeat` 事件)集中在同一 task 里:
-        // - DB tick:5s,同时写两列
-        // - SSE tick:1s,只 emit,不写 DB
-        // 三者共享同一个 cancel AtomicBool,任意 tick 看到 true 即退出。
+        // SSE 心跳(per-job):每秒用 frames_processed 增量算 fps,推给前端。
+        // 纯 SSE emit,**不写 DB** —— DB 心跳统一交给 `spawn_heartbeat_coalescer`
+        // 每 5s 一次批量 UPDATE(N 个 running job 共 1 次 roundtrip,而
+        // 不是每 job 各 2 次)。SSE 推送仍需要 per-job stats 锁拿
+        // `frames_processed`,跨 job 不好算 fps,所以这条路径不动。
         {
-            let db = self.db.clone();
-            let id = job.id.clone();
             let cancel = job.cancel.clone();
             let event_tx = job.event_tx.clone();
             let job_for_sse = job.clone();
             tokio::spawn(async move {
-                // 第一次 tick 立刻发:让 startup-reaper 在 job 启动 30s 内就能
-                // 看到"alive"标记(而不是等到第一个 30s tick)。
+                // 第一次 tick 立刻发一个 0fps 心跳:让前端的 fps 卡片立刻
+                // 出现,不会等到 1s 后才第一次更新。
                 if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    db.heartbeat(&id).await;
-                    db.heartbeat_realtime(&id).await;
                     let _ = event_tx.send(
                         serde_json::json!({
                             "type": "heartbeat",
@@ -746,15 +1074,8 @@ impl JobRegistry {
                         .to_string(),
                     );
                 }
-                let mut tick_db = tokio::time::interval(std::time::Duration::from_secs(5));
-                // 跳过首次立即触发(上面已经手动发过),让 5s 节奏对齐。
-                tick_db.tick().await;
                 let mut tick_sse = tokio::time::interval(std::time::Duration::from_secs(1));
-                tick_sse.tick().await;
-                // SSE 心跳:每 1s 用 frames_processed 增量算 fps,推给前端
-                // (前端 `applyHeartbeat` 用它更新 fps_window)。不写 DB,
-                // 单次成本 = 1 次 stats 锁 + 1 次 broadcast send(无订阅者直接
-                // 返回,零开销)。
+                tick_sse.tick().await; // 跳过首次立即触发(上面手动发过)
                 let mut last_frames: u64 = job_for_sse
                     .stats
                     .lock()
@@ -762,42 +1083,36 @@ impl JobRegistry {
                     .frames_processed;
                 let mut last_ts = Instant::now();
                 loop {
-                    tokio::select! {
-                        _ = tick_db.tick() => {
-                            if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
-                            db.heartbeat(&id).await;
-                            db.heartbeat_realtime(&id).await;
-                        }
-                        _ = tick_sse.tick() => {
-                            if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
-                            let now = Instant::now();
-                            let frames_now = job_for_sse
-                                .stats
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .frames_processed;
-                            let dt_ms = now.saturating_duration_since(last_ts).as_millis() as u64;
-                            let df = frames_now.saturating_sub(last_frames);
-                            // dt_ms = 0 时 fps=0(系统时钟回退或同 ms 内连发);
-                            // 显式 clamp 到 1000 fps 防异常广播峰值。
-                            let fps = if dt_ms > 0 {
-                                let f = (df as f32) * 1000.0 / (dt_ms as f32);
-                                f.min(1000.0)
-                            } else {
-                                0.0
-                            };
-                            last_frames = frames_now;
-                            last_ts = now;
-                            let _ = event_tx.send(
-                                serde_json::json!({
-                                    "type": "heartbeat",
-                                    "fps": fps,
-                                    "frames_processed": frames_now,
-                                })
-                                .to_string(),
-                            );
-                        }
+                    tick_sse.tick().await;
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
                     }
+                    let now = Instant::now();
+                    let frames_now = job_for_sse
+                        .stats
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .frames_processed;
+                    let dt_ms = now.saturating_duration_since(last_ts).as_millis() as u64;
+                    let df = frames_now.saturating_sub(last_frames);
+                    // dt_ms = 0 时 fps=0(系统时钟回退或同 ms 内连发);
+                    // 显式 clamp 到 1000 fps 防异常广播峰值。
+                    let fps = if dt_ms > 0 {
+                        let f = (df as f32) * 1000.0 / (dt_ms as f32);
+                        f.min(1000.0)
+                    } else {
+                        0.0
+                    };
+                    last_frames = frames_now;
+                    last_ts = now;
+                    let _ = event_tx.send(
+                        serde_json::json!({
+                            "type": "heartbeat",
+                            "fps": fps,
+                            "frames_processed": frames_now,
+                        })
+                        .to_string(),
+                    );
                 }
             });
         }
@@ -921,6 +1236,12 @@ impl JobRegistry {
                 st.algo = detector.kind_name().to_string();
             }
         }
+        // 算法桶迁移:create() 时此 job 入了 "pending" 桶,现在确定 algo 后
+        // 把 total 计数从 pending 搬到具体 algo。重复调用 short-circuit 保护。
+        // 注意:本 job 当前 active 还在 running(queued→running 的 mark_started
+        // 不动 algo_aggs),total 计数从 pending 搬到 algo 即可,active = total
+        // - 终态 在读侧自然正确。
+        self.transition_algo_bucket("pending", &algo_name);
         job.emit(
             &serde_json::json!({
                 "type": "detector",
@@ -1006,7 +1327,14 @@ impl JobRegistry {
                         db.add_frames_batch(&jid, &db_pending).await;
                     });
                 }
-                finalize(job, started, &self.cfg.tmp_dir);
+                finalize(
+                    job,
+                    started,
+                    &self.cfg.tmp_dir,
+                    self,
+                    &algo_name,
+                    JobStatus::Cancelled,
+                );
                 return Ok(());
             }
             if max_frames > 0 && frame_idx >= max_frames {
@@ -1116,22 +1444,34 @@ impl JobRegistry {
                     verdicts.push((live, blocked));
                 }
                 if has_face || job.kind == JobKind::Image || keepalive {
-                    let mut annotated = clone_rgb(&base);
-                    for (d, (_, blocked)) in detections.iter().zip(verdicts.iter()) {
-                        let color = if *blocked {
-                            (255, 64, 64)
-                        } else {
-                            (0, 255, 96)
-                        };
-                        annotated.draw_rect(d.x, d.y, d.w, d.h, color);
-                    }
-                    let key = format!("jobs/{}/annotated/{:06}.png", job.id, frame.index);
-                    if let Some(bytes) = encode_png(&annotated) {
-                        let stored = put_with_inline_fallback(self, &key, "image/png", &bytes);
-                        if let Some(b64) = inline_data_b64(&stored, &bytes) {
-                            inlines.push((stored.clone(), b64));
+                    // 优化:keepalive 帧 + 无 face 时,annotated 与 original 字节相同。
+                    // clone_rgb 是全帧 memcpy(1920x1080 RGB ~6MB),encode_png 再
+                    // 跑 deflate + put S3 都白做。直接把 annotated_key 指向
+                    // original_key,前端拿到的 SSE frame event annotated 字段 = 原图,
+                    // 视觉上没差(本来就没框可画)。
+                    // 仅在 stream keepalive 路径生效;image job 必须有独立标注层
+                    // (它的 cover_key 走 original 不走 annotated,但仍要写一个)
+                    // 实际上 image 也只有一张图,没有前后对比需求,可以共用。
+                    if keepalive && !has_face && job.kind == JobKind::Stream {
+                        result.annotated_key = result.original_key.clone();
+                    } else {
+                        let mut annotated = clone_rgb(&base);
+                        for (d, (_, blocked)) in detections.iter().zip(verdicts.iter()) {
+                            let color = if *blocked {
+                                (255, 64, 64)
+                            } else {
+                                (0, 255, 96)
+                            };
+                            annotated.draw_rect(d.x, d.y, d.w, d.h, color);
                         }
-                        result.annotated_key = Some(stored);
+                        let key = format!("jobs/{}/annotated/{:06}.png", job.id, frame.index);
+                        if let Some(bytes) = encode_png(&annotated) {
+                            let stored = put_with_inline_fallback(self, &key, "image/png", &bytes);
+                            if let Some(b64) = inline_data_b64(&stored, &bytes) {
+                                inlines.push((stored.clone(), b64));
+                            }
+                            result.annotated_key = Some(stored);
+                        }
                     }
                 }
 
@@ -1202,6 +1542,18 @@ impl JobRegistry {
                 st.total_detections += detections.len() as u64;
                 st.spoof_detections += frame_spoof;
                 st.blocked_detections += frame_blocked;
+                // O(1) 增量计数:per-job stats 锁已经在上面拿过,
+                // 顺带 bump 平台级 MetricsAgg + per-algo detections,免得后面
+                // /api/metrics /api/jobs/stats 还要扫 registry。
+                // 算法名在 run_job 早期 build_detector 后已确定并迁移过桶。
+                let dets_inc = detections.len() as u64;
+                self.bump_frame_counters(
+                    1,
+                    if has_face { 1 } else { 0 },
+                    dets_inc,
+                );
+                self.bump_liveness_counters(frame_spoof, frame_blocked);
+                self.bump_algo_detections(&algo_name, dets_inc);
             }
             // 周期性把 stats 写回 DB(每 30 帧)
             if frame_idx.is_multiple_of(30) {
@@ -1239,7 +1591,14 @@ impl JobRegistry {
                 db.add_frames_batch(&jid, &db_pending).await;
             });
         }
-        finalize(job, started, &self.cfg.tmp_dir);
+        finalize(
+            job,
+            started,
+            &self.cfg.tmp_dir,
+            self,
+            &algo_name,
+            JobStatus::Done,
+        );
         job.emit(
             &serde_json::json!({
                 "type": "done",
@@ -1306,11 +1665,85 @@ pub fn spawn_janitor_with_tick(
     })
 }
 
-fn finalize(job: &Job, started: std::time::Instant, tmp_dir: &Path) {
+/// 心跳 coalescer:每 5s 一次,把 registry 内所有 `status='running'` 的
+/// job 的三列时间戳(heartbeat_at / last_heartbeat_ts / updated_at)用
+/// 一条 PG `WHERE id = ANY($1)` 批量刷一次。
+///
+/// 旧实现每个 running job 各自 spawn 一个 tokio task,每 5s 调
+/// `heartbeat()` + `heartbeat_realtime()` 两条独立 UPDATE,N 个并发
+/// job 就是 2N 次 / 5s DB roundtrip;CPU 上下文切换 + DB connection
+/// pool 抢占都消耗可观。新实现与 N 无关,固定 1 次 / 5s。
+///
+/// **不替代** run_job 主循环里的 SSE 心跳:每秒的 fps 计算需要
+/// per-job `frames_processed` 增量,跨 job 不好做;那条路径依然走
+/// per-job tokio::spawn(只发 SSE 不写 DB)。
+///
+/// shutdown 同步 axum graceful_shutdown,fire-and-forget task 不会
+/// 撑住 graceful_shutdown 等待。
+pub fn spawn_heartbeat_coalescer(
+    db: Arc<crate::persist::Db>,
+    registry: Arc<JobRegistry>,
+    shutdown: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // 第一次立即 tick:让 server 刚启就有 last_heartbeat_ts 落库,
+        // 否则 startup-reaper + 运行 janitor 在前 5s 内看不到任何
+        // "alive" 标记。后续按 5s 节奏对齐。
+        let mut running_ids: Vec<String> = registry
+            .list()
+            .into_iter()
+            .filter(|j| j.status() == JobStatus::Running)
+            .map(|j| j.id.clone())
+            .collect();
+        if !running_ids.is_empty() {
+            db.heartbeat_batch(&running_ids).await;
+        }
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        tick.tick().await; // 跳过首次立即触发(上面已经手动写过)
+        loop {
+            tick.tick().await;
+            if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                tracing::info!("[heartbeat] shutdown signal received, exiting");
+                return;
+            }
+            running_ids = registry
+                .list()
+                .into_iter()
+                .filter(|j| j.status() == JobStatus::Running)
+                .map(|j| j.id.clone())
+                .collect();
+            if running_ids.is_empty() {
+                continue;
+            }
+            db.heartbeat_batch(&running_ids).await;
+        }
+    })
+}
+
+/// 终态收尾:写 elapsed_ms + 推聚合 + 删 tmp 目录。
+/// registry 引用用来同步 bump 平台级 MetricsAgg(老代码这条路径只写 stats,
+/// 现在 elapsed_ms 写完之后立刻也推一份到 avg_job_ms 计数器 + per-algo 桶)。
+/// elapsed_ms 是 ms 精度,Relaxed 单调累加足够。
+fn finalize(
+    job: &Job,
+    started: std::time::Instant,
+    tmp_dir: &Path,
+    registry: &JobRegistry,
+    algo_name: &str,
+    terminal: JobStatus,
+) {
+    let elapsed_ms = started.elapsed().as_millis() as u64;
     job.stats
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .elapsed_ms = started.elapsed().as_millis() as u64;
+        .elapsed_ms = elapsed_ms;
+    // 同步推到 agg + per-algo 桶:供 /api/metrics 的 avg_job_ms、
+    // /api/jobs/stats 的 per-algo avg_elapsed_ms 使用。`finalize` 只
+    // 在 run_job 主路径 (Done / Cancelled / Error) 调用一次,所以
+    // 这三处增量不会重复。
+    registry.record_terminal_elapsed(elapsed_ms);
+    registry.record_algo_elapsed(algo_name, elapsed_ms);
+    registry.finalize_algo_status(algo_name, terminal);
     // 清理临时目录(异步尽力而为)。必须用配置的 TMP_DIR,而非硬编码
     // /tmp/rsface-jobs——否则非默认部署下每个 job 的工作目录都会泄漏在磁盘上。
     let dir = tmp_dir.join(&job.id);
@@ -1380,10 +1813,17 @@ fn normalize_image_input(input: &str, work_dir: &Path) -> std::io::Result<String
     }
 }
 
-fn frame_rgb(frame: &Frame) -> RgbImage {
+/// The unannotated RGB pixels of `frame`, as cheaply as possible.
+///
+/// `Frame::rgb` is an `Arc<RgbImage>` shared with the decoder, so when the
+/// source provided colour we hand back a *second* Arc to the same buffer
+/// rather than a fresh full-frame copy. The caller must treat the result as
+/// read-only and clone before drawing (see the annotated-frame path).
+/// Only the grayscale-source case (Arc absent) actually allocates.
+fn frame_rgb(frame: &Frame) -> std::borrow::Cow<'_, RgbImage> {
     match &frame.rgb {
-        Some(rgb) => clone_rgb(rgb),
-        None => RgbImage::from_gray(&frame.gray),
+        Some(rgb) => std::borrow::Cow::Borrowed(rgb),
+        None => std::borrow::Cow::Owned(RgbImage::from_gray(&frame.gray)),
     }
 }
 
@@ -1977,6 +2417,7 @@ pub struct AlgoAgg {
 }
 
 /// 聚合输入:从 `Job` 提取的最小字段集(便于单测,不依赖整个 registry)。
+#[allow(dead_code)] // 仅供单测 `aggregate_algo_stats` 喂数据用;生产路径走 algo_aggs 增量。
 #[derive(Clone, Debug)]
 pub struct AggSample {
     pub algo: String,
@@ -1991,6 +2432,7 @@ pub struct AggSample {
 /// - `algo` 为空的 sample(尚未构建 detector 的 queued job)归入 `"pending"`;
 /// - `elapsed_ms` 只对终态(done/cancelled/error)累计,queued/running 不算;
 /// - `detections` 对所有状态累计(反映实时检出量)。
+#[allow(dead_code)] // 单测使用,生产路径已切到 O(1) 原子读 algo_aggs_snapshot。
 pub fn aggregate_algo_stats(samples: &[AggSample]) -> std::collections::BTreeMap<String, AlgoAgg> {
     let mut out: std::collections::BTreeMap<String, AlgoAgg> = std::collections::BTreeMap::new();
     for s in samples {
@@ -2028,6 +2470,11 @@ pub fn aggregate_algo_stats(samples: &[AggSample]) -> std::collections::BTreeMap
 
 impl JobRegistry {
     /// 收集 registry 内所有 job 的聚合 sample(按需调用,list 锁只短持)。
+    ///
+    /// **保留仅供单测用**:生产路径(`/api/jobs/stats`、`/api/metrics`)
+    /// 已切到 O(1) 原子读 `algo_aggs_snapshot` / `metrics_snapshot`。
+    /// 单测 `aggregate_algo_stats` 直接喂 `Vec<AggSample>`,不依赖此方法。
+    #[allow(dead_code)]
     pub fn collect_agg_samples(&self) -> Vec<AggSample> {
         // 一次性把 Arc<Job> 拷出来,map 锁立刻释放;
         // 每个 job 内部的锁只在读取单 job 时短暂持有。
@@ -2137,6 +2584,201 @@ mod tests {
         assert!(agg.is_empty());
     }
 
+    /// 增量聚合(O(1) 原子读)与 O(n) 扫描语义对齐测试。
+    ///
+    /// 模拟一个 job 的全生命周期:create → mark_started → set_status(running)
+    /// → bump_frame_counters → bump_algo_detections → algo 桶迁移 →
+    /// set_status(done) → finalize 路径的 record_terminal_elapsed /
+    /// record_algo_elapsed / finalize_algo_status。验证:
+    /// - `metrics_snapshot()` 的字段值正确
+    /// - `algo_aggs_snapshot()` 的字段值正确
+    /// - 路径顺序与状态机一致(running → done 单调)
+    #[tokio::test]
+    async fn metrics_snapshot_matches_state_machine() {
+        use std::sync::Arc;
+        let cfg = Config::from_env();
+        let reg = Arc::new(JobRegistry {
+            jobs: Mutex::new(HashMap::new()),
+            s3: Arc::new(crate::s3::S3Client::new(
+                "http://127.0.0.1:1".into(),
+                "us-east-1".into(),
+                "k".into(),
+                "s".into(),
+                "b".into(),
+            )),
+            cfg: Config {
+                max_concurrent_jobs: 1,
+                ..cfg
+            },
+            db: Arc::new(crate::persist::Db { pool: None }),
+            rt: tokio::runtime::Handle::current(),
+            job_slots: Arc::new(Semaphore::new(1)),
+            running_jobs: AtomicU64::new(0),
+            queued_jobs: AtomicU64::new(0),
+            started_at: std::time::Instant::now(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            gallery: std::sync::Arc::new(crate::gallery::GalleryState::empty_for_tests(
+                42,
+                Default::default(),
+            )),
+            agg: Arc::new(MetricsAgg::default()),
+            algo_aggs: Mutex::new(std::collections::BTreeMap::new()),
+        });
+
+        // 1) create:pending 桶 total + 1, agg 计数 queued / total_jobs +1。
+        let job = reg.create(JobKind::Stream, "t".into()).unwrap();
+        assert_eq!(reg.agg.total_jobs.load(Ordering::SeqCst), 1);
+        assert_eq!(reg.agg.queued.load(Ordering::SeqCst), 1);
+        assert_eq!(reg.agg.running.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            reg.algo_aggs
+                .lock()
+                .unwrap()
+                .get("pending")
+                .unwrap()
+                .total
+                .load(Ordering::SeqCst),
+            1,
+            "create must bump pending.total"
+        );
+
+        // 2) mark_started:queued→running。
+        reg.mark_started();
+        assert_eq!(reg.agg.queued.load(Ordering::SeqCst), 0);
+        assert_eq!(reg.agg.running.load(Ordering::SeqCst), 1);
+
+        // 3) set_status(running) + 算法桶迁移 pending → haar。
+        job.set_status(JobStatus::Running);
+        reg.transition_algo_bucket("pending", "haar");
+        let pending_after = reg
+            .algo_aggs
+            .lock()
+            .unwrap()
+            .get("pending")
+            .unwrap()
+            .total
+            .load(Ordering::SeqCst);
+        let haar_after = reg
+            .algo_aggs
+            .lock()
+            .unwrap()
+            .get("haar")
+            .unwrap()
+            .total
+            .load(Ordering::SeqCst);
+        assert_eq!(pending_after, 0, "migrate from pending must drain pending.total");
+        assert_eq!(haar_after, 1, "migrate to haar must populate haar.total");
+
+        // 4) 帧级增量。
+        reg.bump_frame_counters(10, 3, 5);
+        reg.bump_liveness_counters(2, 1);
+        reg.bump_algo_detections("haar", 5);
+        assert_eq!(reg.agg.total_frames_processed.load(Ordering::Relaxed), 10);
+        assert_eq!(reg.agg.total_frames_with_face.load(Ordering::Relaxed), 3);
+        assert_eq!(reg.agg.total_detections.load(Ordering::Relaxed), 5);
+        assert_eq!(reg.agg.total_spoof_detections.load(Ordering::Relaxed), 2);
+        assert_eq!(reg.agg.total_blocked_detections.load(Ordering::Relaxed), 1);
+
+        // 5) 终态路径:running → done + elapsed 累加。
+        //    mark_finished 在 spawn_run 的 FinishGuard::drop 里自动调,
+        //    这里手动模拟一次,模拟线程退出。
+        reg.mark_finished();
+        job.set_status(JobStatus::Done);
+        reg.record_terminal_elapsed(500);
+        reg.record_algo_elapsed("haar", 500);
+        reg.finalize_algo_status("haar", JobStatus::Done);
+        assert_eq!(reg.agg.done.load(Ordering::SeqCst), 1);
+        assert_eq!(reg.agg.running.load(Ordering::SeqCst), 0);
+        assert_eq!(reg.agg.elapsed_sum_ms.load(Ordering::Relaxed), 500);
+        assert_eq!(reg.agg.timed_count.load(Ordering::Relaxed), 1);
+
+        // 6) 读侧快照:字段值与上面逐步累加结果一致。
+        let snap = reg.metrics_snapshot();
+        assert_eq!(snap.total_jobs, 1);
+        assert_eq!(snap.running, 0);
+        assert_eq!(snap.queued, 0);
+        assert_eq!(snap.done, 1);
+        assert_eq!(snap.errored, 0);
+        assert_eq!(snap.cancelled, 0);
+        assert_eq!(snap.total_frames_processed, 10);
+        assert_eq!(snap.total_frames_with_face, 3);
+        assert_eq!(snap.total_detections, 5);
+        assert_eq!(snap.total_spoof_detections, 2);
+        assert_eq!(snap.total_blocked_detections, 1);
+        assert!((snap.avg_job_ms - 500.0).abs() < 0.001);
+
+        let algo_snap = reg.algo_aggs_snapshot();
+        // 桶里至少应有 haar + pending(0 total,但 lazy 创建的 entry 还在)。
+        let haar = algo_snap
+            .iter()
+            .find(|(n, _)| n == "haar")
+            .map(|(_, a)| a.clone())
+            .expect("haar bucket must exist");
+        assert_eq!(haar.total, 1);
+        assert_eq!(haar.done, 1);
+        assert_eq!(haar.active, 0, "active = total - done - cancelled - error");
+        assert_eq!(haar.elapsed_ms_sum, 500);
+        assert_eq!(haar.timed_count, 1);
+        assert_eq!(haar.detections, 5);
+    }
+
+    /// abandoned queued job 的 pending.total 必须回退(否则历史残留)。
+    #[tokio::test]
+    async fn mark_abandoned_decrements_pending_total() {
+        use std::sync::Arc;
+        let cfg = Config::from_env();
+        let reg = Arc::new(JobRegistry {
+            jobs: Mutex::new(HashMap::new()),
+            s3: Arc::new(crate::s3::S3Client::new(
+                "http://127.0.0.1:1".into(),
+                "us-east-1".into(),
+                "k".into(),
+                "s".into(),
+                "b".into(),
+            )),
+            cfg: Config {
+                max_concurrent_jobs: 1,
+                ..cfg
+            },
+            db: Arc::new(crate::persist::Db { pool: None }),
+            rt: tokio::runtime::Handle::current(),
+            job_slots: Arc::new(Semaphore::new(1)),
+            running_jobs: AtomicU64::new(0),
+            queued_jobs: AtomicU64::new(0),
+            started_at: std::time::Instant::now(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            gallery: std::sync::Arc::new(crate::gallery::GalleryState::empty_for_tests(
+                42,
+                Default::default(),
+            )),
+            agg: Arc::new(MetricsAgg::default()),
+            algo_aggs: Mutex::new(std::collections::BTreeMap::new()),
+        });
+        let _j1 = reg.create(JobKind::Stream, "a".into()).unwrap();
+        let _j2 = reg.create(JobKind::Stream, "b".into()).unwrap();
+        let pending_total_before = reg
+            .algo_aggs
+            .lock()
+            .unwrap()
+            .get("pending")
+            .unwrap()
+            .total
+            .load(Ordering::SeqCst);
+        assert_eq!(pending_total_before, 2);
+        // 模拟 j1 在排队阶段被取消(queued_jobs 减 1,pending.total 也减 1)。
+        reg.mark_abandoned();
+        let pending_total_after = reg
+            .algo_aggs
+            .lock()
+            .unwrap()
+            .get("pending")
+            .unwrap()
+            .total
+            .load(Ordering::SeqCst);
+        assert_eq!(pending_total_after, 1);
+        assert_eq!(reg.agg.queued.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn streak_retention_tracks_unseen_window() {
         assert!(streak_alive(100, 100, 60), "seen this frame stays");
@@ -2158,7 +2800,7 @@ mod tests {
     #[tokio::test]
     async fn queue_backpressure_rejects_when_full() {
         let cfg = Config::from_env();
-        let reg = JobRegistry {
+        let reg = Arc::new(JobRegistry {
             jobs: Mutex::new(HashMap::new()),
             s3: Arc::new(crate::s3::S3Client::new(
                 "http://127.0.0.1:1".into(),
@@ -2179,12 +2821,13 @@ mod tests {
             queued_jobs: AtomicU64::new(0),
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
-            gallery_cache: Mutex::new(None),
             gallery: std::sync::Arc::new(crate::gallery::GalleryState::empty_for_tests(
                 42,
                 Default::default(),
             )),
-        };
+            agg: Arc::new(MetricsAgg::default()),
+            algo_aggs: Mutex::new(std::collections::BTreeMap::new()),
+        });
         // 3 个 queued(permit 不消费):前 2 个 OK,第 3 个 429。
         assert!(reg.create(JobKind::Stream, "a".into()).is_ok());
         assert!(reg.create(JobKind::Stream, "b".into()).is_ok());
@@ -2209,7 +2852,7 @@ mod tests {
     #[tokio::test]
     async fn algo_override_validates_against_available_algos() {
         let cfg = Config::from_env();
-        let reg = JobRegistry {
+        let reg = Arc::new(JobRegistry {
             jobs: Mutex::new(HashMap::new()),
             s3: Arc::new(crate::s3::S3Client::new(
                 "http://127.0.0.1:1".into(),
@@ -2226,12 +2869,13 @@ mod tests {
             queued_jobs: AtomicU64::new(0),
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
-            gallery_cache: Mutex::new(None),
             gallery: std::sync::Arc::new(crate::gallery::GalleryState::empty_for_tests(
                 42,
                 Default::default(),
             )),
-        };
+            agg: Arc::new(MetricsAgg::default()),
+            algo_aggs: Mutex::new(std::collections::BTreeMap::new()),
+        });
         let job = reg.create(JobKind::Stream, "t".into()).unwrap();
         let id = job.id.clone();
         for good in ["haar", "cnn", "luminance"] {
@@ -2303,7 +2947,7 @@ mod tests {
     #[tokio::test]
     async fn begin_shutdown_signals_running_jobs() {
         let cfg = Config::from_env();
-        let reg = JobRegistry {
+        let reg = Arc::new(JobRegistry {
             jobs: Mutex::new(HashMap::new()),
             s3: Arc::new(crate::s3::S3Client::new(
                 "http://127.0.0.1:1".into(),
@@ -2320,12 +2964,13 @@ mod tests {
             queued_jobs: AtomicU64::new(0),
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
-            gallery_cache: Mutex::new(None),
             gallery: std::sync::Arc::new(crate::gallery::GalleryState::empty_for_tests(
                 42,
                 Default::default(),
             )),
-        };
+            agg: Arc::new(MetricsAgg::default()),
+            algo_aggs: Mutex::new(std::collections::BTreeMap::new()),
+        });
         let job = reg.create(JobKind::Stream, "long".into()).unwrap();
         let id = job.id.clone();
         reg.mark_started();
@@ -2380,7 +3025,7 @@ mod tests {
         // S3 endpoint 指向黑洞地址(loopback port 1 = 永远没人在听)
         // ureq 的 connect_timeout 默认会超时;这里我们关心的是 fallback
         // 路径,不希望测试因为 S3 重试卡几秒钟 — 加一个短的 connect timeout。
-        let reg = JobRegistry {
+        let reg = Arc::new(JobRegistry {
             jobs: Mutex::new(HashMap::new()),
             s3: Arc::new(crate::s3::S3Client::new(
                 "http://127.0.0.1:1".into(),
@@ -2402,12 +3047,13 @@ mod tests {
             queued_jobs: AtomicU64::new(0),
             started_at: std::time::Instant::now(),
             shutdown: Arc::new(AtomicBool::new(false)),
-            gallery_cache: Mutex::new(None),
             gallery: std::sync::Arc::new(crate::gallery::GalleryState::empty_for_tests(
                 42,
                 Default::default(),
             )),
-        };
+            agg: Arc::new(MetricsAgg::default()),
+            algo_aggs: Mutex::new(std::collections::BTreeMap::new()),
+        });
         let key = "jobs/test-s3down/original.bin";
         let body = b"hello-s3-down".to_vec();
         // 调用会触发 S3 put (黑洞地址 → 失败),然后降级到 local disk。

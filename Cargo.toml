@@ -157,6 +157,16 @@ name = "bench-accuracy"
 path = "benches/accuracy.rs"
 required-features = ["ort-backend"]
 
+[[bin]]
+name = "accuracy-e2e"
+path = "src/bin/accuracy_e2e.rs"
+required-features = ["ort-backend", "source", "source-ffmpeg"]
+
+[[bin]]
+name = "accuracy-tta"
+path = "src/bin/accuracy_tta.rs"
+required-features = ["ort-backend"]
+
 # ---------------------------------------------------------------------------
 # Examples — auto-discovery would build every one under every feature combo;
 # explicit entries with required-features let trimmed builds skip them.

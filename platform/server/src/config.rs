@@ -120,9 +120,6 @@ pub struct Config {
     /// 优雅停机等待运行中任务排空的超时(秒)。默认 180(3 分钟);
     /// 超时后强制退出。0 = 不等待(立即退出)。
     pub shutdown_grace_secs: u64,
-    /// 注册人脸画廊目录(每个子目录一个身份,内含该人的 pgm/ppm/png)。
-    /// 存在时 /recognize 接口用它构建多个识别器并输出共识身份。
-    pub gallery_dir: PathBuf,
     /// Random seed used to initialise the in-tree zero-dep EmbedNet
     /// used by the persistent gallery. Two servers booted with the same
     /// seed produce comparable cosine rankings (the weights themselves
@@ -289,16 +286,15 @@ impl Config {
                 pool_hint
             },
             available_parallelism: ap,
-            gallery_dir: PathBuf::from(env_or("RSFACE_GALLERY_DIR", "gallery")),
             gallery_seed: env_or("RSFACE_GALLERY_SEED", "0x5fa1")
                 .parse::<u64>()
                 .unwrap_or(0x5fa1),
-            gallery_match_threshold: env_or("RSFACE_GALLERY_MATCH_THRESHOLD", "0.30")
+            gallery_match_threshold: env_or("RSFACE_GALLERY_MATCH_THRESHOLD", "0.45")
                 .parse::<f32>()
-                .unwrap_or(0.30),
-            gallery_match_min_margin: env_or("RSFACE_GALLERY_MATCH_MIN_MARGIN", "0.0")
+                .unwrap_or(0.45),
+            gallery_match_min_margin: env_or("RSFACE_GALLERY_MATCH_MIN_MARGIN", "0.05")
                 .parse::<f32>()
-                .unwrap_or(0.0),
+                .unwrap_or(0.05),
             liveness_models_dir: PathBuf::from(env_or("RSFACE_LIVENESS_MODELS_DIR", "models")),
             liveness_enabled: env_bool("RSFACE_LIVENESS_ENABLED", false),
             liveness_min_real_score: env_or("RSFACE_LIVENESS_MIN_REAL_SCORE", "0.0")

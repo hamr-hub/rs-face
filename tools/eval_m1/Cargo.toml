@@ -10,6 +10,20 @@ publish = false
 name = "eval-m1"
 path = "main.rs"
 
+# Layer-by-layer diagnostic: is the 0-recall a decode bug, a preprocess bug, or
+# a post-process bug? Dumps raw model scores so the threshold is never the
+# suspect by assumption.
+[[bin]]
+name = "diagnose"
+path = "diagnose.rs"
+
+# Pixel-accuracy grader for the hand-rolled JPEG decoder, against PIL/libjpeg
+# as the oracle. The dimension-only tests in tests/jpeg_decode.rs cannot catch a
+# wrong-pixel decode; this one grades exactly that.
+[[bin]]
+name = "jpeg_oracle"
+path = "jpeg_oracle.rs"
+
 [dependencies]
 rs-face = { path = "../..", features = ["ort-backend"] }
 serde = { version = "1", features = ["derive"] }

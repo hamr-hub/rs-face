@@ -1,22 +1,20 @@
 //! 平台级指标聚合。
 //!
 //! 数据源:
-//! 1. `JobRegistry::list()` — 当前在内存里的所有 job (实时)
-//! 2. `JobRegistry::get(id).summary()` — 单个 job 的累计统计
+//! 1. `JobRegistry::agg` — 平台级原子聚合(状态计数 + 帧统计)
+//! 2. `JobRegistry::algo_aggs` — per-algo 原子聚合
 //! 3. 平台进程启动时间
 //!
 //! 暴露:
 //! - `PlatformMetrics::current()` — 平台级 KPI 快照(JSON-friendly)
 //! - `to_prometheus(&PlatformMetrics)` — Prometheus 文本格式
 //!
-//! 设计:无锁,纯派生计算(数据全在 JobRegistry 里)。aggregate fps
-//! 通过 running jobs 的 stats.fps_window 末点取最大,避免把 SSE 流量
-//! 重复搬到这里。
+//! 设计:O(1) 原子读,无 registry 扫描、无 per-job stats lock。聚合计数
+//! 在 run_job 主循环 / set_status 路径同步维护,读侧只是 12 个 atomic load。
 
-use crate::jobs::{JobRegistry, JobStatus};
+use crate::jobs::JobRegistry;
 use serde::Serialize;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PlatformMetrics {
@@ -79,123 +77,13 @@ pub struct PlatformMetrics {
 }
 
 impl PlatformMetrics {
+    /// 平台级 KPI 快照:直接读 `JobRegistry::metrics_snapshot()`,O(1)
+    /// 原子读、无 registry 扫描、无 per-job stats lock。
+    ///
+    /// 老实现是 O(n) 扫 registry + 每 job clone stats(`u64` 数列,不算重),
+    /// 但 700+ jobs 时聚合一次 ~30ms;现在固定 ~µs 级,与 job 数无关。
     pub fn current(reg: &JobRegistry) -> Self {
-        let now_ms = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let started_ms = now_ms.saturating_sub(reg.started_at.elapsed().as_millis() as u64);
-        let jobs = reg.list();
-        let mut total = 0u64;
-        let mut running = 0u64;
-        let mut queued = 0u64;
-        let mut done = 0u64;
-        let mut err = 0u64;
-        let mut cancelled = 0u64;
-        let mut total_frames = 0u64;
-        let mut total_faces_frames = 0u64;
-        let mut total_dets = 0u64;
-        let mut total_spoof = 0u64;
-        let mut total_blocked = 0u64;
-        // GPU / cascade / fps 细项暂未在 `JobStats` 上建模,先填 0,
-        // 后续 run_job 加字段时再回来打开这些求和(代码留了骨架,见
-        // `total_gpu += st.gpu_levels` 那行注释掉的位置)。
-        let total_gpu: u64 = 0;
-        let total_cpu: u64 = 0;
-        let total_skipped: u64 = 0;
-        let total_evals: u64 = 0;
-        let total_passes: u64 = 0;
-        let _live_fps: Vec<f32> = Vec::new();
-        let mut elapsed_sum: u64 = 0;
-        let mut done_count: u64 = 0;
-        for j in &jobs {
-            total += 1;
-            match j.status() {
-                JobStatus::Running => running += 1,
-                JobStatus::Queued => queued += 1,
-                JobStatus::Done => {
-                    done += 1;
-                    done_count += 1;
-                }
-                JobStatus::Error => err += 1,
-                JobStatus::Cancelled => cancelled += 1,
-            }
-            // poison 容忍:跨所有 job 聚合,单个死 job 的锁中毒不应让
-            // /metrics 和 /api/metrics 永久 panic。
-            let st = j.stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            total_frames += st.frames_processed;
-            total_faces_frames += st.frames_with_face;
-            total_dets += st.total_detections;
-            total_spoof += st.spoof_detections;
-            total_blocked += st.blocked_detections;
-            // 高级字段(JobStats 暂无),保留求和骨架:
-            // total_gpu += st.gpu_levels;
-            // total_cpu += st.cpu_levels;
-            // total_skipped += st.gpu_skipped_levels;
-            // total_evals += st.cascade_evals;
-            // total_passes += st.cascade_passes;
-            // if let Some(&last) = st.fps_window.last() { live_fps.push(last); }
-            if st.elapsed_ms > 0 && j.status() == JobStatus::Done {
-                elapsed_sum += st.elapsed_ms;
-            }
-        }
-        let total_levels = total_gpu + total_cpu;
-        let gpu_pct = if total_levels > 0 {
-            (total_gpu as f32) * 100.0 / (total_levels as f32)
-        } else {
-            0.0
-        };
-        // 没有 fps_window 字段就保持 0,前端对 0 有降级显示。
-        let live_fps_max = 0.0f32;
-        let live_fps_avg = 0.0f32;
-        let cascade_pass_rate = if total_evals > 0 {
-            total_passes as f32 / total_evals as f32
-        } else {
-            0.0
-        };
-        let avg_job_ms = if done_count > 0 {
-            elapsed_sum as f64 / done_count as f64
-        } else {
-            0.0
-        };
-        let max_conc = reg.cfg.max_concurrent_jobs as u32;
-        // 近似并发:running 数(<=max_conc),semaphore permit 是 owned 资源,这里不查它。
-        let concurrency = running.min(max_conc as u64) as u32;
-        let mode = if reg.cfg.use_cnn || reg.cfg.cnn_weights.is_some() {
-            "cnn".to_string()
-        } else {
-            "haar".to_string()
-        };
-        Self {
-            started_ms,
-            now_ms,
-            total_jobs: total,
-            running,
-            queued,
-            done,
-            errored: err,
-            cancelled,
-            total_frames_processed: total_frames,
-            total_frames_with_face: total_faces_frames,
-            total_detections: total_dets,
-            total_spoof_detections: total_spoof,
-            total_blocked_detections: total_blocked,
-            total_gpu_levels: total_gpu,
-            total_cpu_levels: total_cpu,
-            total_gpu_skipped_levels: total_skipped,
-            gpu_pct,
-            live_fps_max,
-            live_fps_avg,
-            total_cascade_evals: total_evals,
-            total_cascade_passes: total_passes,
-            cascade_pass_rate,
-            avg_job_ms,
-            concurrency,
-            max_concurrency: max_conc,
-            db_enabled: reg.db.pool.is_some(),
-            s3_endpoint: reg.cfg.s3_endpoint.clone(),
-            mode,
-        }
+        reg.metrics_snapshot()
     }
 }
 

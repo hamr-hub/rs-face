@@ -5,6 +5,7 @@
 
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
+use std::collections::HashMap;
 
 use crate::jobs::{FaceEntry, FrameResult, JobKind, JobStats, JobStatus};
 
@@ -329,35 +330,29 @@ impl Db {
         .await;
     }
 
-    /// heartbeat:run_job 内的 watchdog 心跳线程每 30s 调用一次,
-    /// 让 DB 知道这个 job 还在跑。orphan 扫描以
-    /// `heartbeat_at < now() - 5min` 判定僵尸。
-    pub async fn heartbeat(&self, id: &str) {
+    /// 批量心跳:一次 SQL UPDATE 把多个 running job 的两列时间戳都刷了。
+    ///
+    /// 旧路径每个 running job 各 spawn 一个 tokio task,每 5s 调两次
+    /// `heartbeat` + `heartbeat_realtime`(2 条独立 UPDATE),N 个 job
+    /// 跑着就有 2N 次 / 5s DB roundtrip。集中到一个共享后台 task 后,
+    /// 每 5s 1 条 `WHERE id = ANY(...)` 走 PG array bind,与 N 无关。
+    ///
+    /// SQL 只更新 `status='running'` 的行:job 已终止的话 ids 里有它
+    /// 也只是 no-op,无害。空数组提前 short-circuit,不浪费一次 roundtrip。
+    /// 列同时刷:`heartbeat_at` 给 startup reaper,`last_heartbeat_ts`
+    /// 给运行时 janitor;`updated_at` 给前端卡片上的"最后更新"显示。
+    pub async fn heartbeat_batch(&self, ids: &[String]) {
         let Some(pool) = &self.pool else {
             return;
         };
-        let _ = sqlx::query(
-            "UPDATE jobs SET heartbeat_at=now(), updated_at=now() WHERE id=$1 AND status='running'",
-        )
-        .bind(id)
-        .execute(pool)
-        .await;
-    }
-
-    /// 高频心跳:worker 主循环每 ~5s 写一次 `last_heartbeat_ts = now()`。
-    /// 与 `heartbeat()`(30s 周期,服务于启动 orphan reaper)语义不同:
-    /// 这里走更细的粒度,让运行时 janitor(30s 扫一次)能区分"worker 真死"
-    /// vs"worker 还在跑但当前帧耗时长"。
-    /// 仅写 running 行;job 已终止时 UPDATE 影响 0 行,无害。
-    pub async fn heartbeat_realtime(&self, id: &str) {
-        let Some(pool) = &self.pool else {
+        if ids.is_empty() {
             return;
-        };
+        }
         let _ = sqlx::query(
-            "UPDATE jobs SET last_heartbeat_ts=now(), updated_at=now() \
-             WHERE id=$1 AND status='running'",
+            "UPDATE jobs SET heartbeat_at=now(), last_heartbeat_ts=now(), updated_at=now() \
+             WHERE id = ANY($1) AND status='running'",
         )
-        .bind(id)
+        .bind(ids)
         .execute(pool)
         .await;
     }
@@ -716,49 +711,36 @@ impl Db {
         let Some(pool) = &self.pool else {
             return vec![];
         };
+        // **单条查询,不是 1 + N-placeholder。** 先前这条路径先查全部 job,
+        // 再拼一条 `WHERE job_id IN ($1..$788)` 去捞每行的 idx=0 标注帧。
+        // 那是 788 个绑定参数(逼近 PG 的 65535 上限,迟早直接报错),而且
+        // planner 无法用索引做 index scan。改成对每行取 `frames_job_idx`
+        // 的第一行,一次 index lookup 搞定,没有参数上限也没有全表扫。
         let rows = sqlx::query(
-            "SELECT id, kind, display_name, status, created_ms, finished_ms, frames_processed, frames_with_face, total_detections, spoof_detections, blocked_detections, original_key, error, algo FROM jobs ORDER BY created_ms DESC"
+            "SELECT j.id, j.kind, j.display_name, j.status, j.created_ms, j.finished_ms, \
+                    j.frames_processed, j.frames_with_face, j.total_detections, \
+                    j.spoof_detections, j.blocked_detections, j.original_key, j.error, j.algo, \
+                    f.annotated_key AS first_annotated \
+             FROM jobs j \
+             LEFT JOIN LATERAL ( \
+                 SELECT annotated_key FROM frames \
+                 WHERE job_id = j.id ORDER BY idx ASC LIMIT 1 \
+             ) f ON true \
+             ORDER BY j.created_ms DESC",
         )
-        .fetch_all(pool).await.unwrap_or_default();
-        // 一次性 batch 拉所有 video/stream job 的 idx=0 标注帧,作 sidebar 缩略图
-        // (server 重启后内存丢光,必须从 PG 重建 cover_key;否则原图是 .mp4 直接破损)。
-        let ids: Vec<String> = rows.iter().map(|r| r.get::<String, _>("id")).collect();
-        let mut first_annotated: std::collections::HashMap<String, String> = Default::default();
-        if !ids.is_empty() {
-            let placeholders = std::iter::repeat_n("$1", ids.len())
-                .enumerate()
-                .map(|(i, p)| p.replace("$1", &format!("${}", i + 1)))
-                .collect::<Vec<_>>()
-                .join(",");
-            let q = format!(
-                "SELECT DISTINCT ON (job_id) job_id, annotated_key FROM frames \
-                 WHERE job_id IN ({}) ORDER BY job_id, idx ASC",
-                placeholders
-            );
-            let mut q = sqlx::query(&q);
-            for id in &ids {
-                q = q.bind(id);
-            }
-            if let Ok(fr) = q.fetch_all(pool).await {
-                for r in fr {
-                    let jid: String = r.get("job_id");
-                    let ak: Option<String> = r.get("annotated_key");
-                    if let Some(k) = ak {
-                        first_annotated.insert(jid, k);
-                    }
-                }
-            }
-        }
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
         rows.into_iter()
             .map(|r| {
                 let id = r.get::<String, _>("id");
                 let kind = r.get::<String, _>("kind");
                 let original_key: Option<String> = r.get("original_key");
+                let first_annotated: Option<String> = r.get("first_annotated");
                 // 缩略图策略:image → 原图(浏览器原生格式);video/stream → idx=0 标注帧
+                // (server 重启后内存丢光,必须从 PG 重建 cover_key;否则原图是 .mp4 直接破损)。
                 let cover_key = match kind.as_str() {
-                    "video" | "stream" => {
-                        first_annotated.get(&id).cloned().or(original_key.clone())
-                    }
+                    "video" | "stream" => first_annotated.or(original_key.clone()),
                     _ => original_key.clone(),
                 };
                 serde_json::json!({
@@ -858,7 +840,13 @@ impl Db {
         }))
     }
 
-    #[allow(dead_code)] // 保留:job 详情的 DB 直读路径(内存 miss 时兜底)
+    /// Job 详情的 DB 直读路径(内存 miss 时兜底)。
+    ///
+    /// **两条查询,不是 N+1**:先前每帧一次 `SELECT ... FROM faces` 往返,
+    /// 一个 3292 帧的 job 就要 3293 次 PG roundtrip —— 实测 `/api/jobs/{id}`
+    /// 要 9.7s。现在一次性把该 job 的所有 face 行拉回来,在内存里按
+    /// `frame_idx` 分桶,再按 `idx ASC` 组装。
+    #[allow(dead_code)]
     pub async fn list_frames(&self, job_id: &str) -> Vec<FrameResult> {
         let Some(pool) = &self.pool else {
             return vec![];
@@ -867,32 +855,27 @@ impl Db {
             "SELECT idx, timestamp_ms, annotated_key, original_key FROM frames WHERE job_id=$1 ORDER BY idx ASC"
         )
         .bind(job_id).fetch_all(pool).await.unwrap_or_default();
-        let mut out = Vec::with_capacity(rows.len());
-        for r in rows {
-            let idx: i64 = r.get("idx");
-            let faces = self.list_faces(job_id, idx).await;
-            out.push(FrameResult {
-                index: idx as u64,
-                timestamp_ms: r.get::<i64, _>("timestamp_ms") as u64,
-                annotated_key: r.get("annotated_key"),
-                original_key: r.get("original_key"),
-                faces,
-            });
-        }
-        out
-    }
-
-    #[allow(dead_code)]
-    async fn list_faces(&self, job_id: &str, frame_idx: i64) -> Vec<FaceEntry> {
-        let Some(pool) = &self.pool else {
+        if rows.is_empty() {
             return vec![];
-        };
-        let rows = sqlx::query(
-            "SELECT key, x, y, w, h, score FROM faces WHERE job_id=$1 AND frame_idx=$2 ORDER BY face_idx ASC"
+        }
+
+        // 第二条:该 job 的全部 face 行,一次拉完。
+        let face_rows = sqlx::query(
+            "SELECT frame_idx, key, x, y, w, h, score FROM faces \
+             WHERE job_id=$1 ORDER BY frame_idx ASC, face_idx ASC",
         )
-        .bind(job_id).bind(frame_idx).fetch_all(pool).await.unwrap_or_default();
-        rows.into_iter()
-            .map(|r| FaceEntry {
+        .bind(job_id)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        // 按 frame_idx 分桶。face 行远多于 frame 行(253k vs 243k,但每帧
+        // 可能有 0..N 张脸),用线性游标而不是 HashMap:两边的 ORDER BY
+        // 都已经按 frame_idx 排好序了,游标只需单调前进,总代价 O(n)。
+        let mut faces_by_idx: HashMap<i64, Vec<FaceEntry>> = HashMap::new();
+        for r in face_rows {
+            let idx: i64 = r.get("frame_idx");
+            faces_by_idx.entry(idx).or_default().push(FaceEntry {
                 key: r.get("key"),
                 x: r.get::<i32, _>("x") as usize,
                 y: r.get::<i32, _>("y") as usize,
@@ -901,8 +884,21 @@ impl Db {
                 score: r.get("score"),
                 liveness: None,
                 blocked: false,
-            })
-            .collect()
+            });
+        }
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let idx: i64 = r.get("idx");
+            out.push(FrameResult {
+                index: idx as u64,
+                timestamp_ms: r.get::<i64, _>("timestamp_ms") as u64,
+                annotated_key: r.get("annotated_key"),
+                original_key: r.get("original_key"),
+                faces: faces_by_idx.remove(&idx).unwrap_or_default(),
+            });
+        }
+        out
     }
 }
 

@@ -430,6 +430,46 @@ impl RgbImage {
         out
     }
 
+    /// Horizontal mirror (left ↔ right) returning a new image.
+    ///
+    /// Used by the recognition pipeline's test-time augmentation path
+    /// (`ArcFaceRecognizer::embed_tta`): the aligned 112×112 crop is
+    /// flipped, fed through the backbone a second time, and the two
+    /// embeddings are averaged. Faces are approximately bilaterally
+    /// symmetric, so the average cancels per-side noise (expression,
+    /// illumination gradient) without losing any discriminative signal.
+    /// This typically shaves 5–15% off identification error on benchmarks
+    /// like LFW at zero training cost.
+    pub fn flip_horizontal(&self) -> RgbImage {
+        let mut out = self.clone();
+        out.flip_horizontal_inplace();
+        out
+    }
+
+    /// In-place horizontal mirror. Same algorithm as [`Self::flip_horizontal`]
+    /// but writes back into the existing buffer.
+    pub fn flip_horizontal_inplace(&mut self) {
+        let w = self.width;
+        if w < 2 || self.height == 0 {
+            return;
+        }
+        for y in 0..self.height {
+            let row = &mut self.data[y * w * 3..(y + 1) * w * 3];
+            // Swap pixel pairs (3 bytes each). The middle column is a no-op
+            // for an even width and a single-byte shift for an odd width;
+            // we leave both to the loop for branchless codegen.
+            let mut lx = 0;
+            let mut rx = (w - 1) * 3;
+            while lx < rx {
+                for c in 0..3 {
+                    row.swap(lx + c, rx + c);
+                }
+                lx += 3;
+                rx -= 3;
+            }
+        }
+    }
+
     /// Resize to `new_w x new_h` using bilinear interpolation,
     /// half-pixel aligned. Degenerate sizes return an empty image.
     pub fn resize_bilinear(&self, new_w: usize, new_h: usize) -> RgbImage {
@@ -640,5 +680,54 @@ mod tests {
         let rgb = RgbImage::from_gray(&g);
         assert!(rgb.as_slice().chunks_exact(3).all(|c| c == [42u8, 42, 42]));
         assert_eq!(rgb.as_slice().len(), 13 * 9 * 3);
+    }
+
+    /// `flip_horizontal` must produce the literal mirror of the source. The
+    /// pixel-pair swap is the easy part to get right; the off-by-one that
+    /// shows up on odd widths is the one worth a unit test.
+    #[test]
+    fn flip_horizontal_is_an_involution_and_mirrors_rows() {
+        let mut img = RgbImage::new(5, 3);
+        // Tag each pixel by its (x, y) so the mirror is trivially checkable.
+        for y in 0..img.height() {
+            for x in 0..img.width() {
+                let i = (y * img.width() + x) * 3;
+                img.as_mut_slice()[i] = x as u8;
+                img.as_mut_slice()[i + 1] = y as u8;
+                img.as_mut_slice()[i + 2] = ((x * 7 + y * 11) & 0xff) as u8;
+            }
+        }
+        let original = img.as_slice().to_vec();
+        let mirrored = img.flip_horizontal();
+        assert_eq!(mirrored.width(), 5);
+        assert_eq!(mirrored.height(), 3);
+        // Every row should be the source row, read right-to-left.
+        for y in 0..img.height() {
+            for x in 0..img.width() {
+                let src_x = img.width() - 1 - x;
+                let src_idx = (y * img.width() + src_x) * 3;
+                let dst_idx = (y * mirrored.width() + x) * 3;
+                assert_eq!(
+                    &mirrored.as_slice()[dst_idx..dst_idx + 3],
+                    &original[src_idx..src_idx + 3],
+                    "row {y} col {x} (src_x={src_x})",
+                );
+            }
+        }
+        // Flipping twice must restore the original bit-for-bit (the operation
+        // is its own inverse).
+        let twice = mirrored.flip_horizontal();
+        assert_eq!(twice.as_slice(), original.as_slice());
+    }
+
+    #[test]
+    fn flip_horizontal_inplace_matches_allocating_version() {
+        let mut a = RgbImage::new(7, 4);
+        for (i, b) in a.as_mut_slice().iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37);
+        }
+        let b = a.flip_horizontal();
+        a.flip_horizontal_inplace();
+        assert_eq!(a.as_slice(), b.as_slice());
     }
 }

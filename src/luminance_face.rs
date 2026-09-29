@@ -175,17 +175,49 @@ impl LuminanceFaceDetector {
         // dark row block happens to fall inside the mid slot, but it can't
         // satisfy the bilateral "mid is dimmer than both top AND bot" check
         // at high-confidence margins.
-        let mid_dim = (top_m - mid_m).max(0.0) + (bot_m - mid_m).max(0.0);
-        if mid_dim < 60.0 {
-            // Mid is not clearly darker than both top and bot → no face.
-            return None;
+        // 2026-09-28 relax: previously required absolute mid-band luma < 90
+        // (the hard-coded "eye region is dark"). On real photographs of
+        // indoor / outdoor scenes the eye-slot sits at luma 95-130 from
+        // ambient fill, which crashed F1 to 0 on the golden eval.
+        //
+        // Two-tier gate:
+        //
+        //   *Strict tier* — sum of (top-mid) + (bot-mid) ≥ 60 AND mid_m
+        //    < 90. Original anti-checkerboard guard. Faces under moderate
+        //    lighting satisfy this; very bright scenes don't.
+        //
+        //   *Relaxed tier* — picks up faces under bright ambient fill
+        //    (mid_m ∈ [70, 130]). Requires the *within-band* stddev of
+        //    the mid strip to be ≤ 65 (skin tones are smooth; the
+        //    20×20-cell checkerboard has strip stddev ≈ 95, so this
+        //    cleanly distinguishes them even when the band averages look
+        //    face-like).
+        let diff_top = (top_m - mid_m).max(0.0);
+        let diff_bot = (bot_m - mid_m).max(0.0);
+        let mid_dim = diff_top + diff_bot;
+        let relative_dim = top_m.min(bot_m) - mid_m;
+        let strict = mid_dim >= 60.0 && mid_m < 90.0;
+        // Within-mid strip stddev: face skin ≈ 20-55, checkerboard ≈ 95.
+        let mut mid_sum: u64 = 0;
+        let mut mid_sum_sq: u64 = 0;
+        for yy in y_mid0..y_mid1 {
+            let row = gray.row(yy);
+            for xx in x..(x + win) {
+                let v = row[xx] as u64;
+                mid_sum += v;
+                mid_sum_sq += v * v;
+            }
         }
-        // The eye band must be GENUINELY dark, not just slightly dimmer than
-        // the neighbours. Real eye regions (shadows around the eye sockets)
-        // are luma < 90; mid values like 95–110 are common on textured
-        // backgrounds (checkerboards, brick walls, foliage) where a single
-        // dark patch happens to land in the mid slot.
-        if mid_m > 90.0 {
+        let mid_n = ((y_mid1 - y_mid0) * win) as f32;
+        let mid_mean = mid_sum as f32 / mid_n.max(1.0);
+        let mid_var = (mid_sum_sq as f32 / mid_n.max(1.0)) - mid_mean * mid_mean;
+        let mid_stddev = mid_var.max(0.0).sqrt();
+        let relaxed = relative_dim >= 30.0
+            && mid_m >= 70.0
+            && mid_m <= 130.0
+            && mid_dim >= 30.0
+            && mid_stddev <= 65.0;
+        if !strict && !relaxed {
             return None;
         }
 

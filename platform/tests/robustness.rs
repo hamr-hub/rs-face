@@ -56,11 +56,12 @@ async fn boot_registry_for_test() -> (
         queued_jobs: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
         shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        gallery_cache: std::sync::Mutex::new(None),
         gallery: std::sync::Arc::new(rsface_platform::gallery::GalleryState::empty_for_tests(
             42,
             Default::default(),
         )),
+        agg: std::sync::Arc::new(rsface_platform::jobs::MetricsAgg::default()),
+        algo_aggs: std::sync::Mutex::new(std::collections::BTreeMap::new()),
     });
     // 注册 shutdown 信号让测试结束时不挂死。
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();

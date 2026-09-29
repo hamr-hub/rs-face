@@ -14,7 +14,6 @@ pub mod liveness;
 pub mod metrics;
 pub mod persist;
 pub mod rate_limit;
-pub mod recognition;
 pub mod s3;
 #[cfg(feature = "arcface")]
 pub mod scrfd;

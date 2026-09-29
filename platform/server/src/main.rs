@@ -13,7 +13,6 @@ mod liveness;
 mod metrics;
 mod persist;
 mod rate_limit;
-mod recognition;
 mod s3;
 mod scrfd;
 mod zip;
@@ -153,8 +152,9 @@ async fn main() {
         queued_jobs: std::sync::atomic::AtomicU64::new(0),
         started_at: std::time::Instant::now(),
         shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        gallery_cache: Mutex::new(None),
         gallery: Arc::new(gallery::GalleryState::load((*db).clone(), &cfg).await),
+        agg: Arc::new(jobs::MetricsAgg::default()),
+        algo_aggs: Mutex::new(std::collections::BTreeMap::new()),
     });
 
     // 响应缓存层(无外部依赖)。四份 TTL cache:
@@ -188,6 +188,13 @@ async fn main() {
     // 无害(reap_orphans + heartbeat 写入路径在 DB None 时早返回)。
     // shutdown 与 axum graceful_shutdown 同步,避免拖住进程退出。
     let _janitor = jobs::spawn_janitor(db.clone(), state.shutdown.clone(), None);
+
+    // 心跳 coalescer:一个共享后台 task 每 5s 一次 SQL UPDATE 把所有 running
+    // job 的 heartbeat_at / last_heartbeat_ts / updated_at 三列同时刷。
+    // 旧路径每个 running job 各 spawn 一个 tokio task + 两条独立 UPDATE,
+    // N=10 并发时是 4 calls/s,N=50 是 20 calls/s。新路径固定 1 call/5s,
+    // 与 N 无关。janitor 看到的"alive"时间窗同样紧(5s 节奏)。
+    let _heartbeat = jobs::spawn_heartbeat_coalescer(db.clone(), state.clone(), state.shutdown.clone());
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)
         .await

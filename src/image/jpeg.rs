@@ -203,6 +203,24 @@ struct Frame {
     components: Vec<ComponentInfo>,
     max_h: u8,
     max_v: u8,
+    /// MCUs between restart markers (0 = none). From DRI.
+    restart_interval: u32,
+}
+
+impl Frame {
+    /// Allocated width of a component's sample plane: one block column per
+    /// `factor_h` blocks in every MCU column, rounded up to whole MCUs.
+    ///
+    /// This is *not* `width * factor_h / max_h`. The scan is MCU-interleaved,
+    /// so a component always occupies a whole number of MCUs, and the plane is
+    /// padded out to that. The padding is what the last MCU's blocks decode
+    /// into and is cropped away on upsample.
+    fn plane_dims(&self, comp: &ComponentInfo) -> (usize, usize) {
+        (
+            self.n_mcu_x() * comp.factor_h as usize * 8,
+            self.n_mcu_y() * comp.factor_v as usize * 8,
+        )
+    }
 }
 
 impl Frame {
@@ -362,108 +380,121 @@ impl<'a> BitReader<'a> {
             node_idx = next as usize;
         }
     }
+
+    /// Consume the RSTn marker that must follow a restart interval.
+    ///
+    /// Any bits still buffered belong to the *previous* segment and must be
+    /// discarded: after an RSTn the decoder restarts with a byte-aligned
+    /// stream. `fill` deliberately rewinds `pos` to the 0xFF of a real marker
+    /// rather than consuming it, so the marker is still there to be read here.
+    fn consume_restart(&mut self, expected: u8) -> Result<u8, JpegError> {
+        self.bits = 0;
+        self.nbits = 0;
+        while self.pos + 1 < self.data.len() {
+            if self.data[self.pos] == 0xFF {
+                let m = self.data[self.pos + 1];
+                if (M_RST0..=M_RST7).contains(&m) {
+                    let idx = m - M_RST0;
+                    self.pos += 2;
+                    return Ok(idx);
+                }
+                if m != 0x00 && m != 0xFF {
+                    // Some other marker (usually EOI) — the encoder ended the
+                    // scan without the trailing restart we expected.
+                    return Err(JpegError::BadMarker);
+                }
+            }
+            self.pos += 1;
+        }
+        let _ = expected;
+        Err(JpegError::Bitstream)
+    }
 }
 
 // =============================================================================
-//   IDCT (AAN algorithm, T.81 §A.3.3)
+//   IDCT
 // =============================================================================
 
+/// The 8x8 inverse-DCT basis with its normalisation folded in:
+/// `IDCT_M[x * 8 + u] = c(u) * cos((2x + 1) * u * pi / 16) / 2`.
+///
+/// Written out, the 2D inverse DCT is
+///
+/// ```text
+/// f(x, y) = (1/4) * SUM_u SUM_v c(u) c(v) F(u, v)
+///                                    * cos((2x+1) u pi/16) * cos((2y+1) v pi/16)
+/// ```
+///
+/// so folding the `1/4` and both `c(.)` factors into the matrix leaves
+/// `f = A . F . A^T` — two 8x8 products, separable over rows then columns.
+///
+/// This replaced an AAN even-odd butterfly that looked plausible and was
+/// wrong: it was missing the 1/4 (every sample 4x too large, saturating to
+/// noise), and adding the 1/4 back still left the reconstruction wrong,
+/// because the even-odd split it implemented is not this transform. A
+/// textbook basis has no such room for error, and it is verifiable by
+/// inspection against the definition above.
+///
+/// Cost is ~2 * 8^3 = 1024 multiply-accumulates per block rather than the
+/// ~200 of a butterfly, which is the right trade: a 768x432 frame is ~3.2k
+/// blocks, so this lands in the low hundreds of microseconds and is
+/// irrelevant next to a CNN forward pass.
 #[allow(clippy::excessive_precision, clippy::approx_constant)]
-const IDCT_C: [f64; 8] = [
-    0.7071067811865476,
-    0.5411961001461970,
-    0.7071067811865476,
-    1.3065629648763766,
-    0.3826834323650898,
-    0.5411961001461970,
-    1.3065629648763766,
-    0.3826834323650898,
+const IDCT_M: [f64; 64] = [
+    0.35355339059327373, 0.49039264020161522, 0.46193976625564337, 0.41573480615127262,
+    0.35355339059327379, 0.27778511650980114, 0.19134171618254492, 0.097545161008064166,
+    0.35355339059327373, 0.41573480615127262, 0.19134171618254492, -0.097545161008064096,
+    -0.35355339059327373, -0.49039264020161522, -0.46193976625564342, -0.27778511650980109,
+    0.35355339059327373, 0.27778511650980114, -0.19134171618254486, -0.49039264020161522,
+    -0.35355339059327384, 0.097545161008064152, 0.46193976625564326, 0.41573480615127273,
+    0.35355339059327373, 0.097545161008064166, -0.46193976625564337, -0.27778511650980109,
+    0.35355339059327368, 0.41573480615127273, -0.19134171618254495, -0.49039264020161533,
+    0.35355339059327373, -0.097545161008064096, -0.46193976625564342, 0.27778511650980092,
+    0.35355339059327384, -0.41573480615127256, -0.19134171618254528, 0.49039264020161522,
+    0.35355339059327373, -0.27778511650980098, -0.19134171618254517, 0.49039264020161522,
+    -0.35355339059327334, -0.097545161008064013, 0.46193976625564337, -0.41573480615127251,
+    0.35355339059327373, -0.41573480615127267, 0.191341716182545, 0.097545161008064388,
+    -0.35355339059327356, 0.49039264020161533, -0.4619397662556432, 0.27778511650980076,
+    0.35355339059327373, -0.49039264020161522, 0.46193976625564326, -0.41573480615127256,
+    0.35355339059327329, -0.27778511650980076, 0.19134171618254478, -0.097545161008064291,
 ];
 
-/// 8×8 inverse DCT via AAN. Operates in-place; input is a dequantized block,
-/// output is the level-shifted (range ±128) reconstructed samples.
+/// Inverse DCT of one dequantized 8x8 block, in place.
+///
+/// Input and output are both in natural (row-major) order. The output is the
+/// level-shifted residual in roughly +/-128; the caller adds the +128 bias
+/// when it clamps into a `u8` plane.
 fn idct_8x8(block: &mut [i32; 64]) {
-    let mut workspace = [0.0f64; 64];
-    // Pass 1: rows.
-    for y in 0..8 {
-        let x0 = block[y * 8] as f64;
-        let x1 = block[y * 8 + 1] as f64;
-        let x2 = block[y * 8 + 2] as f64;
-        let x3 = block[y * 8 + 3] as f64;
-        let x4 = block[y * 8 + 4] as f64;
-        let x5 = block[y * 8 + 5] as f64;
-        let x6 = block[y * 8 + 6] as f64;
-        let x7 = block[y * 8 + 7] as f64;
-        let t0 = (x0 + x4) * IDCT_C[0];
-        let t1 = (x0 - x4) * IDCT_C[0];
-        let t2 = (x2 * IDCT_C[4]) + (x6 * IDCT_C[1]);
-        let t3 = (x2 * IDCT_C[1]) - (x6 * IDCT_C[4]);
-        let t4 = t0 + t2;
-        let t5 = t0 - t2;
-        let t6 = t1 + t3;
-        let t7 = t1 - t3;
-        let t8 = (x1 * IDCT_C[2]) + (x7 * IDCT_C[3]);
-        let t9 = (x1 * IDCT_C[3]) - (x7 * IDCT_C[2]);
-        let ta = (x3 + x5) * IDCT_C[5];
-        let tb = (x3 - x5) * IDCT_C[5];
-        let tc = ta + t9;
-        let td = tb - t8;
-        let te = t8 + tb;
-        let tf = t9 - ta;
-        let r = &mut workspace[y * 8..y * 8 + 8];
-        r[0] = t4 + tc;
-        r[1] = t5 + td;
-        r[2] = t6 + te;
-        r[3] = t7 + tf;
-        r[4] = t7 - tf;
-        r[5] = t6 - te;
-        r[6] = t5 - td;
-        r[7] = t4 - tc;
-    }
-    // Pass 2: columns.
+    // Rows: tmp[x][v] = SUM_u M[x][u] * F[u][v]
+    let mut tmp = [0.0f64; 64];
     for x in 0..8 {
-        let x0 = workspace[x];
-        let x1 = workspace[8 + x];
-        let x2 = workspace[16 + x];
-        let x3 = workspace[24 + x];
-        let x4 = workspace[32 + x];
-        let x5 = workspace[40 + x];
-        let x6 = workspace[48 + x];
-        let x7 = workspace[56 + x];
-        let t0 = (x0 + x4) * IDCT_C[0];
-        let t1 = (x0 - x4) * IDCT_C[0];
-        let t2 = (x2 * IDCT_C[4]) + (x6 * IDCT_C[1]);
-        let t3 = (x2 * IDCT_C[1]) - (x6 * IDCT_C[4]);
-        let t4 = t0 + t2;
-        let t5 = t0 - t2;
-        let t6 = t1 + t3;
-        let t7 = t1 - t3;
-        let t8 = (x1 * IDCT_C[2]) + (x7 * IDCT_C[3]);
-        let t9 = (x1 * IDCT_C[3]) - (x7 * IDCT_C[2]);
-        let ta = (x3 + x5) * IDCT_C[5];
-        let tb = (x3 - x5) * IDCT_C[5];
-        let tc = ta + t9;
-        let td = tb - t8;
-        let te = t8 + tb;
-        let tf = t9 - ta;
-        let r = [
-            t4 + tc,
-            t5 + td,
-            t6 + te,
-            t7 + tf,
-            t7 - tf,
-            t6 - te,
-            t5 - td,
-            t4 - tc,
-        ];
-        for k in 0..8 {
-            let v = r[k];
-            // Round-half-away-from-zero to match OpenCV's IDCT output byte-
-            // for-byte for typical 8-bit JPEG inputs.
-            block[k * 8 + x] = if v >= 0.0 {
-                (v + 0.5) as i32
+        for v in 0..8 {
+            let mut acc = 0.0f64;
+            for u in 0..8 {
+                let c = block[u * 8 + v];
+                if c != 0 {
+                    acc += IDCT_M[x * 8 + u] * c as f64;
+                }
+            }
+            tmp[x * 8 + v] = acc;
+        }
+    }
+    // Columns: f[x][y] = SUM_v M[y][v] * tmp[x][v]
+    for x in 0..8 {
+        for y in 0..8 {
+            let mut acc = 0.0f64;
+            for v in 0..8 {
+                let t = tmp[x * 8 + v];
+                if t != 0.0 {
+                    acc += IDCT_M[y * 8 + v] * t;
+                }
+            }
+            // Round half away from zero, matching the reference decoder's
+            // rounding of the reconstructed sample.
+            block[x * 8 + y] = if acc >= 0.0 {
+                (acc + 0.5) as i32
             } else {
-                -((-v + 0.5) as i32)
+                -((-acc + 0.5) as i32)
             };
         }
     }
@@ -481,14 +512,19 @@ const ZIGZAG: [usize; 64] = [
 
 #[inline]
 fn ycbcr_to_rgb(y: i32, cb: i32, cr: i32) -> (u8, u8, u8) {
-    // BT.601 limited range:
-    //   R = Y                        + 1.402  * (Cr - 128)
+    // BT.601 full range:
+    //   R = Y                        + 1.40200 * (Cr - 128)
     //   G = Y - 0.34414 * (Cb - 128) - 0.71414 * (Cr - 128)
-    //   B = Y + 1.772  * (Cb - 128)
-    // Fixed-point approximation matching OpenCV for 8-bit inputs.
-    let r = y + ((91881 * (cr - 128)) >> 16);
-    let g = y - ((22554 * (cb - 128) + 46802 * (cr - 128)) >> 16);
-    let b = y + ((116130 * (cb - 128)) >> 16);
+    //   B = Y + 1.77200 * (Cb - 128)
+    //
+    // The `+ 32768` before each shift is the round-to-nearest that libjpeg
+    // bakes into its precomputed coefficient tables. Without it every channel
+    // sits half a level low, which is small enough to look fine and large
+    // enough to cap the achievable PSNR against the reference decoder.
+    const ROUND: i32 = 1 << 15;
+    let r = y + ((91881 * (cr - 128) + ROUND) >> 16);
+    let g = y + ((-22554 * (cb - 128) - 46802 * (cr - 128) + ROUND) >> 16);
+    let b = y + ((116130 * (cb - 128) + ROUND) >> 16);
     let clamp = |v: i32| v.clamp(0, 255) as u8;
     (clamp(r), clamp(g), clamp(b))
 }
@@ -652,10 +688,16 @@ fn parse_jpeg(bytes: &[u8]) -> Result<DecodedJpeg, JpegError> {
             }
             M_DRI => {
                 let len = cur.read_u16()?;
-                if len < 2 {
+                if len != 4 {
                     return Err(JpegError::BadMarkerLength);
                 }
-                cur.skip(len as usize - 2)?;
+                // Restart interval: MCUs per RSTn segment. Must be *read*, not
+                // skipped — discarding it made the decoder walk straight into
+                // an RSTn mid-scan and give up.
+                let ri = cur.read_u16()? as u32;
+                if let Some(f) = frame.as_mut() {
+                    f.restart_interval = ri;
+                }
             }
             M_APP0 | M_COM => {
                 let len = cur.read_u16()?;
@@ -693,13 +735,22 @@ fn parse_jpeg(bytes: &[u8]) -> Result<DecodedJpeg, JpegError> {
     if (frame.width as usize) > MAX_DIM || (frame.height as usize) > MAX_DIM {
         return Err(JpegError::TooLarge);
     }
-    // Trim the entropy segment at the first real marker.
+    // Trim the entropy segment at the first marker that ends the scan.
+    //
+    // RSTn is *not* such a marker: it appears in the middle of the entropy
+    // data and the decoder has to step over each one at the restart
+    // boundaries. Trimming at the first RSTn — as this used to — left the
+    // scan with a fragment of the image and every restart-interval file failed
+    // with "truncated or corrupt bitstream".
     let mut entropy_end = bytes.len();
     let mut i = entropy_start;
     while i < bytes.len() {
-        if bytes[i] == 0xFF && i + 1 < bytes.len() && bytes[i + 1] != 0x00 && bytes[i + 1] != 0xFF {
-            entropy_end = i;
-            break;
+        if bytes[i] == 0xFF && i + 1 < bytes.len() {
+            let m = bytes[i + 1];
+            if m != 0x00 && m != 0xFF && !(M_RST0..=M_RST7).contains(&m) {
+                entropy_end = i;
+                break;
+            }
         }
         i += 1;
     }
@@ -775,6 +826,7 @@ fn read_sof0(cur: &mut Cursor<'_>) -> Result<Frame, JpegError> {
         components,
         max_h,
         max_v,
+        restart_interval: 0,
     })
 }
 
@@ -906,20 +958,24 @@ fn decode_planes(
     let height = frame.height as usize;
     let n_mcu_x = frame.n_mcu_x();
     let n_mcu_y = frame.n_mcu_y();
-    let mcu_w = frame.max_h as usize * 8;
-    let mcu_h = frame.max_v as usize * 8;
-    let mut planes: Vec<Vec<u8>> = match frame.num_components {
-        NumComponents::Gray => vec![vec![0u8; width * height]],
-        NumComponents::YCbCr => {
-            let plane_w = (width + mcu_w - 1) / mcu_w * 8;
-            let plane_h = (height + mcu_h - 1) / mcu_h * 8;
-            vec![
-                vec![0u8; width * height],
-                vec![0u8; plane_w * plane_h],
-                vec![0u8; plane_w * plane_h],
-            ]
-        }
-    };
+
+    // One plane per component, each sized to its own MCU-aligned extent.
+    //
+    // The previous version sized *both* chroma planes with a hard-coded 4:2:0
+    // formula, so a 4:2:2 file (h=2, v=1) got a chroma plane that was twice
+    // too wide and the upsampler then read the wrong stride. Deriving the
+    // dimensions from each component's own sampling factors handles 4:4:4,
+    // 4:2:2 and 4:2:0 with the same code.
+    let mut planes: Vec<Vec<u8>> = Vec::with_capacity(frame.components.len());
+    let mut plane_w = [0usize; 3];
+    let mut plane_h = [0usize; 3];
+    for (p, comp) in frame.components.iter().enumerate() {
+        let (w, h) = frame.plane_dims(comp);
+        plane_w[p] = w;
+        plane_h[p] = h;
+        planes.push(vec![0u8; w * h]);
+    }
+
     let mut reader = BitReader::new(entropy);
     let mut dc_pred = [0i32; 3];
     let mut block_buf = [0i32; 64];
@@ -928,7 +984,6 @@ fn decode_planes(
     let mut factor_h = [0u8; 3];
     let mut factor_v = [0u8; 3];
     let mut qt_idx = [0u8; 3];
-    let mut comp_pos = [0usize; 3];
     for i in 0..scan.n_components as usize {
         let id = scan.components[i];
         let pos = frame
@@ -936,18 +991,42 @@ fn decode_planes(
             .iter()
             .position(|c| c.id == id)
             .ok_or(JpegError::BadScanHeader)?;
-        plane_idx[i] = match frame.num_components {
-            NumComponents::Gray => 0,
-            NumComponents::YCbCr => pos, // 0=Y, 1=Cb, 2=Cr
-        };
+        plane_idx[i] = pos;
         let comp = &frame.components[pos];
         factor_h[i] = comp.factor_h;
         factor_v[i] = comp.factor_v;
         qt_idx[i] = comp.quant_table;
-        comp_pos[i] = pos;
     }
+
+    let restart = frame.restart_interval as usize;
+    let total_mcus = n_mcu_x * n_mcu_y;
+    // How many MCUs sit before the final (often short) restart interval.
+    // An encoder may omit the RSTn that would follow the last interval.
+    let restart_boundaries = if restart == 0 {
+        0
+    } else {
+        (total_mcus - 1) / restart
+    };
+    let mut boundaries_seen = 0usize;
+    let mut mcu_index = 0usize;
+
     for mcu_y in 0..n_mcu_y {
         for mcu_x in 0..n_mcu_x {
+            if restart > 0 && mcu_index > 0 && mcu_index % restart == 0 {
+                // A restart marker sits between the previous MCU and this one.
+                if boundaries_seen < restart_boundaries {
+                    let expect = (boundaries_seen % 8) as u8;
+                    let got = reader.consume_restart(expect)?;
+                    if got != expect {
+                        return Err(JpegError::BadMarker);
+                    }
+                    // DC predictors reset at every restart interval; keeping
+                    // them would make the first block of each segment carry a
+                    // difference against a predictor it never saw.
+                    dc_pred = [0i32; 3];
+                    boundaries_seen += 1;
+                }
+            }
             for s in 0..scan.n_components as usize {
                 if !quant_loaded[qt_idx[s] as usize] {
                     return Err(JpegError::BadTable);
@@ -966,54 +1045,105 @@ fn decode_planes(
                             qt,
                         )?;
                         let p = plane_idx[s];
-                        let plane = &mut planes[p];
-                        // Per-component plane dimensions: components whose
-                        // sampling factor matches the max are stored at
-                        // full image resolution; components with smaller
-                        // factors are stored at the MCU-aligned subsampled
-                        // resolution and up-sampled later.
-                        let comp = &frame.components[comp_pos[s]];
-                        let plane_w = if comp.factor_h as usize == frame.max_h as usize {
-                            width
-                        } else {
-                            (width + mcu_w - 1) / mcu_w * 8
-                        };
-                        let plane_h = if comp.factor_v as usize == frame.max_v as usize {
-                            height
-                        } else {
-                            (height + mcu_h - 1) / mcu_h * 8
-                        };
-                        let bx = mcu_x * frame.max_h as usize + sx;
-                        let by = mcu_y * frame.max_v as usize + sy;
-                        write_block_to_plane(plane, plane_w, plane_h, bx, by, &block_buf);
+                        // Block position *within this component's own plane*.
+                        //
+                        // The old code used `mcu_x * max_h + sx`, which is only
+                        // right for a component whose factor equals the frame
+                        // maximum. For a subsampled component (h=1 against
+                        // max_h=2) that writes every block at twice its true
+                        // offset, so half the chroma plane is never touched
+                        // and the rest is shifted — which is what turned 4:2:0
+                        // YCbCr output into a mosaic.
+                        let bx = mcu_x * h + sx;
+                        let by = mcu_y * v + sy;
+                        write_block_to_plane(
+                            &mut planes[p],
+                            plane_w[p],
+                            plane_h[p],
+                            bx,
+                            by,
+                            &block_buf,
+                        );
                     }
                 }
             }
+            mcu_index += 1;
         }
     }
-    // Box-replicate chroma planes to image size.
-    if frame.num_components == NumComponents::YCbCr {
-        let plane_w = (width + mcu_w - 1) / mcu_w * 8;
-        let plane_h = (height + mcu_h - 1) / mcu_h * 8;
-        planes[1] = box_upsample(&planes[1], plane_w, plane_h, width, height);
-        planes[2] = box_upsample(&planes[2], plane_w, plane_h, width, height);
+
+    // Upsample every subsampled component to full image resolution, and crop
+    // the rest. Every plane must end up exactly `width` x `height` with a
+    // row stride of `width`, because that is the indexing the colour-conversion
+    // and grayscale paths use; a full-resolution component still carries MCU
+    // padding whenever the image is not a multiple of 8.
+    for (p, comp) in frame.components.iter().enumerate() {
+        let rh = frame.max_h as usize / comp.factor_h as usize;
+        let rv = frame.max_v as usize / comp.factor_v as usize;
+        if rh > 1 || rv > 1 {
+            planes[p] =
+                upsample_separable(&planes[p], plane_w[p], plane_h[p], rh, rv, width, height);
+        } else if plane_w[p] != width || plane_h[p] != height {
+            let (pw, ph) = (plane_w[p], plane_h[p]);
+            let mut out = vec![0u8; width * height];
+            let n = width.min(pw);
+            for y in 0..height.min(ph) {
+                out[y * width..y * width + n].copy_from_slice(&planes[p][y * pw..y * pw + n]);
+            }
+            planes[p] = out;
+        }
     }
     Ok(planes)
 }
 
-fn box_upsample(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
-    if sw == dw && sh == dh {
-        return src.to_vec();
-    }
-    let mut dst = vec![0u8; dw * dh];
-    for y in 0..dh {
-        let sy = (y * sh / dh).min(sh - 1);
-        for x in 0..dw {
-            let sx = (x * sw / dw).min(sw - 1);
-            dst[y * dw + x] = src[sy * sw + sx];
+/// Upsample a component plane by integer factors `rh` (horizontal) and `rv`
+/// (vertical), then crop to `dw` x `dh`.
+///
+/// Uses the same triangle ("fancy") filter libjpeg defaults to, rather than
+/// nearest-neighbour box replication. Box replication holds a chroma sample
+/// over a 2x2 block with a visible stair-step at every colour edge; the
+/// triangle filter interpolates toward the neighbouring sample and is what
+/// the reference decoder does, so grading against it needs no slack.
+///
+/// For `rh == 2` this reduces exactly to libjpeg's
+/// `out[2i] = (3*s[i] + s[i-1] + 2) / 4`, `out[2i+1] = (3*s[i] + s[i+1] + 2) / 4`.
+fn upsample_separable(
+    src: &[u8],
+    sw: usize,
+    sh: usize,
+    rh: usize,
+    rv: usize,
+    dw: usize,
+    dh: usize,
+) -> Vec<u8> {
+    // Horizontal first, into an intermediate buffer, then vertical. Keeping the
+    // intermediate in u16 lets the vertical pass avoid a second rounding step.
+    let iw = sw * rh;
+    let ih = sh * rv;
+    let mut mid = vec![0u16; iw * sh];
+    for y in 0..sh {
+        for x in 0..iw {
+            let center = (x as f64 + 0.5) / rh as f64 - 0.5;
+            let i0 = center.floor();
+            let frac = center - i0;
+            let a = (i0 as isize).clamp(0, sw as isize - 1) as usize;
+            let b = (i0 as isize + 1).clamp(0, sw as isize - 1) as usize;
+            let v = src[y * sw + a] as f64 * (1.0 - frac) + src[y * sw + b] as f64 * frac;
+            mid[y * iw + x] = v.round().clamp(0.0, 255.0) as u16;
         }
     }
-    dst
+    let mut out = vec![0u8; dw * dh];
+    for y in 0..dh.min(ih) {
+        let center = (y as f64 + 0.5) / rv as f64 - 0.5;
+        let i0 = center.floor();
+        let frac = center - i0;
+        let a = (i0 as isize).clamp(0, sh as isize - 1) as usize;
+        let b = (i0 as isize + 1).clamp(0, sh as isize - 1) as usize;
+        for x in 0..dw.min(iw) {
+            let v = mid[a * iw + x] as f64 * (1.0 - frac) + mid[b * iw + x] as f64 * frac;
+            out[y * dw + x] = v.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
 }
 
 fn write_block_to_plane(
@@ -1089,12 +1219,22 @@ fn decode_block(
         }
         let r = (rs >> 4) as usize;
         let s = (rs & 0xF) as usize;
+        if s == 0 {
+            // The only s==0 codes are EOB (0x00, already handled above) and
+            // ZRL (0xF0), which means "skip sixteen zero coefficients" and
+            // carries no magnitude bits. Advancing by `r` alone would skip
+            // only fifteen, leaving the next code to be read one coefficient
+            // too early — which desynchronises the rest of the block and
+            // everything after it.
+            idx += 16;
+            if idx > 64 {
+                return Err(JpegError::Bitstream);
+            }
+            continue;
+        }
         idx += r;
         if idx >= 64 {
             return Err(JpegError::Bitstream);
-        }
-        if s == 0 {
-            continue;
         }
         let bits = reader.read(s as u32) as i32;
         let v = if bits < (1 << (s - 1)) {
@@ -1106,9 +1246,21 @@ fn decode_block(
         idx += 1;
     }
     // De-zigzag into natural order for IDCT.
+    //
+    // `block` is indexed by *zigzag position*: block[z] holds the coefficient
+    // whose natural (row-major) index is ZIGZAG[z]. Scattering — rather than
+    // gathering — is therefore the correct direction.
+    //
+    // The old code gathered instead: `natural[i] = block[ZIGZAG[i]]`, which
+    // applies the permutation twice and lands every coefficient in the wrong
+    // place. The symptom was deceptive: position 0 is a fixed point of the
+    // permutation, so a DC-only block decoded perfectly and smooth images came
+    // out merely "a bit wrong" (~26 dB) while any block with real high
+    // frequency — a checkerboard, a face's eye and mouth detail — was
+    // scrambled outright (~5 dB).
     let mut natural = [0i32; 64];
-    for i in 0..64 {
-        natural[i] = block[ZIGZAG[i]];
+    for z in 0..64 {
+        natural[ZIGZAG[z]] = block[z];
     }
     *block = natural;
     idct_8x8(block);

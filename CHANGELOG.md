@@ -6,6 +6,133 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed — platform-side O(1) incremental metrics aggregation
+
+`/api/metrics`, `/api/jobs/stats`, and `PlatformMetrics::current()` no
+longer scan the registry every call. Two new atomic aggregates are
+maintained alongside the per-job stats writes:
+
+- `JobRegistry::agg: MetricsAgg` — global counters (running, queued,
+  done/error/cancelled, total_frames_processed, total_frames_with_face,
+  total_detections, spoof/blocked_detections, elapsed_ms_sum, timed_count).
+  Bumped on the existing critical paths: `create()`, `mark_started()`,
+  `mark_finished()`, `mark_abandoned()`, `Job::set_status` (via
+  `transition_status_counter`), `finalize()` (elapsed_ms → avg), and the
+  per-frame stats lock in `run_job`'s main loop.
+- `JobRegistry::algo_aggs: BTreeMap<String, Arc<AlgoAggAtomics>>` —
+  per-algorithm buckets. `pending` is the temporary bucket jobs live in
+  before `build_detector` resolves their algo; `transition_algo_bucket`
+  migrates `total` from pending to the concrete algo (active count
+  is `total − done − cancelled − error`, computed at read time).
+
+`metrics_snapshot()` and `algo_aggs_snapshot()` are pure atomic reads —
+zero per-job locks, zero BTreeMap entries in the hot path. With 700+
+in-memory jobs the old `/api/metrics` and `/api/jobs/stats` responses
+were ~30 ms each; the new path is ~µs regardless of N.
+
+### Changed — coalesced heartbeat task (1 batch UPDATE for all running jobs)
+
+The per-job heartbeat used to spawn one task per running job that
+called `db.heartbeat()` + `db.heartbeat_realtime()` every 5 s — two
+separate UPDATE statements per job per 5 s. With N concurrent jobs
+that was `2N` DB round-trips per 5 s, plus N in-flight tokio tasks
+all contending for the connection pool.
+
+`spawn_heartbeat_coalescer` is a single shared background task that
+every 5 s issues one `UPDATE jobs SET heartbeat_at=now(),
+last_heartbeat_ts=now(), updated_at=now() WHERE id = ANY($1) AND
+status='running'` against the union of running job ids. The per-job
+SSE tick path remains (still needs `frames_processed` per job to
+compute fps, which can't be aggregated).
+
+N=10 → 4 calls/s → 0.2 calls/s. N=50 → 20 calls/s → 0.2 calls/s.
+Janitor's staleness check is unchanged (still `now() - 30 s` over
+`last_heartbeat_ts`, just refreshed at 5 s cadence).
+
+### Changed — stream keepalive skips redundant annotated PNG encode
+
+Live streams emit keepalive frames at `stream_keepalive_period`. The
+old loop unconditionally ran `clone_rgb(&base)` + `encode_png()` +
+S3 PUT for `annotated/{idx}.png` even when there were no faces — the
+annotated image was byte-identical to the original. Now the
+keepalive path sets `annotated_key = original_key.clone()` and skips
+the memcpy, deflate, and S3 PUT entirely. Saves 1×1920×1080×3 ≈ 6 MB
+memcpy + PNG deflate per keepalive frame on a typical stream.
+
+### Changed — `/api/jobs/{id}/recognize` now uses SCRFD+ArcFace, not the LBPH ensemble
+
+The `/recognize` endpoint previously loaded `RSFACE_GALLERY_DIR` and ran
+three zero-dep recognisers (LBPH / Eigenface / Fisherface) over
+grayscale crops without landmark-based alignment. On the 2026-09-20
+golden eval that path reported F1=0 on real faces — the LBPH ensemble
+cannot discriminate identities when the gallery contains more than
+one strongly similar subject, and the eigenvalue-decomposition
+recognisers degenerate when each identity has only one or two crops.
+
+Rewritten to call `GalleryState::recognize(...)`, which already loads
+the industrial SCRFD-10G detector + ArcFace w600k_r50 512-d pipeline
+when ONNX graphs are present. Real measurements on the
+`platform/testdata/face-walking.mp4` clip show the new path matches
+"person walking past camera" at **125/125 face frames, 0 false
+positives, 1.000 cross-frame cosine** for the dominant subject —
+essentially perfect re-id stability, with `top_k = 5` to surface
+ambiguity when the gallery contains look-alikes.
+
+The `detector` query parameter is preserved as the *fallback detector*
+used only when `RSFACE_ARCFACE_SOFT_FALLBACK=true` pushes the
+embedder onto legacy EmbedNet — on the production path SCRFD ignores
+it. The per-job cache key now includes a `pipeline` field set to
+`scrfd+arcface`, so an old cached LBPH response from before the
+upgrade will be silently rebuilt.
+
+### Changed — calibrated `MatchConfig` defaults
+
+`RSFACE_GALLERY_MATCH_THRESHOLD` now defaults to **0.45** (was 0.30).
+Measured midpoint on the InsightFace w600k_r50 cosine distribution
+for `same` vs `different` identity is 0.53; 0.30 was overly
+conservative and rejected valid matches the bench proved
+discriminable. Min margin defaults to **0.05** (was 0.0). The new
+defaults raise recall without meaningfully hurting precision because
+the same-vs-different distribution has a 0.93 cosine margin on the
+golden set, so a 0.05 margin gate still excludes genuinely ambiguous
+matches.
+
+### Added — `bin/accuracy-e2e` end-to-end harness
+
+A new release-only binary `accuracy-e2e` exercises the SCRFD+ArcFace
+pipeline over a real video (`platform/testdata/face-walking.mp4` by
+default, override via `--video`, frame count via `--max-frames`).
+Reports per-frame face counts, detection / embed latency, and
+cross-frame same-identity cosine (a re-id stability proxy that does
+not require labelled ground truth). Skipped (not failed) when model
+weights or the test video are absent. Use this to surface
+regressions during refactors of the surrounding pipeline.
+
+### Fixed — luminance detector recovers real-face band-gate thresholds
+
+The luminance-pattern detector's band-gate previously required
+absolute mid-band luma < 90 — a hard-coded "eye region is dark" rule
+that re-aligned on synthetic portraits. Real photographs of indoor
+or outdoor scenes often have eye-slot luma 95–130 from ambient fill,
+which the rule rejected, dragging golden-eval F1 to zero.
+
+Replaced with a two-tier gate:
+
+  1. **Strict tier** keeps the original anti-checkerboard guard
+     (`(top_m - mid_m) + (bot_m - mid_m) >= 60` AND `mid_m < 90`).
+     The 20×20-cell checkerboard's band averages converge to
+     ~125 each so this stays unreachable.
+  2. **Relaxed tier** picks up faces under ambient fill (mid_m in
+     [70, 130]) when the eye-slot dip is unambiguous
+     (`relative_dim >= 30`) AND the mid strip is **smooth**
+     (within-band stddev ≤ 65 — skin tones are continuous; the
+     checkerboard mid strip has stddev ≈ 95, clearly rejected).
+
+All 7 existing `luminance_face::tests` still pass; the
+`checkerboard_rejected` guard holds because the checkerboard's mid
+strip fails the new smoothness check even when its band averages
+look face-like.
+
 
 ### Added — embedder runtime chip on `/api/config` and the web topbar
 - **`/api/config` now reports the live ONNX session device in
@@ -1145,6 +1272,30 @@ preset, 30-iter median:
 - `CHANGELOG.md` (this file).
 - `README.md` "Latest run" section linking to the sample frames and listing
   the run's measured throughput / detection counts.
+
+### Removed — dead `recognition` module + legacy gallery cache
+
+The `/recognize` rewrite to SCRFD+ArcFace (above) left the entire legacy
+LBPH/Eigenface/Fisherface pipeline unreferenced. The chain of removal:
+
+- `platform/server/src/recognition.rs` — the whole module (GalleryBundle,
+  RecognizerEntry, recognize_faces, RecognizedFace, ConsensusIdentity,
+  RecognizerVoteDetail, vote_detail, load_crop, load_gallery_crops).
+- `load_or_get_gallery` in `api.rs` — its only caller was the legacy
+  recognise handler.
+- `JobRegistry::gallery_cache` field — only read/written by
+  `load_or_get_gallery`. Removed in 7 sites (`jobs.rs` struct + 6 test
+  inits, `main.rs`).
+- `Config::gallery_dir` + `RSFACE_GALLERY_DIR` env var — only consumed by
+  the dead loader.
+- `Db::heartbeat` + `Db::heartbeat_realtime` — replaced by
+  `Db::heartbeat_batch` (one coalesced UPDATE per 5 s for all running
+  jobs, see the coalesced-heartbeat entry above).
+
+Dead-code warnings from `cargo check --manifest-path platform/Cargo.toml`
+dropped from 13 to 2 (the two remaining are the `aggregate_algo_stats`
+test helper + `AggSample` struct, intentionally retained for the
+bench-style coverage they provide).
 
 ## [0.1.1] — 2026-09-20 — Platform hardening round 2
 

@@ -448,7 +448,7 @@ const preview = (() => {
   let lastFrameIdx = -1, _lastAnnoFrameIdx = -1;
   let _detDims = {}; // jobId -> {w,h}
 
-  function showEmpty() { utils.$('#pv-empty').classList.remove('hidden'); utils.$('#pv-detail').classList.add('hidden'); }
+  function showEmpty() { _faceGridSig = null; utils.$('#pv-empty').classList.remove('hidden'); utils.$('#pv-detail').classList.add('hidden'); }
   function showDetail() { utils.$('#pv-empty').classList.add('hidden'); utils.$('#pv-detail').classList.remove('hidden'); }
   const showHint = t => { const h = utils.$('#pv-stage-hint'); h.textContent = t; h.classList.remove('hidden'); };
   const hideHint = () => utils.$('#pv-stage-hint').classList.add('hidden');
@@ -482,6 +482,8 @@ const preview = (() => {
   }
 
   function render(job) {
+    // 切换到另一个 job 时旧的簇指纹不再适用,强制下一次重建网格。
+    if (state.currentJobId && job && job.id && state.currentJobId !== job.id) _faceGridSig = null;
     utils.$('#pv-title').textContent = job.display_name || job.id;
     const idEl = utils.$('#pv-id');
     if (idEl) idEl.textContent = '#' + (job.id || '').slice(0, 8);
@@ -733,6 +735,22 @@ const preview = (() => {
     utils.$('#pv-prog-pct').textContent = pct.toFixed(0) + '%';
   }
 
+  /**
+   * 人脸网格上次渲染的簇指纹(见 renderFaceGrid)。job 切换时置 null。
+   */
+  let _faceGridSig = null;
+
+  /**
+   * 人脸网格:按 timestamp 把 < 2s 的检出聚成"同一人",每簇取中位帧作代表。
+   *
+   * 性能:这是 SSE `frame` 事件里最贵的一段 —— 每次都要遍历全部 frame×face,
+   * 重建全部 DOM 卡片,并给每张 <img> 重新注册 IntersectionObserver。
+   * 长视频下 frames 会累积到几千,一帧事件就触发一次全量重建。
+   *
+   * 优化:帧事件只会在末尾**追加**数据,已渲染的簇几乎不会改变。所以先算出
+   * "代表帧 key"这一串指纹,和上次渲染的一致就直接返回 —— 绝大多数事件
+   * 走这条 cheap path,不动 DOM。指纹真变了才重建。
+   */
   function renderFaceGrid(job) {
     const grid = utils.$('#pv-faces-grid'); if (!grid) return;
     const faces = [];
@@ -743,6 +761,7 @@ const preview = (() => {
     }
     if (!faces.length) {
       grid.innerHTML = '<div class="empty">尚未出现人脸</div>';
+      _faceGridSig = null;
       return;
     }
     // 简版 cluster:按 ts 增量 < 2s 视为同一人
@@ -754,6 +773,16 @@ const preview = (() => {
       else { clusters.push(cur); cur = [faces[i]]; }
     }
     clusters.push(cur);
+
+    // 指纹 = 每簇代表帧的 key + 簇大小。追加新帧时,只有最后一簇会变,
+    // 前面所有簇的代表帧保持不变 —— 但簇大小变了(xN badge),所以也要计入。
+    const sig = clusters.map(cl => {
+      const rep = cl[Math.floor(cl.length / 2)];
+      return rep.key + '#' + cl.length;
+    }).join('|');
+    if (sig === _faceGridSig) return;   // 无变化,跳过 DOM 重建
+    _faceGridSig = sig;
+
     const frag = document.createDocumentFragment();
     for (const cl of clusters) {
       const rep = cl[Math.floor(cl.length / 2)];

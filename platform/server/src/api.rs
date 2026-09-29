@@ -654,25 +654,28 @@ async fn job_stats(State((state, caches)): State<(Arc<JobRegistry>, ResponseCach
     if let Some(bytes) = caches.jobs_stats_json.get_fresh() {
         return cached_json_response(bytes);
     }
-    let samples = state.collect_agg_samples();
-    let agg = crate::jobs::aggregate_algo_stats(&samples);
-    let algos: Vec<serde_json::Value> = agg
-        .iter()
-        .map(|(name, a)| {
-            serde_json::json!({
-                "algo": name,
-                "total": a.total,
-                "done": a.done,
-                "cancelled": a.cancelled,
-                "error": a.error,
-                "active": a.active,
-                "avg_elapsed_ms": a.elapsed_ms_sum.checked_div(a.timed_count).unwrap_or(0),
-                "total_elapsed_ms": a.elapsed_ms_sum,
-                "detections": a.detections,
-            })
-        })
-        .collect();
-    let total_jobs: u64 = agg.values().map(|a| a.total + a.active).sum();
+    // O(1) 增量快照:`algo_aggs` 是 run_job 主循环同步维护的原子 BTreeMap,
+    // 不再每次扫全部 job + clone per-job stats。Job 数量大的时候尤其关键
+    // (旧实现 700+ jobs 时一次响应 ~30ms;这里 ~µs 级)。
+    let snapshot = state.algo_aggs_snapshot();
+    let mut algos: Vec<serde_json::Value> = Vec::with_capacity(snapshot.len());
+    let mut total_jobs: u64 = 0;
+    for (name, a) in snapshot {
+        // `total` 现在是"这个 algo 桶里的全部 job 数"(create 时 +1,
+        // algo 迁移时从 pending 移过来),所以跨桶求和就是全部 jobs。
+        total_jobs = total_jobs.saturating_add(a.total);
+        algos.push(serde_json::json!({
+            "algo": name,
+            "total": a.total,
+            "done": a.done,
+            "cancelled": a.cancelled,
+            "error": a.error,
+            "active": a.active,
+            "avg_elapsed_ms": a.elapsed_ms_sum.checked_div(a.timed_count).unwrap_or(0),
+            "total_elapsed_ms": a.elapsed_ms_sum,
+            "detections": a.detections,
+        }));
+    }
     let body = serde_json::json!({
         "algos": algos,
         "total_jobs": total_jobs,
@@ -699,53 +702,23 @@ async fn liveness_quality_summary(
 /// live_fps_max / gpu_pct / cascade_pass_rate 平台侧暂无数据源,返回 0
 /// (前端对 0 有降级显示,不会报错)。
 async fn metrics(State((state, caches)): State<(Arc<JobRegistry>, ResponseCaches)>) -> Response {
-    // 1s TTL dedup 缓存:命中路径 0 次 registry 扫描 + 0 次 mutex 获取。
+    // 1s TTL dedup 缓存:命中路径 0 次 atomic 读取 + 0 次 registry 扫描。
     if let Some(bytes) = caches.metrics_json.get_fresh() {
         return cached_json_response(bytes);
     }
-    let jobs = state.list();
-    let mut running = 0u64;
-    let mut queued = 0u64;
-    let mut errored = 0u64;
-    let mut cancelled = 0u64;
-    let mut frames_processed = 0u64;
-    let mut frames_with_face = 0u64;
-    let mut detections = 0u64;
-    for j in &jobs {
-        match j.status() {
-            JobStatus::Running => running += 1,
-            JobStatus::Queued => queued += 1,
-            JobStatus::Error => errored += 1,
-            JobStatus::Cancelled => cancelled += 1,
-            JobStatus::Done => {}
-        }
-        // 每个 job 只短持一次 stats 锁,不在 await 点持有。poison 容忍:
-        // 单个 job 线程 panic 过不应该拖垮聚合接口。
-        let st = j.stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        frames_processed += st.frames_processed;
-        frames_with_face += st.frames_with_face;
-        detections += st.total_detections;
-    }
-    let mode = std::env::var("RSFACE_ALGO")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            if state.cfg.use_cnn || state.cfg.cnn_weights.is_some() {
-                "cnn".into()
-            } else {
-                "haar".into()
-            }
-        });
+    // O(1) 原子读侧:run_job 主循环同步维护 `MetricsAgg`,
+    // 缓存未命中也是 12 个 atomic load,~µs 级。
+    let m = state.metrics_snapshot();
     let body = serde_json::json!({
-        "running": running,
-        "queued": queued,
-        "max_concurrency": state.cfg.max_concurrent_jobs,
-        "total_frames_processed": frames_processed,
-        "total_frames_with_face": frames_with_face,
-        "total_detections": detections,
-        "errored": errored,
-        "cancelled": cancelled,
-        "mode": mode,
+        "running": m.running,
+        "queued": m.queued,
+        "max_concurrency": m.max_concurrency,
+        "total_frames_processed": m.total_frames_processed,
+        "total_frames_with_face": m.total_frames_with_face,
+        "total_detections": m.total_detections,
+        "errored": m.errored,
+        "cancelled": m.cancelled,
+        "mode": m.mode,
         "live_fps_max": 0,
         "gpu_pct": 0,
         "total_gpu_levels": 0,
@@ -1286,41 +1259,36 @@ async fn recognize_job(
         }
     };
 
-    let gray = match decode_to_gray(&bytes, &state.cfg.tmp_dir, &id).await {
-        Ok(g) => g,
+    let rgb = match decode_to_rgb(&bytes, &state.cfg.tmp_dir, &id).await {
+        Ok(rgb) => rgb,
         Err(e) => {
             return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("decode: {e}"))
         }
     };
+    let gray = rgb.to_gray();
 
-    let gallery = match load_or_get_gallery(&state) {
-        Some(g) => g,
-        None => {
-            let dir = &state.cfg.gallery_dir;
-            return error_response_with(
-                StatusCode::FAILED_DEPENDENCY,
-                "no_gallery",
-                "no registered face gallery configured",
-                Some(&format!(
-                    "set RSFACE_GALLERY_DIR to a folder of identity folders (missing or empty: {})",
-                    dir.display()
-                )),
-            );
-        }
-    };
-    let identities = gallery.identities;
-    let gallery_crops = gallery.crops;
-    if gallery.recognizers.is_empty() {
+    // 2026-09-28 rewrite: switch the recognise path from the zero-dep
+    // LBPH/Eigenface/Fisherface ensemble over grayscale crops (which scored
+    // F1=0 in the 2026-09-20 golden eval and had no real-world accuracy)
+    // to the production SCRFD+ArcFace pipeline already loaded by
+    // `GalleryState`. The detector query parameter is preserved as the
+    // *fallback detector* used only when the embedder is the legacy
+    // EmbedNet (`RSFACE_ARCFACE_SOFT_FALLBACK=true`). SCRFD is what
+    // actually drives the production path; passing it a `haar` cascade
+    // would silently disable it.
+    let gallery_state = state.gallery.clone();
+    let identities = gallery_state.identity_count().await;
+    let gallery_faces = gallery_state.face_count().await;
+    if identities == 0 {
         return error_response_with(
             StatusCode::FAILED_DEPENDENCY,
             "no_gallery",
-            "gallery present but no recogniser could be trained (need ≥1 identity and ≥2 crops for eigenface/fisherface; LBPH trains on 1)",
-            Some("add more identity folders or crops, then call this endpoint again (gallery is loaded once at startup)"),
+            "no persons enrolled in the persistent gallery",
+            Some("POST /api/persons to enrol at least one identity first"),
         );
     }
 
     // per-job 缓存命中 → 直接返回(0 次检测、0 次识别)。
-    // 仅内存 live job 有缓存载体;历史 PG 任务直接计算。
     let cache_key = format!("{}|{}|{}", id, detector_name, media_key);
     if let Some(job) = &live_job {
         let cache = job
@@ -1334,34 +1302,37 @@ async fn recognize_job(
         }
     }
 
-    let (width, height) = (gray.width(), gray.height());
+    let (width, height) = (rgb.width(), rgb.height());
     let detector_name_for_task = detector_name.clone();
-    let gallery_for_task = gallery.clone();
-    let recognized = tokio::task::spawn_blocking(move || {
-        let detector = crate::jobs::build_detector_by_name(&detector_name_for_task)?;
-        let faces = crate::recognition::recognize_faces(&detector, &gallery_for_task, &gray);
-        std::io::Result::Ok(faces)
+    let gs = gallery_state.clone();
+    // Detector construction is CPU work (parses the cascade) — keep it off
+    // the async worker. `recognize` itself is async (it takes the gallery
+    // RwLock), so it must be awaited on the runtime, NOT from inside
+    // spawn_blocking: `Handle::block_on` there re-enters the runtime and
+    // deadlocks the blocking pool under load. This matches the production
+    // caller in gallery_handlers.rs, which awaits `recognize` directly.
+    let det = match tokio::task::spawn_blocking(move || {
+        crate::jobs::build_detector_by_name(&detector_name_for_task).unwrap_or_else(|_| {
+            // SCRFD-driven path ignores the legacy detector for the
+            // ArcFace embedder; for the EmbedNet fallback, Haar is the
+            // safe default that's always buildable.
+            crate::jobs::build_detector_by_name("haar").expect("haar always builds")
+        })
     })
-    .await;
-    let faces = match recognized {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            return error_response_with(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                &format!("recognize failed: {e}"),
-                None,
-            );
-        }
+    .await
+    {
+        Ok(det) => det,
         Err(e) => {
             return error_response_with(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
-                &format!("recognize join: {e}"),
+                &format!("detector build: {e}"),
                 None,
-            );
+            )
         }
     };
+
+    let faces = gs.recognize(det, &rgb, &gray, 5).await;
 
     let body = serde_json::json!({
         "job_id": id,
@@ -1369,11 +1340,11 @@ async fn recognize_job(
         "width": width,
         "height": height,
         "gallery_identities": identities,
-        "gallery_crops": gallery_crops,
+        "gallery_crops": gallery_faces,
         "face_count": faces.len(),
         "faces": faces,
+        "pipeline": "scrfd+arcface",
     });
-    // 写 per-job 缓存(下一次相同 (job_id, detector, media_key) 直接 hit)。
     if let Some(job) = &live_job {
         let body_for_cache = body.clone();
         let mut cache = job
@@ -1386,58 +1357,6 @@ async fn recognize_job(
         });
     }
     Json(body).into_response()
-}
-
-/// 从 `state.gallery_cache` 取画廊。缓存命中:Arc clone 返回;未命中:
-/// 同步加载 `crate::recognition::GalleryBundle::load`,把结果(画廊路径 + Arc)写回缓存。
-///
-/// 画廊加载开销:LBPH 增量注册 O(N crops),Eigenface PCA O(N²),
-/// Fisherface LDA O(N²·K) — 一次加载 ~100ms 级(50 身份 / 500 crops),
-/// 不能让每个 `/recognize` 请求都重跑。
-///
-/// 失败语义:目录不存在 / 加载 IO 失败 → `None` → API 返 `no_gallery`
-/// (合法部署模式)。warn 日志保留以帮助运维定位权限 / 损坏文件问题。
-fn load_or_get_gallery(
-    state: &Arc<JobRegistry>,
-) -> Option<std::sync::Arc<crate::recognition::GalleryBundle>> {
-    let dir = state.cfg.gallery_dir.clone();
-    // canonicalize 失败回退原路径(目录不存在时 canonicalize 报错,
-    // GalleryBundle::load 自己再报具体 IO 错)。
-    let dir_abs = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-
-    // 快速路径:已缓存且路径一致。
-    {
-        let cache = state
-            .gallery_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some((cached_dir, _ts, bundle)) = cache.as_ref() {
-            if *cached_dir == dir_abs {
-                return Some(std::sync::Arc::clone(bundle));
-            }
-        }
-    }
-
-    // 缺失 / 路径变化:同步加载(最多 ~100ms),把结果写回缓存。
-    let bundle = match crate::recognition::GalleryBundle::load(&dir_abs) {
-        Ok(b) => std::sync::Arc::new(b),
-        Err(e) => {
-            if dir_abs.is_dir() {
-                tracing::warn!(
-                    "[recognize] gallery load failed for {}: {e}",
-                    dir_abs.display()
-                );
-            }
-            return None;
-        }
-    };
-    let ts = std::time::SystemTime::now();
-    let mut cache = state
-        .gallery_cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    *cache = Some((dir_abs, ts, std::sync::Arc::clone(&bundle)));
-    Some(bundle)
 }
 
 /// 同步版 ffmpeg 调用的超时包装:在 spawn_blocking 里用 std::thread 启
@@ -1559,6 +1478,82 @@ pub(crate) async fn decode_to_gray(
     }
     .await;
     // 无论成功失败都清理 compare 临时目录。
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    conv
+}
+
+/// Decode arbitrary image bytes to RGB, mirroring `decode_to_gray` but for
+/// the production SCRFD/ArcFace pipeline (which is RGB-native per the
+/// `ColorInput::Rgb` contract on the detector trait).
+///
+/// Falls back to ffmpeg for formats the hand-rolled codecs don't handle
+/// (JPG, WebP, BMP, …); on success returns the RGB frame plus a
+/// `RgbImage`. Caller still derives gray cheaply via `rgb.to_gray()` if
+/// they need it (the EmbedNet legacy path inside `GalleryState` does).
+pub(crate) async fn decode_to_rgb(
+    bytes: &[u8],
+    tmp_dir: &std::path::Path,
+    job_id: &str,
+) -> std::io::Result<rsface::image::RgbImage> {
+    use rsface::image::png;
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let mut cur = std::io::Cursor::new(bytes);
+        if let Ok(rgb) = png::decode_to_rgb(&mut cur) {
+            return Ok(rgb);
+        }
+    }
+    if bytes.starts_with(b"P6") {
+        let mut cur = std::io::Cursor::new(bytes);
+        return rsface::image::codec::read_ppm(&mut cur);
+    }
+    // Bounded ffmpeg fallback for JPG / WebP / BMP / etc. Reuses the
+    // compare- job's existing work_dir lifecycle so cleanup still works.
+    let work_dir = tmp_dir.join(format!("recognize-{job_id}"));
+    let conv: std::io::Result<rsface::image::RgbImage> = async {
+        tokio::fs::create_dir_all(&work_dir).await?;
+        let in_path = work_dir.join("input.bin");
+        let out_path = work_dir.join("out.ppm");
+        tokio::fs::write(&in_path, bytes).await?;
+        let mut child = tokio::process::Command::new("ffmpeg")
+            .args(["-y", "-i"])
+            .arg(&in_path)
+            .args(["-pix_fmt", "rgb24", "-f", "image2"])
+            .arg(&out_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| std::io::Error::other(format!("ffmpeg spawn: {e}")))?;
+        let status = match tokio::time::timeout(FFMPEG_IMAGE_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => return Err(std::io::Error::other(format!("ffmpeg wait: {e}"))),
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(std::io::Error::other(format!(
+                    "ffmpeg image convert timed out after {}s",
+                    FFMPEG_IMAGE_TIMEOUT.as_secs()
+                )));
+            }
+        };
+        if !status.success() {
+            let mut err = String::new();
+            if let Some(mut se) = child.stderr.take() {
+                use tokio::io::AsyncReadExt;
+                let _ = se.read_to_string(&mut err).await;
+            }
+            return Err(std::io::Error::other(format!(
+                "ffmpeg image convert failed: {err}"
+            )));
+        }
+        let ppm = tokio::fs::read(&out_path).await?;
+        tokio::task::spawn_blocking(move || {
+            let mut cur = std::io::Cursor::new(ppm);
+            rsface::image::codec::read_ppm(&mut cur)
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("ppm join: {e}")))?
+    }
+    .await;
     let _ = tokio::fs::remove_dir_all(&work_dir).await;
     conv
 }
