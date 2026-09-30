@@ -278,7 +278,7 @@ const sidebar = (() => {
       keep.add(id);
       let el = vp.querySelector('#' + CSS.escape(id));
       if (!el) {
-        el = it.kind === 'h' ? makeHead(it.label) : makeItem(it.job);
+        el = it.kind === 'h' ? makeHead(it.label, i) : makeItem(it.job);
         vp.appendChild(el);
       }
       if (it.kind === 'h') el.style.transform = `translateY(${it.y}px)`;
@@ -298,10 +298,10 @@ const sidebar = (() => {
     } else { const e = vp.querySelector('.sb-empty'); if (e) e.remove(); }
   }
 
-  function makeHead(label) {
+  function makeHead(label, idx) {
     const el = document.createElement('div');
     el.className = 'sb-head-row';
-    el.id = 'sb-h-' + label + '-' + Math.random().toString(36).slice(2, 7);
+    el.id = 'sb-h-' + label + '-' + idx;
     el.innerHTML = `<span class="sb-head-label"></span><span class="sb-head-rule"></span>`;
     el.querySelector('.sb-head-label').textContent = label;
     return el;
@@ -901,7 +901,7 @@ const upload = (() => {
       if (canRetry) items.push({ label: '重跑任务', hint: '↻', onPick: () => retryCurrent() });
       items.push({ label: '导出 JSON', hint: 'JSON', onPick: () => exportJSON() });
       items.push({ label: '删除任务', hint: '⌫', danger: true, onPick: () => deleteCurrent() });
-      ctxMenu.show(e, items);
+      ctxMenu.show(e, items, e.currentTarget);
     });
     // 单一 dropzone:接受所有(图片 + 视频),按 MIME 分发
     setupDropzone('#dz-unified', '#file-unified', files => {
@@ -1013,7 +1013,7 @@ const upload = (() => {
   }
 
   function loadConfig() {
-    api.getConfig().then(cfg => {
+    return api.getConfig().then(cfg => {
       state.config = cfg || {};
       const dev = state.config.embedder_device || '';
       const el = utils.$('#tb-runtime');

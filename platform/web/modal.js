@@ -124,7 +124,7 @@ const ctxMenu = (() => {
    * @param {MouseEvent} e         触发的 contextmenu 事件(会 preventDefault)
    * @param {Array}      items     [{label, hint, danger, disabled, onPick}]
    */
-  function show(e, items) {
+  function show(e, items, anchor) {
     if (!items || !items.length) return;
     const el = ensureEl();
     el.innerHTML = '';
@@ -146,12 +146,25 @@ const ctxMenu = (() => {
       el.appendChild(btn);
     }
     el.classList.remove('hidden');
-    // 定位:优先在光标右下,溢出屏幕时翻转
+    // 先放 0,0 取尺寸,真正定位在下面写回
+    el.style.left = '0px'; el.style.top = '0px';
     const vw = window.innerWidth, vh = window.innerHeight;
     const r = el.getBoundingClientRect();
-    let x = e.clientX, y = e.clientY;
+    let x, y;
+    // 键盘 / 程序 .click() 时 e.clientX|Y 都是 0,真实位置不可信;
+    // 有 anchor 就贴 anchor 底沿并钳制,没 anchor 才用光标。
+    if (anchor) {
+      const ar = anchor.getBoundingClientRect();
+      x = ar.right - r.width;
+      y = ar.bottom + 4;
+    } else {
+      x = e.clientX || 8;
+      y = e.clientY || 8;
+    }
     if (x + r.width > vw - 8) x = Math.max(8, vw - r.width - 8);
     if (y + r.height > vh - 8) y = Math.max(8, vh - r.height - 8);
+    if (x < 8) x = 8;
+    if (y < 8) y = 8;
     el.style.left = x + 'px';
     el.style.top = y + 'px';
     if (e.cancelable) e.preventDefault();
