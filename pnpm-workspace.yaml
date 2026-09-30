@@ -1,3 +1,8 @@
 allowBuilds:
-  '@parcel/watcher': set this to true or false
-  esbuild: set this to true or false
+  # esbuild ships a prebuilt binary; vite needs its postinstall.
+  esbuild: true
+  # @parcel/watcher (vite chokidar backend) has a native binding.
+  '@parcel/watcher': true
+  # jsdom's optional `canvas` peer is NOT built — node-canvas needs cairo
+  # system headers we don't ship, and nothing in web-accept.cjs needs it.
+  canvas: false

@@ -305,10 +305,15 @@ const uploadQueue = (() => {
   }
 
   function currentAlgoChoice() {
+    // app.js 的 algoPicker 是单实例,跨脚本读取(window 暴露)。
+    // 保留 #new-algo-select 兜底,避免主脚本失败时失能。
     const sel = utils.$('#new-algo-select');
-    if (!sel) return undefined;
-    const v = (sel.value || '').trim();
-    return v ? v : undefined;
+    if (sel && (sel.value || '').trim()) return (sel.value || '').trim();
+    if (window.__algoPicker && typeof window.__algoPicker.get === 'function') {
+      const v = window.__algoPicker.get();
+      if (v) return v;
+    }
+    return undefined;
   }
 
   /** ------- DOM ------- */

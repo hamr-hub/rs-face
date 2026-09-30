@@ -2,6 +2,7 @@
 <html lang="zh-CN" data-theme="auto"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>rs-face</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.ico">
 <link rel="stylesheet" href="/style.css">
 </head><body>
 <header class="topbar" id="topbar" role="banner">
@@ -58,7 +59,7 @@
   </div>
 </main>
 <div class="status-bar" id="status-bar" aria-live="polite">
-  <span id="sb-total">0 任务 · 0 运行</span> · ⌨n 新建 · j/k 切换 · ⌫ 删除 · ? 帮助
+  <span id="sb-total">0 任务 · 0 运行</span> · ⌨n 新建 · j/k 切换 · ⌫ 删除 · <button id="sb-help" class="sb-help" type="button" aria-label="快捷键帮助">? 帮助</button>
 </div>
 <div class="modal hidden" id="modal-new" role="dialog" aria-modal="true" aria-labelledby="modal-new-title">
   <div class="modal-backdrop" data-close></div>
@@ -69,7 +70,8 @@
       <div class="dz-inner"><div class="dz-icon">◐</div><p>拖入图片/视频 或粘贴 URL</p></div>
     </div>
     <div class="url-row"><input id="unified-url" type="text" placeholder="或 http/https/m3u8/rtsp URL"></div>
-    <a id="algo-link" class="algo-link" href="#" title="选择算法(高级)">算法</a>
+    <button id="algo-link" class="algo-link" type="button" aria-expanded="false" title="选择算法(高级)">算法 <span class="algo-caret">▾</span><span id="algo-current" class="algo-current"></span></button>
+    <div id="algo-panel" class="algo-panel" hidden role="group" aria-label="算法选择"></div>
   </div>
 </div>
 <div class="modal hidden" id="modal-confirm" role="alertdialog" aria-modal="true" aria-labelledby="modal-confirm-title">
@@ -81,6 +83,38 @@
       <button class="pv-btn ghost" id="confirm-cancel" data-close>取消</button>
       <button class="pv-btn danger" id="confirm-ok">确定</button>
     </div>
+  </div>
+</div>
+<div class="modal hidden" id="modal-help" role="dialog" aria-modal="true" aria-labelledby="modal-help-title">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card modal-narrow">
+    <header class="modal-head"><h2 id="modal-help-title">快捷键 &amp; 操作</h2><button class="pv-btn ghost modal-x" data-close aria-label="关闭">✕</button></header>
+    <dl class="help-list">
+      <dt><kbd>N</kbd></dt><dd>新建任务</dd>
+      <dt><kbd>J</kbd> / <kbd>↓</kbd></dt><dd>下一个任务</dd>
+      <dt><kbd>K</kbd> / <kbd>↑</kbd></dt><dd>上一个任务</dd>
+      <dt><kbd>Home</kbd> / <kbd>End</kbd></dt><dd>跳到第一个 / 最后一个</dd>
+      <dt><kbd>PgUp</kbd> / <kbd>PgDn</kbd></dt><dd>翻页</dd>
+      <dt><kbd>A</kbd></dt><dd>切换标注显示</dd>
+      <dt><kbd>⌫</kbd> / <kbd>Del</kbd></dt><dd>删除当前任务</dd>
+      <dt><kbd>Ctrl</kbd>+<kbd>K</kbd></dt><dd>聚焦搜索</dd>
+      <dt><kbd>Esc</kbd></dt><dd>关闭弹窗 / 返回主页</dd>
+      <dt><kbd>?</kbd></dt><dd>显示 / 隐藏本帮助</dd>
+    </dl>
+    <h3 class="help-h3">侧栏任务卡片</h3>
+    <ul class="help-bullets">
+      <li>左键打开预览</li>
+      <li>右键:置顶 / 重跑 / 复制 ID / 删除</li>
+    </ul>
+    <h3 class="help-h3">主区 ⋯</h3>
+    <ul class="help-bullets">
+      <li>切换标注 / 复制 ID / 重跑 / 导出 JSON / 删除</li>
+    </ul>
+    <h3 class="help-h3">输入</h3>
+    <ul class="help-bullets">
+      <li>拖入文件 → 直接入队(支持目录递归)</li>
+      <li>粘贴 URL → 弹出确认后创建任务</li>
+    </ul>
   </div>
 </div>
 <div class="toast-host" id="toast-host" aria-live="polite"></div>

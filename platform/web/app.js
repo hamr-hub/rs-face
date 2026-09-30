@@ -803,9 +803,17 @@ const preview = (() => {
         const skel = card.querySelector('.fc-skel');
         if (skel) skel.classList.add('is-done');
       });
+      img.addEventListener('error', () => {
+        img.classList.add('is-loaded');
+        const skel = card.querySelector('.fc-skel');
+        if (skel) skel.classList.add('is-done');
+      });
       card.addEventListener('click', () => seekToFrame(rep.frame));
       frag.appendChild(card);
-      if (state.faceCardObserver) state.faceCardObserver.observe(img);
+      // 直接 src + loading=lazy:浏览器原生按视口加载。
+      // 原 IntersectionObserver 以 #sb-scroll 为 root,face card 在主区根本不会 intersect,
+      // 导致 src 永远是空,只有灰色骨架。
+      img.src = utils.mediaUrl(rep.key);
     }
     grid.replaceChildren(frag);
   }
@@ -1034,6 +1042,121 @@ const upload = (() => {
   return { init, openModal, loadConfig, submitVideoUrl, submitStream };
 })();
 
+/** 帮助 modal:`?` 键 / 状态栏按钮 / Esc 关闭。 */
+const helpModal = (() => {
+  function isOpen() {
+    const m = utils.$('#modal-help');
+    return !!(m && !m.classList.contains('hidden'));
+  }
+  function init() {
+    const btn = utils.$('#sb-help');
+    if (btn) btn.addEventListener('click', toggle);
+  }
+  function open() {
+    const m = utils.$('#modal-help'); if (!m) return;
+    m.classList.remove('hidden');
+  }
+  function close() {
+    const m = utils.$('#modal-help'); if (!m) return;
+    m.classList.add('hidden');
+  }
+  function toggle() {
+    if (isOpen()) close(); else open();
+  }
+  return { init, open, close, toggle, isOpen };
+})();
+
+/** 算法选择器:新建任务 modal 角落的 chip 行,从 /api/config 取可用列表,
+ *  选择持久化到 localStorage,供 uploadQueue 提交时读取。 */
+const algoPicker = (() => {
+  const KEY = 'rsface.algo';
+  let current = '';
+  let available = [];
+  const ALGO_LABEL = {
+    haar: 'Haar',
+    cnn: 'CNN',
+    luminance: 'Luminance',
+    skin: 'Skin',
+    lbp: 'LBP',
+    hog: 'HOG',
+  };
+
+  function read() {
+    try { return localStorage.getItem(KEY) || ''; } catch { return ''; }
+  }
+  function write(v) {
+    try { if (v) localStorage.setItem(KEY, v); else localStorage.removeItem(KEY); } catch {}
+  }
+  function refreshLabel() {
+    const cur = utils.$('#algo-current');
+    if (cur) cur.textContent = current ? '· ' + (ALGO_LABEL[current] || current) : '';
+  }
+  function render() {
+    const panel = utils.$('#algo-panel');
+    if (!panel) return;
+    const items = [{ id: '', name: '默认' }].concat(
+      available.map(a => ({ id: a, name: ALGO_LABEL[a] || a }))
+    );
+    panel.innerHTML = items.map(it =>
+      `<button type="button" class="algo-chip${it.id === current ? ' is-on' : ''}" data-algo="${utils.escapeHtml(it.id)}">${utils.escapeHtml(it.name)}</button>`
+    ).join('');
+    panel.querySelectorAll('.algo-chip').forEach(b => {
+      b.addEventListener('click', () => select(b.dataset.algo));
+    });
+    refreshLabel();
+  }
+  function setAvailable(list) {
+    available = Array.isArray(list) ? list.slice() : [];
+    // 若上次选择的算法已下线,清空
+    if (current && !available.includes(current)) { current = ''; write(''); }
+    render();
+  }
+  function select(algo) {
+    current = algo || '';
+    write(current);
+    render();
+    const btn = utils.$('#algo-link');
+    if (btn) btn.setAttribute('aria-expanded', isOpen() ? 'true' : 'false');
+  }
+  function isOpen() {
+    const p = utils.$('#algo-panel');
+    return !!(p && !p.hidden);
+  }
+  function open() {
+    const p = utils.$('#algo-panel'); if (!p) return;
+    p.hidden = false;
+    const btn = utils.$('#algo-link'); if (btn) btn.setAttribute('aria-expanded', 'true');
+  }
+  function close() {
+    const p = utils.$('#algo-panel'); if (!p) return;
+    p.hidden = true;
+    const btn = utils.$('#algo-link'); if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+  function toggle() { if (isOpen()) close(); else open(); }
+  function init() {
+    current = read();
+    const btn = utils.$('#algo-link');
+    if (btn) btn.addEventListener('click', e => { e.preventDefault(); toggle(); });
+    refreshLabel();
+    // 新建任务 modal 关闭时,自动收起面板,避免脏状态
+    const modalNew = utils.$('#modal-new');
+    if (modalNew) {
+      new MutationObserver(() => {
+        if (modalNew.classList.contains('hidden')) close();
+      }).observe(modalNew, { attributes: true, attributeFilter: ['class'] });
+    }
+    // 立即用兜底列表渲染(jsdom / fetch 失败时仍可见),再用 /api/config 升级
+    setAvailable(['haar', 'cnn', 'luminance', 'skin', 'lbp', 'hog']);
+    fetch('/api/config').then(r => r.ok ? r.json() : null).then(cfg => {
+      if (cfg && Array.isArray(cfg.available_algos)) setAvailable(cfg.available_algos);
+    }).catch(() => {});
+  }
+  function get() { return current || undefined; }
+  // 暴露给 uploadQueue.js(不同脚本,无法直接闭包访问)
+  window.__algoPicker = { get, select };
+  return { init, get, select, open, close, toggle, isOpen };
+})();
+
 /** 全局快捷键 + 任务级操作(cancel / retry / 导出 JSON)。 */
 function initKeys() {
   document.addEventListener('keydown', e => {
@@ -1068,6 +1191,7 @@ function initKeys() {
       e.preventDefault(); return;
     }
     if (e.key === 'a' || e.key === 'A') { preview.toggleAnno(); e.preventDefault(); return; }
+    if (e.key === '?' || (e.key === '/' && e.shiftKey)) { helpModal.toggle(); e.preventDefault(); return; }
     if ((e.key === 'Delete' || e.key === 'Backspace') && state.currentJobId) { deleteCurrent(); e.preventDefault(); return; }
   });
 }
@@ -1172,7 +1296,7 @@ async function init() {
   if (typeof uploadQueue !== 'undefined' && uploadQueue && typeof uploadQueue.init === 'function') uploadQueue.init();
   if (typeof dropzonePreview !== 'undefined' && dropzonePreview && typeof dropzonePreview.init === 'function') dropzonePreview.init();
   sidebar.init(); upload.init(); confirmModal.init();
-  initKeys();
+  algoPicker.init(); helpModal.init(); initKeys();
   if (typeof visibilityCtl !== 'undefined' && visibilityCtl && typeof visibilityCtl.init === 'function') visibilityCtl.init();
   // 抽屉(窄屏)
   const drawerBtn = utils.$('#tb-drawer');

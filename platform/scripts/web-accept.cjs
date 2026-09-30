@@ -174,6 +174,51 @@ const html = fs.readFileSync(path.join(WEB, 'index.html'), 'utf8');
   check('favicon 声明为 svg', () => {
     return [...doc.querySelectorAll('link[rel=icon]')].some(l => /svg/.test(l.type || ''));
   });
+  check('帮助 modal + 状态栏触发按钮存在', () => {
+    const m = doc.querySelector('#modal-help');
+    const btn = doc.querySelector('#sb-help');
+    if (!m || !btn) return false;
+    // kbd 列表至少 8 项 + 三段 help-h3 + 列表
+    const kbd = m.querySelectorAll('kbd').length;
+    const h3 = m.querySelectorAll('.help-h3').length;
+    return kbd >= 8 && h3 >= 3;
+  });
+  check('帮助按钮可点击开关', () => {
+    const btn = doc.querySelector('#sb-help');
+    const m = doc.querySelector('#modal-help');
+    if (!btn || !m) return false;
+    const before = m.classList.contains('hidden');
+    btn.click();
+    const opened = !m.classList.contains('hidden');
+    btn.click();
+    const closed = m.classList.contains('hidden');
+    return before && opened && closed;
+  });
+  check('算法入口是 button 不是 anchor (可键盘聚焦)', () => {
+    const btn = doc.querySelector('#algo-link');
+    if (!btn) return false;
+    if (btn.tagName !== 'BUTTON') return false;
+    if (btn.getAttribute('aria-expanded') == null) return false;
+    return true;
+  });
+  check('算法面板 ≥ 6 个 chip 且"默认"始终在首位', () => {
+    const panel = doc.querySelector('#algo-panel');
+    if (!panel) return false;
+    const chips = panel.querySelectorAll('.algo-chip');
+    if (chips.length < 6) return false;
+    const first = chips[0];
+    return first && first.dataset.algo === '' && first.textContent.includes('默认');
+  });
+  check('算法选择持久化 (localStorage + __algoPicker)', () => {
+    const p = doc.defaultView;
+    if (!p || !p.__algoPicker || typeof p.__algoPicker.get !== 'function') return false;
+    const before = p.__algoPicker.get();
+    p.__algoPicker.select('cnn');
+    const after = p.__algoPicker.get();
+    const stored = p.localStorage.getItem('rsface.algo');
+    p.__algoPicker.select(before || '');
+    return after === 'cnn' && stored === 'cnn';
+  });
 
   await Promise.all(pending);
 
