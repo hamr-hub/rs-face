@@ -116,6 +116,9 @@ pub fn router(
         .route("/api/telemetry/summary", get(telemetry_summary))
         .route("/api/telemetry/recent", get(telemetry_recent))
         .route("/media/{*key}", get(media))
+        // 浏览器自动请求 /favicon.ico —— SPA 没有独立图标时返回
+        // 204 No Content 比 404 更干净(浏览器不再 console.error)。
+        .route("/favicon.ico", get(favicon))
         .route("/{file}", get(static_file))
         // Persistent person / face gallery (closed loop). The
         // handlers live in `gallery_handlers` and read the same
@@ -423,7 +426,7 @@ async fn config_info(
             "cascade_status": cascade_status,
         },
         "min_face_size": state.cfg.min_face_size,
-        "embedder_device": state.gallery.device(),
+        "embedder_device": state.gallery.device_label(),
     });
     let bytes = serde_json::to_vec(&body).unwrap_or_default();
     caches.config_json.put(bytes.clone());
@@ -442,6 +445,26 @@ async fn index(
             .and_then(|v| v.to_str().ok()),
     )
     .await
+}
+
+/// 内联 SVG favicon(◐ rs-face 标识) —— 返回 `image/svg+xml`,浏览器
+/// 直接拿来画标签页图标,无需单独 ICO 资产。Cache-Control 1 天,避免
+/// 每次刷新都打一次这个端点。
+async fn favicon() -> Response {
+    const SVG: &str = "\
+<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\">\
+<circle cx=\"16\" cy=\"16\" r=\"14\" fill=\"#0c1018\" stroke=\"#4fc3f7\" stroke-width=\"2\"/>\
+<path d=\"M16 2a14 14 0 010 28z\" fill=\"#4fc3f7\"/>\
+</svg>";
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        SVG,
+    )
+        .into_response()
 }
 
 async fn static_file(
