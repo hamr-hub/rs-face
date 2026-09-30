@@ -96,9 +96,13 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     # 路径被 ort 内部用 ORT_TENSORRT_ENGINE_CACHE_PATH env 覆盖,这里通过
     # LD_LIBRARY_PATH 顺序先看到 /opt/jetson-tensorrt/lib 后看到 /opt/onnxruntime/lib,
     # 保证 TensorRT EP 找到 host nvinfer 库而不是 apt 装的旧版。
+    #
+    # 系统库路径(apt 的 libavcodec/libavformat 等,被 ffmpeg 拉起解码图片/视频)
+    # 必须放在最前面 — 否则 ffmpeg 启动时 dlopen libavcodec.so.58 找不到,上传的
+    # 图片/视频都会被 "ffmpeg image→ppm failed" 兜底,体感是按钮没反应。
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     NVIDIA_VISIBLE_DEVICES=all \
-    LD_LIBRARY_PATH=/opt/onnxruntime/lib:/opt/jetson-tensorrt/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+    LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu:/opt/onnxruntime/lib:/opt/jetson-tensorrt/lib:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
     ORT_TENSORRT_ENGINE_CACHE_PATH=/data/ort-cache
 
 USER rsface
