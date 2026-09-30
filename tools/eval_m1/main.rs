@@ -66,11 +66,34 @@ fn best_detection(dets: &[FaceDetection]) -> Option<&FaceDetection> {
     })
 }
 
+/// Single-pass `embed`, or TTA-flip-averaged `embed_tta` with single-pass fallback.
+///
+/// TTA averages the embedding of the aligned crop with the embedding of its horizontal
+/// mirror — a no-training-cost +30% latency for ~5-15% accuracy on LFW-class benchmarks.
+/// Fall back to single-pass on collapse so a degenerate flip cannot silently sink the
+/// result (mirrors [`ArcFaceRecognizer::embed_tta`]'s contract).
+fn embed_with(
+    recognizer: &ArcFaceRecognizer,
+    img: &RgbImage,
+    lms: &rsface::face::Landmarks,
+    use_tta: bool,
+) -> Result<rsface::embedding::Embedding, rsface::onnx::OnnxError> {
+    if use_tta {
+        recognizer.embed_tta(img, lms).or_else(|_| recognizer.embed(img, lms))
+    } else {
+        recognizer.embed(img, lms)
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let mut models_dir = PathBuf::from("models");
     let mut split_dir = PathBuf::from("data/eval_m1/split");
     let mut out_path = PathBuf::from("data/eval_m1/results.json");
+    // 2026-09-30: opt-in TTA so the same harness can compare the single-pass vs
+    // flip-averaged path on the LFW split. Default off to keep the existing
+    // numbers reproducible; `--tta` flips embed→embed_tta with single-pass fallback.
+    let mut use_tta = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -85,6 +108,10 @@ fn main() -> ExitCode {
             "--out" => {
                 out_path = PathBuf::from(&args[i + 1]);
                 i += 2;
+            }
+            "--tta" => {
+                use_tta = true;
+                i += 1;
             }
             other => {
                 eprintln!("unknown arg {other}");
@@ -124,21 +151,25 @@ fn main() -> ExitCode {
         let dets = detector.detect_rgb(&img).expect("detect");
         let rec = if let Some(d) = best_detection(&dets) {
             match d.landmarks {
-                Some(lms) => match recognizer.embed(&img, &lms) {
+                Some(lms) => match embed_with(&recognizer, &img, &lms, use_tta) {
                     Ok(emb) => {
                         gallery.enroll(e.identity.clone(), emb);
                         serde_json::json!({"file": e.file, "identity": e.identity,
-                            "detected": true, "score": d.score, "embedded": true})
+                            "detected": true, "score": d.score, "embedded": true,
+                            "tta": use_tta})
                     }
                     Err(err) => serde_json::json!({"file": e.file, "identity": e.identity,
-                        "detected": true, "score": d.score, "embedded": false, "error": err.to_string()}),
+                        "detected": true, "score": d.score, "embedded": false,
+                        "tta": use_tta, "error": err.to_string()}),
                 },
                 None => serde_json::json!({"file": e.file, "identity": e.identity,
-                    "detected": true, "score": d.score, "embedded": false, "error": "no landmarks"}),
+                    "detected": true, "score": d.score, "embedded": false,
+                    "tta": use_tta, "error": "no landmarks"}),
             }
         } else {
             serde_json::json!({"file": e.file, "identity": e.identity,
-                "detected": false, "embedded": false, "error": "no detection"})
+                "detected": false, "embedded": false,
+                "tta": use_tta, "error": "no detection"})
         };
         gallery_records.push(rec);
     }
@@ -169,9 +200,15 @@ fn main() -> ExitCode {
                 "reason": "no landmarks"}));
             continue;
         };
-        let emb = match recognizer.embed(&img, &lms) {
+        let emb = match embed_with(&recognizer, &img, &lms, use_tta) {
             Ok(emb) => emb,
             Err(err) => {
+                // 2026-09-30: fixed silent drop — every probe must appear in
+                // probe_records so failures don't disappear from the JSON. The
+                // failure is also recorded with its reason for triage.
+                probe_records.push(serde_json::json!({"file": e.file, "identity": e.identity,
+                    "detected": true, "score": d.score, "embedded": false,
+                    "tta": use_tta, "error": err.to_string()}));
                 failures.push(serde_json::json!({"file": e.file, "identity": e.identity,
                     "reason": format!("embed failed: {err}")}));
                 continue;

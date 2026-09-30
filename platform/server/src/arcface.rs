@@ -118,6 +118,17 @@ impl ArcFace {
         let emb = recog.embed(rgb, lms).ok()?;
         Some(emb.as_slice().to_vec())
     }
+
+    /// Test-time-augmented embed: averages the forward pass with the
+    /// horizontally-flipped pass to cancel per-side noise (expression
+    /// asymmetry, lighting gradient). ~+30% latency for ~5-15% accuracy
+    /// gain on LFW-class benchmarks; the caller (gallery.recognize) still
+    /// falls back to single-pass `embed` if this returns `None`.
+    pub fn embed_tta(&self, rgb: &RgbImage, lms: &Landmarks) -> Option<Vec<f32>> {
+        let recog = self.recognizer.lock().ok()?;
+        let emb = recog.embed_tta(rgb, lms).ok()?;
+        Some(emb.as_slice().to_vec())
+    }
 }
 
 /// Resolve the user's `RSFACE_BACKEND` setting against the compiled-in

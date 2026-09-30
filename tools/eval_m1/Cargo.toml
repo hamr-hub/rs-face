@@ -24,6 +24,14 @@ path = "diagnose.rs"
 name = "jpeg_oracle"
 path = "jpeg_oracle.rs"
 
+# Per-image pipeline dump (2026-09-30): decode → detect → align → embed, writing
+# decoded.png + cropNN.png to a directory so a wrong-looking crop can be
+# distinguished from a wrong-looking decode at a glance. Answers "where did this
+# image lose its identity" rather than only reporting a similarity number.
+[[bin]]
+name = "dump"
+path = "dump.rs"
+
 [dependencies]
 rs-face = { path = "../..", features = ["ort-backend"] }
 serde = { version = "1", features = ["derive"] }
