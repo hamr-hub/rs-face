@@ -42,6 +42,25 @@ fn stats(name: &str, img: &RgbImage) {
     );
 }
 
+/// Residual between detected landmarks warped through the similarity transform and the
+/// canonical ArcFace layout — a sub-pixel residual means the detector agreed with the
+/// training layout, large residual means the crop is computed off-centre and every
+/// embedding will suffer. Printed in the dump so a wrong alignment is visible without
+/// staring at the crop PNG.
+fn alignment_residual(lms: &rsface::face::Landmarks) -> f32 {
+    use rsface::align::estimate_arcface_transform;
+    let Some(t) = estimate_arcface_transform(lms) else {
+        return f32::NAN;
+    };
+    let mut worst = 0.0f32;
+    for i in 0..rsface::face::NUM_LANDMARKS {
+        let (x, y) = t.apply(lms.points[i].0, lms.points[i].1);
+        let (rx, ry) = rsface::align::ARCFACE_REFERENCE_LANDMARKS[i];
+        worst = worst.max(((x - rx).powi(2) + (y - ry).powi(2)).sqrt());
+    }
+    worst
+}
+
 fn write_png(path: &PathBuf, img: &RgbImage) {
     if let Ok(f) = std::fs::File::create(path) {
         let mut w = std::io::BufWriter::new(f);
@@ -123,11 +142,13 @@ fn main() {
         for (i, d) in dets.iter().take(3).enumerate() {
             let (x, y, w, h) = (d.x1, d.y1, d.width(), d.height());
             println!(
-                "    #{i} score={:.4} box=({x},{y},{w},{h}) lms={}",
+                "    #{i} score={:.4} box=({x:.1},{y:.1},{w:.1},{h:.1}) lms={}",
                 d.score,
                 d.landmarks.is_some()
             );
             if let Some(lms) = d.landmarks {
+                let res = alignment_residual(&lms);
+                println!("        residual_to_arcface_canonical={res:.2}px");
                 for (k, p) in lms.points.iter().enumerate() {
                     println!("        p{k} = ({:.1}, {:.1})", p.0, p.1);
                 }
@@ -147,6 +168,20 @@ fn main() {
                             );
                         }
                         Err(err) => println!("    embed#{i} FAIL: {err}"),
+                    }
+                    match recog.embed_tta(&img, &lms) {
+                        Ok(e) => {
+                            let v = e.as_slice();
+                            let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            println!(
+                                "    tta#{i} dim={} norm={n:.4} head={:.4},{:.4},{:.4}",
+                                v.len(),
+                                v[0],
+                                v[1],
+                                v[2]
+                            );
+                        }
+                        Err(err) => println!("    tta#{i} FAIL: {err}"),
                     }
                 } else {
                     println!("    crop#{i} FAILED to align (degenerate landmarks)");
