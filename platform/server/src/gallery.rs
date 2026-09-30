@@ -91,11 +91,15 @@ impl EmbedderKind {
     /// Returns the **stable tag** (`cuda` / `tensorrt` / `cpu`) — indexed
     /// accelerators (`cuda:0` vs `cuda:1`) collapse to one label, which is
     /// what metric/log filtering wants. For a human label that preserves
-    /// the device ordinal, use [`device_label`].
+    /// the device ordinal, use [`EmbedderKind::device_label`].
     ///
     /// `ArcFace` reports the ONNX session's resolved device. `Legacy`
     /// (the EmbedNet soft-fallback) is a pure-CPU stack, so we say "cpu"
     /// — the embeddings aren't comparable to an ArcFace cosine anyway.
+    ///
+    /// Test-only since the runtime indicator moved to `device_label`; kept
+    /// so tests can assert the stable-tag contract on both embedder kinds.
+    #[cfg(test)]
     pub fn device(&self) -> &'static str {
         match self {
             EmbedderKind::ArcFace { arcface, .. } => arcface.device().as_str(),
@@ -190,7 +194,7 @@ impl GalleryState {
     }
 
     /// Human-readable device label preserving the device ordinal. See
-    /// [`EmbedderKind::device_label`] for the contract.
+    /// `EmbedderKind::device_label` for the contract.
     pub fn device_label(&self) -> String {
         self.embedder.device_label()
     }
