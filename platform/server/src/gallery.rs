@@ -88,14 +88,28 @@ impl EmbedderKind {
     /// `/api/config` payload can answer "which EP are we actually using?"
     /// without scraping startup logs.
     ///
-    /// `ArcFace` reports the ONNX session's resolved device (cuda /
-    /// tensorrt / cpu / auto). `Legacy` (the EmbedNet soft-fallback) is a
-    /// pure-CPU stack, so we say "cpu" — the embeddings aren't comparable
-    /// to an ArcFace cosine anyway.
+    /// Returns the **stable tag** (`cuda` / `tensorrt` / `cpu`) — indexed
+    /// accelerators (`cuda:0` vs `cuda:1`) collapse to one label, which is
+    /// what metric/log filtering wants. For a human label that preserves
+    /// the device ordinal, use [`device_label`].
+    ///
+    /// `ArcFace` reports the ONNX session's resolved device. `Legacy`
+    /// (the EmbedNet soft-fallback) is a pure-CPU stack, so we say "cpu"
+    /// — the embeddings aren't comparable to an ArcFace cosine anyway.
     pub fn device(&self) -> &'static str {
         match self {
             EmbedderKind::ArcFace { arcface, .. } => arcface.device().as_str(),
             EmbedderKind::Legacy(_) => "cpu",
+        }
+    }
+
+    /// Human-readable device label preserving the device index (`cuda:0`,
+    /// `tensorrt:1`, `cpu`, …). Used by the UI runtime indicator where
+    /// the ordinal is useful to surface.
+    pub fn device_label(&self) -> String {
+        match self {
+            EmbedderKind::ArcFace { arcface, .. } => arcface.device().as_label(),
+            EmbedderKind::Legacy(_) => "cpu".to_string(),
         }
     }
 }
@@ -170,8 +184,15 @@ impl GalleryState {
 
     /// ONNX session device backing the live embedder. See
     /// [`EmbedderKind::device`] for the ArcFace-vs-legacy contract.
+    #[cfg(test)]
     pub fn device(&self) -> &'static str {
         self.embedder.device()
+    }
+
+    /// Human-readable device label preserving the device ordinal. See
+    /// [`EmbedderKind::device_label`] for the contract.
+    pub fn device_label(&self) -> String {
+        self.embedder.device_label()
     }
 
     /// Whether a liveness backend was successfully loaded.
