@@ -494,8 +494,26 @@ fn main() -> ExitCode {
             gallery.rank(emb)
         };
         let top5: Vec<&(String, f32)> = ranked.iter().take(5).collect();
-        let top1_label = top5[0].0.clone();
-        let top1_sim = top5[0].1;
+        // 2026-09-30: empty-rank guard. An empty gallery (every enrolled frame
+        // was a detector miss) makes rank() return [], and top5[0] would panic.
+        // Treat as no-match and exclude from the accuracy denominator.
+        let Some(top1) = top5.first() else {
+            probe_records.push(serde_json::json!({"file": cached.file, "identity": cached.identity,
+                "detected": true, "score": cached.score, "embedded": true,
+                "tta": use_tta, "residual": cached.residual,
+                "picked_by": if prefer_residual { "residual" } else { "score" },
+                "multi_ref_gallery": multi_ref_gallery,
+                "sim_threshold": sim_threshold,
+                "embedded": true, "ranked": 0,
+                "note": "empty gallery — every enrolled frame was a detector miss"}));
+            failures.push(serde_json::json!({"file": cached.file, "identity": cached.identity,
+                "reason": "empty gallery",
+                "residual": cached.residual,
+                "multi_ref_gallery": multi_ref_gallery}));
+            continue;
+        };
+        let top1_label = top1.0.clone();
+        let top1_sim = top1.1;
         let in_top1 = top1_label == cached.identity;
         let in_top5 = top5.iter().any(|(l, _)| l == &cached.identity);
         // 2026-09-30: similarity-floor gate (off by default). When enabled, a
