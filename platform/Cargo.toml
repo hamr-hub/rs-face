@@ -69,6 +69,8 @@ rsface = { package = "rs-face", path = ".." }
 # 127.0.0.1 跑,没起来就跳过。
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
 tempfile = "3"
+# middleware 单测里用 ServiceExt::oneshot 直接驱动 axum Router。
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 opt-level = 3

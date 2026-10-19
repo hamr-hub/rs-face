@@ -79,6 +79,29 @@ docker compose -f platform/docker-compose.gpu.yml up -d --build
 | `MAX_FACE_CROPS` | `2000` | 每任务人脸裁剪上限 |
 | `MIN_FACE_SIZE` | `24` | 最小人脸(px) |
 | `STREAM_KEEPALIVE_PERIOD` | `30` | 直播流无脸帧采样周期 |
+| `CORS_ALLOW_ORIGIN` | _(空)_ | 跨域前端来源;留空 = 同源部署不注入 CORS 头 |
+| `RSFACE_API_TOKEN` | _(空)_ | 可选 Bearer Token;**留空 = 不鉴权**(仅可信网络/本机演示) |
+
+### 🔐 API Token 鉴权(上 LAN/公网前必开)
+
+默认不鉴权,方便本机零配置演示。把服务暴露到 LAN 之前,设置一个高强度随机 Token:
+
+```bash
+# platform/.env(或导出到环境)
+RSFACE_API_TOKEN="$(openssl rand -hex 32)"
+```
+
+设置后,除健康检查(`/api/health[/deep]`)、Prometheus(`/metrics`)、静态页与
+`/media/*` 外,所有 `/api/*` 都需要:
+
+```
+Authorization: Bearer <RSFACE_API_TOKEN>
+```
+
+- 缺失/错误返回 `401 unauthorized` + `WWW-Authenticate: Bearer`;
+- 浏览器首次遇到 401 会弹窗收集 Token,存入 `localStorage` 后自动带在后续请求上;
+- SSE(`EventStream`)无法自定义请求头,改用 `?access_token=<token>` 查询参数(同权);
+- Token 校验为常量时间比较;少于 16 字节启动时会有软告警。
 
 ## ⚠️ 项目规则
 
