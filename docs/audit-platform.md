@@ -6,6 +6,37 @@
 
 ---
 
+## 0. 2026-10-19 复核（main @ 7145660，CI 全绿后）
+
+> 本节为对下文 §2.3 / §3.1 / §3.2 缺口清单的**事后状态复核**，基于当前 main 源码只读核对（非重新跑平台）。结论速览：**4 个 P0 中已闭环 2 个、部分闭环 1 个、仍缺 1 个**；§3.1 的 14 项里 9 项已完成或基本完成。
+
+### 0.1 原 P0 / Top10 项现状
+
+| 原条目（§3.2） | 现状 | 证据（当前 main） |
+|---|---|---|
+| **P0-1 人员 / 人脸库缺失** | 🟡 **后端已闭环，前端缺页** | migration 已到 `0008`：`platform/migrations/0005_persons.sql` 建 persons/faces 表；`gallery_handlers.rs` 提供 `GET/POST /api/persons`、`/api/persons/{id}`、`POST /api/persons/{id}/faces` 等 CRUD（api.rs:126-141 注册路由）。**但 `platform/web/` 仍无任何人员管理 UI**（grep `persons/人脸库/enroll` 无业务引用），浏览器「录入→识别」闭环在 UI 层未打通 |
+| **P0-2 平台无鉴权** | 🔴 **仍缺** | 仅有 `rate_limit_middleware` / `cors_middleware` / `cache_control_middleware`（api.rs:156-167），**无任何 token/auth 中间件**；Cargo 无 jwt/utoipa 依赖。api.rs 中 "bearer" 仅出现在 telemetry 字段脱敏名单里。API 仍裸奔，上 LAN 演示前必须补 |
+| **P0-3 活体未接入平台** | 🟢 **已闭环**（精度另见 M2） | worker 已有 liveness 字段与时序门控（jobs.rs:75-105, 1276-1279 `liveness_temporal_frames`，fail-closed）；`liveness.rs` 从 `RSFACE_LIVENESS_MODELS_DIR` 加载 MiniFASNet ONNX，缺失时降级并打日志；compose 双栈都暴露 `RSFACE_LIVENESS_*`（gpu 栈默认 enabled=1）。**注意：模型精度指标 M2 仍不达标，见 docs/eval-m2.md，"接入"≠"验收通过"** |
+| **P0-4 ffmpeg 失败 / 取消永久挂起** | 🟡 **取消可中断已修，早退检测待验** | 视频同步转码改 `wait_child_cancellable`（jobs.rs:1759-1777，200ms `try_wait` + cancel 即 kill）；stream 进程有 `StreamGuard` Drop kill（jobs.rs:2145）。但 §2.2 的 **stream `test://` 场景**：stream 分支对所有输入无条件 `spawn_ffmpeg_to_local`（jobs.rs:1146-1149），`is_core_native_video` 只按扩展名判定、不认 `test://`（jobs.rs:2089-2092），未见对后台 stream 子进程**早退即 fail job** 的检测，建议实测复核 |
+| P1-5 RTSP 实时架构 / 15 FPS | 🔴 未见架构变更 | stream 仍是「ffmpeg 写增长 mp4 + core 反复打开」模式；无新 FPS/延迟基线产物 |
+| P1-6 连续预览 / 身份叠加 | 🔴 未见 | web 仍无连续视频帧 / WebRTC |
+| P1-7 OpenAPI / Swagger | 🔴 **仍缺** | platform server Cargo 无 utoipa/swagger 依赖 |
+| P1-8 错误码不完整 | 🟡 **部分** | API 层已有规范码：`ssrf_blocked`(403)、`upload_too_large`、`queue_full`(429) 等（api.rs:2738-2751 有错误码契约注释）；worker/ffmpeg 层细码（ffmpeg_failed / undecodable）仍不系统 |
+| P1-9 一键备份脚本 | 🔴 **仍缺** | 仓库内无 backup/restore 脚本（仅 docker-entrypoint.sh） |
+| P2-10 指标 / 日志运维性 | 🟡 部分 | rate_limit、liveness 计数等有新增；FPS/延迟 histogram、JSON 日志/trace id 未见 |
+
+新增能力（原审计之后）：SSRF 防护（blocked range + host 规范化，挡 `::ffff:` / 十进制 IP 绕过）、`file://` 拒绝、per-IP 令牌桶限流、图片输入归一化走 PPM/PGM 规避 core PNG 限制、8 个 DB migration（含 face_quality / face_verdict）。
+
+### 0.2 建议的更新后下一步（替换原 §4）
+
+1. **P0 补鉴权中间件**（原 §4-3，至今未做，阻塞上 LAN）：单 token（env 配置）+ axum middleware，保护 `/api/*`，前端登录态。
+2. **打通人员库前端页**（后端已就绪，性价比最高）：一个「人脸库」页对接现成 `/api/persons*`，即可在浏览器走通录入→识别。
+3. **实测 stream `test://` 早退**：确认 ffmpeg 早退是否会 fail job（§0.1 P0-4）；并补 FPS/延迟基线（原 §4-2 仍欠）。
+4. M2 活体**精度**（独立硬骨头）：FAR≤1% / FRR≤5% 联合目标未达，EER≈5.6%，见 docs/eval-m2.md，需要更高分辨率活体网或补 attack 数据，非平台层任务。
+5. 收尾：OpenAPI（utoipa）、一键备份脚本、错误码补全、孤儿任务 error 噪声治理（§3.3）。
+
+---
+
 ## 1. jobs 表 error 任务归类（464 条）
 
 ### 1.1 总量与分布
