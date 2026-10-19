@@ -14,7 +14,7 @@
 
 | 原条目（§3.2） | 现状 | 证据（当前 main） |
 |---|---|---|
-| **P0-1 人员 / 人脸库缺失** | 🟡 **后端已闭环，前端缺页** | migration 已到 `0008`：`platform/migrations/0005_persons.sql` 建 persons/faces 表；`gallery_handlers.rs` 提供 `GET/POST /api/persons`、`/api/persons/{id}`、`POST /api/persons/{id}/faces` 等 CRUD（api.rs:126-141 注册路由）。**但 `platform/web/` 仍无任何人员管理 UI**（grep `persons/人脸库/enroll` 无业务引用），浏览器「录入→识别」闭环在 UI 层未打通 |
+| **P0-1 人员 / 人脸库缺失** | ✅ **闭环（main @ 78a1806）** | migration 已到 `0008`：`platform/migrations/0005_persons.sql` 建 persons/faces 表；`gallery_handlers.rs` 提供 `GET/POST /api/persons`、`/api/persons/{id}`、`POST /api/persons/{id}/faces` 等 CRUD（api.rs:126-141 注册路由）。**前端已补齐**（PR #17）：`platform/web/gallery.js` 提供顶栏 👤 人脸库模态——人员列表/新建、录入/删除人脸、归档人员、上传图片走 `/api/identify` 做 1:N 识别测试（top-k + 阈值着色 + 活体拦截态），浏览器「录入→识别」闭环已打通。残留增强项（非阻塞）：人脸裁剪缩略图需后端新增 crop 回显端点 |
 | **P0-2 平台无鉴权** | 🟢 **已实现（默认关，显式开启）** | `auth_middleware`（api.rs）支持可选静态 Bearer Token：配置 `RSFACE_API_TOKEN` 后，除健康检查/Prometheus/静态资源/media 外所有 `/api/*` 需 `Authorization: Bearer`，401 + `WWW-Authenticate`，常量时间比较；SSE 用 `?access_token=` 兑底。前端 `auth.js` 401 弹窗收集并持久化。**未设置 env 时保持不鉴权（零配置本机演示），上 LAN 前必须显式开启**（README「API Token 鉴权」）。仍非多用户/RBAC，但已满足「最小门控」要求 |
 | **P0-3 活体未接入平台** | 🟢 **已闭环**（精度另见 M2） | worker 已有 liveness 字段与时序门控（jobs.rs:75-105, 1276-1279 `liveness_temporal_frames`，fail-closed）；`liveness.rs` 从 `RSFACE_LIVENESS_MODELS_DIR` 加载 MiniFASNet ONNX，缺失时降级并打日志；compose 双栈都暴露 `RSFACE_LIVENESS_*`（gpu 栈默认 enabled=1）。**注意：模型精度指标 M2 仍不达标，见 docs/eval-m2.md，"接入"≠"验收通过"** |
 | **P0-4 ffmpeg 失败 / 取消永久挂起** | 🟡 **取消可中断已修，早退检测待验** | 视频同步转码改 `wait_child_cancellable`（jobs.rs:1759-1777，200ms `try_wait` + cancel 即 kill）；stream 进程有 `StreamGuard` Drop kill（jobs.rs:2145）。但 §2.2 的 **stream `test://` 场景**：stream 分支对所有输入无条件 `spawn_ffmpeg_to_local`（jobs.rs:1146-1149），`is_core_native_video` 只按扩展名判定、不认 `test://`（jobs.rs:2089-2092），未见对后台 stream 子进程**早退即 fail job** 的检测，建议实测复核 |
@@ -30,7 +30,7 @@
 ### 0.2 建议的更新后下一步（替换原 §4）
 
 1. ~~P0 补鉴权中间件~~ **已完成（2026-10-19）**：`RSFACE_API_TOKEN` 可选 Bearer 门控，默认关、上 LAN 前显式开启（见 README）。运营侧上线清单只剩「在部署环境里真正设置一个强 Token」；如未来需要多用户再演进到多账号/RBAC。
-2. **打通人员库前端页**（后端已就绪，性价比最高）：一个「人脸库」页对接现成 `/api/persons*`，即可在浏览器走通录入→识别。
+2. ~~打通人员库前端页~~ **已完成（2026-10-19，PR #17）**：顶栏 👤 人脸库模态对接现成 `/api/persons*`，浏览器可走通录入→识别；剩人脸裁剪缩略图端点为可选增强。
 3. **实测 stream `test://` 早退**：确认 ffmpeg 早退是否会 fail job（§0.1 P0-4）；并补 FPS/延迟基线（原 §4-2 仍欠）。
 4. M2 活体**精度**（独立硬骨头）：FAR≤1% / FRR≤5% 联合目标未达，EER≈5.6%，见 docs/eval-m2.md，需要更高分辨率活体网或补 attack 数据，非平台层任务。
 5. 收尾：OpenAPI（utoipa）、一键备份脚本、错误码补全、孤儿任务 error 噪声治理（§3.3）。
