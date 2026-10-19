@@ -117,6 +117,34 @@
     </ul>
   </div>
 </div>
+<div class="modal hidden" id="modal-gallery" role="dialog" aria-modal="true" aria-labelledby="modal-gallery-title">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card modal-gallery-card">
+    <header class="modal-head"><h2 id="modal-gallery-title">人脸库</h2><button class="pv-btn ghost modal-x" data-close aria-label="关闭">✕</button></header>
+    <div class="gal-body">
+      <section class="gal-section">
+        <div class="gal-section-head">
+          <h3>人员</h3>
+          <span class="gal-hint">展开 ▸ 可查看 / 录入 / 删除人脸</span>
+        </div>
+        <div id="gal-list" class="gal-list"><div class="gal-faces-loading">加载中…</div></div>
+        <div class="gal-new">
+          <input id="gal-new-name" class="gal-input" type="text" placeholder="姓名 *" maxlength="120">
+          <input id="gal-new-ext" class="gal-input gal-input-short" type="text" placeholder="外部 ID(可选)" maxlength="120">
+          <input id="gal-new-note" class="gal-input gal-input-wide" type="text" placeholder="备注(可选)" maxlength="240">
+          <button id="gal-create" class="pv-btn primary" type="button">新建人员</button>
+        </div>
+      </section>
+      <section class="gal-section gal-identify">
+        <div class="gal-section-head">
+          <h3>识别测试</h3>
+          <button id="gal-identify-pick" class="pv-btn ghost" type="button">选择图片 1:N</button>
+        </div>
+        <div id="gal-identify-result" class="gal-identify-result hidden"></div>
+      </section>
+    </div>
+  </div>
+</div>
 <div class="toast-host" id="toast-host" aria-live="polite"></div>
 <div class="toast hidden" id="toast" aria-hidden="true"></div>
 <div class="drawer-backdrop hidden" id="drawer-backdrop" aria-hidden="true"></div>
@@ -128,5 +156,6 @@
 <script defer src="/visibility.js"></script>
 <script defer src="/upload-queue.js"></script>
 <script defer src="/dropzone-preview.js"></script>
+<script defer src="/gallery.js"></script>
 <script defer src="/app.js"></script>
 </body></html>
