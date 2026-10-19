@@ -1245,8 +1245,10 @@ impl EmbeddingIo for Embedding {
             return None;
         }
         let mut out = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
-            let v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        // Length was checked as a multiple of 4 above, so the const-generic
+        // split leaves no remainder (clippy: chunks_exact_to_as_chunks).
+        for chunk in bytes.as_chunks::<4>().0 {
+            let v = f32::from_le_bytes(*chunk);
             if !v.is_finite() {
                 return None;
             }

@@ -399,7 +399,10 @@ impl RgbImage {
         let mut out = Self::new(w, h);
         let dst = out.as_mut_slice();
         debug_assert_eq!(dst.len(), gray.as_slice().len() * 3);
-        for (chunk, &v) in dst.chunks_exact_mut(3).zip(gray.as_slice().iter()) {
+        // `dst.len() == gray.len() * 3` is asserted above, so the const-generic
+        // split leaves no remainder (clippy: chunks_exact_to_as_chunks).
+        let (chunks, _remainder) = dst.as_chunks_mut::<3>();
+        for (chunk, &v) in chunks.iter_mut().zip(gray.as_slice().iter()) {
             chunk[0] = v;
             chunk[1] = v;
             chunk[2] = v;
@@ -654,7 +657,7 @@ mod tests {
         assert_eq!(rgb.width(), g.width());
         assert_eq!(rgb.height(), g.height());
         assert_eq!(rgb.as_slice().len(), g.as_slice().len() * 3);
-        for (gray_v, chunk) in g.as_slice().iter().zip(rgb.as_slice().chunks_exact(3)) {
+        for (gray_v, chunk) in g.as_slice().iter().zip(rgb.as_slice().as_chunks::<3>().0) {
             assert_eq!(chunk, &[*gray_v, *gray_v, *gray_v]);
         }
     }
@@ -678,7 +681,12 @@ mod tests {
         let mut g = GrayImage::new(13, 9);
         g.as_mut_slice().fill(42);
         let rgb = RgbImage::from_gray(&g);
-        assert!(rgb.as_slice().chunks_exact(3).all(|c| c == [42u8, 42, 42]));
+        assert!(rgb
+            .as_slice()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .all(|c| c == &[42u8, 42, 42]));
         assert_eq!(rgb.as_slice().len(), 13 * 9 * 3);
     }
 

@@ -116,12 +116,17 @@ pub(crate) unsafe fn rect_sum_unchecked_narrow_simd(
         // Reverse all four lanes: [BR, BL, TR, TL].
         // `_MM_SHUFFLE(z, y, x, w)` puts source[w] into result[0], source[x]
         // into result[1], etc. We want result = [src3, src2, src1, src0] =
-        // [BR, BL, TR, TL], so w=3, x=2, y=1, z=0.
-        let v_rev = _mm_shuffle_epi32(v32, _MM_SHUFFLE(0, 1, 2, 3) as i32);
+        // [BR, BL, TR, TL], so w=3, x=2, y=1, z=0. The immediate is written
+        // literally because `std::arch::x86_64::_MM_SHUFFLE` is an unstable
+        // const fn on current stable (E0658 / stdarch_x86_mm_shuffle); the
+        // macro spells it `(0<<6)|(1<<4)|(2<<2)|3` = 0b00_01_10_11 = 0x1B.
+        let v_rev = _mm_shuffle_epi32(v32, 0x1B);
         // sum_pairs = [TL+BR, TR+BL, BL+TR, BR+TL].
         let sum_pairs = _mm_add_epi32(v32, v_rev);
         // Swap lanes 0 and 1 of sum_pairs so lane 0 = TR+BL, lane 1 = TL+BR.
-        let sum_swap = _mm_shuffle_epi32(sum_pairs, _MM_SHUFFLE(0, 0, 0, 1) as i32);
+        // Immediate = _MM_SHUFFLE(0, 0, 0, 1) = 0b00_00_00_01 = 0x01
+        // (literal: `_MM_SHUFFLE` const fn is unstable on stable).
+        let sum_swap = _mm_shuffle_epi32(sum_pairs, 0x01);
         // result[0] = (TL+BR) - (TR+BL) = TL - TR - BL + BR.
         let result = _mm_sub_epi32(sum_pairs, sum_swap);
         _mm_cvtsi128_si32(result) as u32 as u64
@@ -1329,12 +1334,27 @@ unsafe fn variance_mask_4_x86_64(
     // SAFETY: SSE2 baseline intrinsics; every intermediate is exact (see
     // the fn doc on `passes_variance_mask_4`).
     unsafe {
-        // Load 4 u64s as 2 lanes of 2 f64 each. Lane i holds `sum[i]`.
-        let s01 = _mm_castsi128_pd(_mm_set_epi64x(sum[1] as i64, sum[0] as i64));
-        let s23 = _mm_castsi128_pd(_mm_set_epi64x(sum[3] as i64, sum[2] as i64));
+        // Materialise the 4 u64s into 2 f64x2 vectors through f64 storage.
+        // The sums must be NUMERICALLY converted (u64 -> f64), NOT
+        // bit-reinterpreted: `_mm_castsi128_pd` treats the integer bit
+        // pattern as an IEEE-754 encoding, turning ordinary sums (e.g.
+        // 6000 -> 0x1770) into tiny denormals and silently inverting the
+        // variance decision. Stable stdarch has no i64->f64 intrinsic
+        // (the i64 CVTSI2SD wrapper is unstable), so this mirrors the
+        // aarch64 path's stack-temp `as f64` conversion; every value is
+        // exactly representable here (see fn doc).
+        let mut s_buf = [sum[0] as f64, sum[1] as f64, sum[2] as f64, sum[3] as f64];
+        let mut ss_buf = [
+            sum_sq[0] as f64,
+            sum_sq[1] as f64,
+            sum_sq[2] as f64,
+            sum_sq[3] as f64,
+        ];
+        let s01 = _mm_loadu_pd(s_buf.as_ptr());
+        let s23 = _mm_loadu_pd(s_buf.as_ptr().add(2));
         // Lane i holds `sum_sq[i]`.
-        let ss01 = _mm_castsi128_pd(_mm_set_epi64x(sum_sq[1] as i64, sum_sq[0] as i64));
-        let ss23 = _mm_castsi128_pd(_mm_set_epi64x(sum_sq[3] as i64, sum_sq[2] as i64));
+        let ss01 = _mm_loadu_pd(ss_buf.as_ptr());
+        let ss23 = _mm_loadu_pd(ss_buf.as_ptr().add(2));
         let n = _mm_set1_pd(n_pixels_f64);
         let thr = _mm_set1_pd(thr_n_sq_f64);
         // ss * N

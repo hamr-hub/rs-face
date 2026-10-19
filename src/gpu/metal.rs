@@ -743,7 +743,10 @@ mod imp {
                 std::slice::from_raw_parts(out_buf.contents() as *const u32, slot_count).to_vec()
             };
             let mut dets: Vec<GpuDetection> = Vec::new();
-            for chunk in raw.chunks_exact(3) {
+            // `raw` is w*h flat (x, y, bits) triples (`slot_count = w*h*3`),
+            // so its length is a multiple of 3 and as_chunks has no remainder
+            // (clippy: chunks_exact_to_as_chunks).
+            for chunk in raw.as_chunks::<3>().0 {
                 let x = chunk[0];
                 let y = chunk[1];
                 let bits = chunk[2];
