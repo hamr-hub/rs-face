@@ -140,6 +140,9 @@ services:
       JOB_TIMEOUT_STREAM_SECS: ${JOB_TIMEOUT_STREAM_SECS:-0}
       SHUTDOWN_GRACE_SECS: ${SHUTDOWN_GRACE_SECS:-120}
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-}
+      # 可选 Bearer Token:留空 = 不鉴权(仅可信网络/本机演示)。
+      # 暴露到 LAN 前必须设置;前端请求需带 `Authorization: Bearer <token>`。
+      RSFACE_API_TOKEN: ${RSFACE_API_TOKEN:-}
     deploy:
       resources:
         # GPU 容器跑 4 并发给 4G;OOM 重启而非拖垮宿主。

@@ -117,6 +117,15 @@ pub struct Config {
     /// CORS 允许来源(如 `https://fe.example.com`)。空 = 关闭 CORS(默认,
     /// 同源部署)。设置后为跨域前端放开 `/api/*` + `/media/*`。
     pub cors_allow_origin: String,
+    /// 可选的静态 Bearer API Token。
+    ///
+    /// - `None`(默认,`RSFACE_API_TOKEN` 未设置或为空):鉴权中间件完全
+    ///   透传,行为与旧版一致(仅限可信网络 / 本机演示)。
+    /// - `Some(token)`:除白名单(健康检查、Prometheus 抓取、CORS 预检、
+    ///   静态资源与媒体)外,所有 `/api/*` 请求必须携带
+    ///   `Authorization: Bearer <token>`,否则 401。用于把服务暴露到 LAN
+    ///   之前的最小门控(见 docs/audit-platform.md §0 P0-2)。
+    pub api_token: Option<String>,
     /// 优雅停机等待运行中任务排空的超时(秒)。默认 180(3 分钟);
     /// 超时后强制退出。0 = 不等待(立即退出)。
     pub shutdown_grace_secs: u64,
@@ -277,6 +286,10 @@ impl Config {
                 .unwrap_or(2)
                 .saturating_mul(1024 * 1024 * 1024),
             cors_allow_origin: env_or("CORS_ALLOW_ORIGIN", ""),
+            // 空字符串视同未配置:鉴权关闭(见字段文档)。
+            api_token: std::env::var("RSFACE_API_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
             shutdown_grace_secs: env_or("SHUTDOWN_GRACE_SECS", "180").parse().unwrap_or(180),
             // RSFACE_THREAD_POOL=0 时,自动用物理并行度(并降 1 给主线程 / tokio);
             // 显式设置时尊重 env。
@@ -425,6 +438,17 @@ pub fn validate(cfg: &Config) -> Result<Vec<String>, String> {
         warnings.push(
             "SHUTDOWN_GRACE_SECS=0 — process will exit immediately on SIGTERM, dropping active jobs".into()
         );
+    }
+
+    // API token: 开启了鉴权却给了过短/过弱的 token 时给软告警(不阻止启动,
+    // 因为本机演示可能故意用短 token)。少于 16 字节基本挡不住暴力/猜测。
+    if let Some(tok) = &cfg.api_token {
+        if tok.len() < 16 {
+            warnings.push(format!(
+                "RSFACE_API_TOKEN is only {} bytes — use at least 32 random bytes before exposing to a LAN",
+                tok.len()
+            ));
+        }
     }
 
     Ok(warnings)

@@ -73,6 +73,8 @@ pub fn router(
     let cors_origin = state.cfg.cors_allow_origin.clone();
     let caches_for_routes = caches.clone();
     let rl_for_layer = rate_limiter.clone();
+    // `None` 时 auth 中间件直接透传;配置了 RSFACE_API_TOKEN 才生效。
+    let auth_token = state.cfg.api_token.clone();
     Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
@@ -155,6 +157,11 @@ pub fn router(
         )
         .layer(axum::middleware::from_fn(move |req, next| {
             rate_limit_middleware(req, next, rl_for_layer.clone())
+        }))
+        // 鉴权在限流之后、CORS 之前:被拒请求先吃 401,且 OPTIONS 预检在
+        // auth 内部已放行,CORS 层仍会为预检补上响应头。
+        .layer(axum::middleware::from_fn(move |req, next| {
+            auth_middleware(req, next, auth_token.clone())
         }))
         .layer(axum::middleware::from_fn(move |req, next| {
             cors_middleware(req, next, cors_origin.clone())
@@ -309,6 +316,120 @@ fn apply_cors_headers(headers: &mut axum::http::HeaderMap, allow_origin: &str) {
         axum::http::HeaderName::from_static("access-control-max-age"),
         hv("86400"),
     );
+}
+
+/// 可选 Bearer Token 鉴权中间件。
+///
+/// `configured_token = None` 时完全透传(默认,向后兼容:本机/可信网络演示
+/// 无需任何凭据)。配置了 `RSFACE_API_TOKEN` 后,除 [`auth_path_open`] 白名单
+/// 外的所有请求都必须携带与 token 常量时间相等的
+/// `Authorization: Bearer <token>`,否则返回 401 `unauthorized`。
+///
+/// 设计要点:
+/// - 静态资源 / `/media` / favicon 默认放行:它们是无敏感数据的只读资源,
+///   且 `<img>`/`<video>` 标签无法附带 Authorization 头。真正敏感的全部
+///   操作都在 `/api/*` 下,这里只保护 `/api/*`。
+/// - 健康检查与 Prometheus `/metrics` 放行:供 Docker healthcheck 与
+///   独立的抓取器(它们各自跑在可信内网)使用。
+/// - CORS 预检 `OPTIONS` 永远放行(浏览器不会在预检里带 Authorization)。
+/// - 比较用常量时间等值,避免 token 前缀计时侧信道。
+async fn auth_middleware(
+    req: axum::extract::Request,
+    next: Next,
+    configured_token: Option<String>,
+) -> Response {
+    let Some(expected) = configured_token else {
+        return next.run(req).await;
+    };
+    let path = req.uri().path();
+    // 只保护 /api/*:静态页 / 静态资源 / /media/* 由浏览器标签直接请求,
+    // <img>/<video> 无法附带 Authorization 头,且它们不含敏感操作。
+    // CORS 预检也必须在鉴权之前放行(预检不带 Authorization)。
+    if !path.starts_with("/api/")
+        || req.method() == axum::http::Method::OPTIONS
+        || auth_path_open(path)
+    {
+        return next.run(req).await;
+    }
+    // 首选 `Authorization: Bearer`。EventSource(SSE)无法自定义请求头,所以
+    // 额外允许 `?access_token=` 查询参数作为兜底(同一 token、同一校验)。
+    let bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        })
+        .map(str::trim);
+    let query_token = req.uri().query().and_then(url_decode_access_token);
+    let provided = bearer.or(query_token.as_deref());
+    let authorized =
+        matches!(provided, Some(tok) if constant_time_eq(tok.as_bytes(), expected.as_bytes()));
+    if !authorized {
+        // 不回显 token 的任何片段;WWW-Authenticate 提示客户端该怎么带凭据。
+        let mut resp = error_response_with(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "missing or invalid bearer token",
+            Some("set Authorization: Bearer <RSFACE_API_TOKEN>"),
+        );
+        resp.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer realm=rsface"),
+        );
+        return resp;
+    }
+    next.run(req).await
+}
+
+/// 配置了 token 后,`/api/*` 内仍然免鉴权的只读/基础设施端点。
+/// (非 `/api/` 路径已在调用方整体放行,故这里不再列 `/metrics`。)
+fn auth_path_open(path: &str) -> bool {
+    // 健康检查:Docker healthcheck / 负载均衡探针。
+    path == "/api/health" || path == "/api/health/deep"
+}
+
+/// 从 query string 中取出 `access_token` 的值并做百分号解码。只识别这一个
+/// 参数,不引入 url crate;找不到返回 None。
+fn url_decode_access_token(query: &str) -> Option<String> {
+    let raw = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("access_token="))?;
+    // 仅处理 token 里可能出现的百分号编码;`+` 在 query 中虽常被当空格,
+    // 但 token 由我们自己生成,这里保守地只解 %XX。
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    if out.is_empty() {
+        return None;
+    }
+    String::from_utf8(out).ok()
+}
+
+/// 长度不同直接判否、长度相同时逐字节异或累积,避免短路比较带来的计时差。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -3867,6 +3988,169 @@ mod tests {
         assert_eq!(parse_range_header("items=0-1", 1000), None);
         assert_eq!(parse_range_header("bytes=abc-", 1000), None);
         assert_eq!(parse_range_header("", 1000), None);
+    }
+
+    #[test]
+    fn auth_path_open_only_allows_health() {
+        assert!(auth_path_open("/api/health"));
+        assert!(auth_path_open("/api/health/deep"));
+        // 其他 /api 端点受保护。
+        assert!(!auth_path_open("/api/jobs"));
+        assert!(!auth_path_open("/api/persons"));
+        assert!(!auth_path_open("/api/config"));
+    }
+
+    #[test]
+    fn url_decode_access_token_extracts_and_decodes() {
+        assert_eq!(
+            url_decode_access_token("access_token=abc").as_deref(),
+            Some("abc")
+        );
+        // 多参数顺序无关。
+        assert_eq!(
+            url_decode_access_token("x=1&access_token=tok&y=2").as_deref(),
+            Some("tok")
+        );
+        // %XX 解码。
+        assert_eq!(
+            url_decode_access_token("access_token=a%2Fb%3D").as_deref(),
+            Some("a/b=")
+        );
+        assert_eq!(url_decode_access_token("foo=bar"), None);
+        assert_eq!(url_decode_access_token("access_token="), None);
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_equal() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(constant_time_eq(b"", b""));
+        // 不同长度立即不等(含前缀关系,防止长度泄漏后逐段猜)。
+        assert!(!constant_time_eq(b"secret", b"secret2"));
+        assert!(!constant_time_eq(b"secre", b"secret"));
+        // 等长但内容不同也不等。
+        assert!(!constant_time_eq(b"secret", b"secrex"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_enforces_bearer_token_when_configured() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = |token: Option<String>| {
+            Router::new()
+                .route("/api/ping", get(|| async { "pong" }))
+                .route("/api/health", get(|| async { "ok" }))
+                .route("/", get(|| async { "index" }))
+                .layer(axum::middleware::from_fn(move |req, next| {
+                    auth_middleware(req, next, token.clone())
+                }))
+        };
+
+        // 1) 未配置 token:全部透传(向后兼容)。
+        let resp = app(None)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ping")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let protected = app(Some("tok123".to_string()));
+
+        // 2) 无 Authorization 头 → 401 + WWW-Authenticate。
+        let resp = protected
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ping")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers().get(header::WWW_AUTHENTICATE).unwrap(),
+            "Bearer realm=rsface"
+        );
+
+        // 3) 错误 token → 401。
+        let resp = protected
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ping")
+                    .header(header::AUTHORIZATION, "Bearer wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 4) 正确 token → 200。
+        let resp = protected
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ping")
+                    .header(header::AUTHORIZATION, "Bearer tok123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 4b) SSE 场景:EventSource 无法加头,?access_token= 兑底同样放行。
+        let resp = protected
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ping?access_token=tok123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // query token 错误 → 401。
+        let resp = protected
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ping?access_token=nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 5) 白名单健康检查不带 token 也能过。
+        let resp = protected
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 6) 非 /api 路径(静态页)不带 token 也能过。
+        let resp = protected
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

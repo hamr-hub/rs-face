@@ -123,6 +123,10 @@ services:
       LOCAL_MEDIA_DIR: /var/rsface-media
       # 跨域前端(留空 = 同源部署,不开 CORS)
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN:-}
+      # 可选 Bearer Token:留空 = 不鉴权(仅可信网络/本机演示)。
+      # 暴露到 LAN 前必须设置为一个高强度随机串,前端请求需带
+      # `Authorization: Bearer <token>`(健康检查/Prometheus/静态资源放行)。
+      RSFACE_API_TOKEN: ${RSFACE_API_TOKEN:-}
       RSFACE_GALLERY_DIR: /var/rsface-gallery
       # 静默活体(需以 --features liveness 构建镜像;模型见 tools/fetch_models.sh)
       RSFACE_LIVENESS_ENABLED: ${RSFACE_LIVENESS_ENABLED:-false}
