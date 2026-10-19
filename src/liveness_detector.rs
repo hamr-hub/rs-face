@@ -18,7 +18,8 @@
 //! MiniFASNetV2 inspects a tight 2.7× crop and MiniFASNetV1SE a wider 4.0×
 //! crop; their softmax outputs are averaged before the decision, which is the
 //! upstream-recommended ensemble and materially steadier than either model
-//! alone. Loading a single model is supported via [`Self::open_single`].
+//! alone. Loading a single model is supported via
+//! [`LivenessDetector::open_single`].
 
 use crate::face::Detection;
 use crate::image::RgbImage;

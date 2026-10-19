@@ -139,6 +139,7 @@ harness = false
 name = "integral_bench"
 path = "benches/integral_bench.rs"
 harness = false
+required-features = ["detector-haar"]
 
 [[bench]]
 name = "perf_simd"

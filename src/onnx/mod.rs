@@ -183,7 +183,7 @@ pub enum Device {
 impl Device {
     /// Stable tag for metrics + log filtering (drops the device ordinal so
     /// `cuda:0` and `cuda:1` both label as `"cuda"`). For anything a human
-    /// reads, use [`as_label`] instead.
+    /// reads, use [`Device::as_label`] instead.
     pub fn as_str(&self) -> &'static str {
         match self {
             Device::Auto => "auto",
@@ -195,7 +195,7 @@ impl Device {
         }
     }
 
-    /// Same shape as [`as_str`] but for indexed accelerators (`Cuda(n)` /
+    /// Same shape as [`Device::as_str`] but for indexed accelerators (`Cuda(n)` /
     /// `TensorRt(n)`) the device ordinal is included (`cuda:0`, `cuda:1`,
     /// …). Use this in any user-visible label — the bare `as_str()`
     /// intentionally drops the index because it's used in metric labels
