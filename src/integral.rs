@@ -1334,12 +1334,27 @@ unsafe fn variance_mask_4_x86_64(
     // SAFETY: SSE2 baseline intrinsics; every intermediate is exact (see
     // the fn doc on `passes_variance_mask_4`).
     unsafe {
-        // Load 4 u64s as 2 lanes of 2 f64 each. Lane i holds `sum[i]`.
-        let s01 = _mm_castsi128_pd(_mm_set_epi64x(sum[1] as i64, sum[0] as i64));
-        let s23 = _mm_castsi128_pd(_mm_set_epi64x(sum[3] as i64, sum[2] as i64));
+        // Materialise the 4 u64s into 2 f64x2 vectors through f64 storage.
+        // The sums must be NUMERICALLY converted (u64 -> f64), NOT
+        // bit-reinterpreted: `_mm_castsi128_pd` treats the integer bit
+        // pattern as an IEEE-754 encoding, turning ordinary sums (e.g.
+        // 6000 -> 0x1770) into tiny denormals and silently inverting the
+        // variance decision. Stable stdarch has no i64->f64 intrinsic
+        // (the i64 CVTSI2SD wrapper is unstable), so this mirrors the
+        // aarch64 path's stack-temp `as f64` conversion; every value is
+        // exactly representable here (see fn doc).
+        let mut s_buf = [sum[0] as f64, sum[1] as f64, sum[2] as f64, sum[3] as f64];
+        let mut ss_buf = [
+            sum_sq[0] as f64,
+            sum_sq[1] as f64,
+            sum_sq[2] as f64,
+            sum_sq[3] as f64,
+        ];
+        let s01 = _mm_loadu_pd(s_buf.as_ptr());
+        let s23 = _mm_loadu_pd(s_buf.as_ptr().add(2));
         // Lane i holds `sum_sq[i]`.
-        let ss01 = _mm_castsi128_pd(_mm_set_epi64x(sum_sq[1] as i64, sum_sq[0] as i64));
-        let ss23 = _mm_castsi128_pd(_mm_set_epi64x(sum_sq[3] as i64, sum_sq[2] as i64));
+        let ss01 = _mm_loadu_pd(ss_buf.as_ptr());
+        let ss23 = _mm_loadu_pd(ss_buf.as_ptr().add(2));
         let n = _mm_set1_pd(n_pixels_f64);
         let thr = _mm_set1_pd(thr_n_sq_f64);
         // ss * N
