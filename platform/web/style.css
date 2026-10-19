@@ -819,3 +819,65 @@ kbd {
     transition-duration: .01ms !important;
   }
 }
+/* ---------------------------------------------------------------------------
+ * 人脸库模态(gallery.js)
+ * ------------------------------------------------------------------------- */
+.modal-gallery-card {
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+}
+.gal-busy { opacity: .6; pointer-events: none; }
+.gal-body { overflow-y: auto; padding: 4px 20px 20px; display: flex; flex-direction: column; gap: 18px; }
+.gal-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0; }
+.gal-section-head h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--fg); }
+.gal-hint { font-size: 12px; color: var(--fg-dim); }
+.gal-list { display: flex; flex-direction: column; gap: 6px; }
+.gal-empty { color: var(--fg-dim); font-size: 13px; padding: 16px; border: 1px dashed var(--border); border-radius: var(--radius); text-align: center; }
+.gal-empty.error { color: var(--danger); border-color: var(--danger); text-align: left; }
+
+.gal-person { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2, rgba(127,127,127,.06)); }
+.gal-person-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; }
+.gal-caret { background: none; border: 0; color: var(--fg-dim); cursor: pointer; font-size: 12px; width: 20px; padding: 0; }
+.gal-person-main { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.gal-person-name { font-size: 13px; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gal-person-ext { font-size: 11px; color: var(--fg-dim); }
+.gal-person-note { font-size: 12px; color: var(--fg-dim); padding: 0 10px 8px 38px; }
+.gal-face-count { font-size: 12px; color: var(--fg-dim); white-space: nowrap; }
+.gal-person-ops { display: flex; gap: 6px; }
+.gal-mini { font-size: 12px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--fg); cursor: pointer; }
+.gal-mini:hover { background: var(--bg-3, rgba(127,127,127,.12)); }
+.gal-mini.danger { color: var(--danger); }
+
+.gal-faces { padding: 4px 10px 10px 38px; }
+.gal-faces-loading, .gal-faces-empty { font-size: 12px; color: var(--fg-dim); padding: 4px 0; }
+.gal-faces-empty.error { color: var(--danger); }
+.gal-face-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+.gal-face { position: relative; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--bg-3, rgba(127,127,127,.08)); }
+.gal-face-thumb { width: 100%; height: 72px; display: flex; align-items: center; justify-content: center; }
+.gal-face-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.gal-face-glyph { font-size: 22px; color: var(--fg-dim); }
+.gal-face-meta { display: flex; justify-content: space-between; font-size: 10px; color: var(--fg-dim); padding: 2px 5px; }
+.gal-face-del { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; line-height: 1; border: 0; border-radius: 4px; background: rgba(0,0,0,.45); color: #fff; cursor: pointer; font-size: 11px; }
+.gal-face-del:hover { background: var(--danger); }
+
+.gal-new { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.gal-input { flex: 1 1 140px; min-width: 0; padding: 7px 10px; font-size: 13px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
+.gal-input-short { flex: 0 1 130px; }
+.gal-input-wide { flex: 1 1 100%; }
+
+.gal-identify-result { border-top: 1px solid var(--border); padding-top: 12px; }
+.gal-ident-status { font-size: 13px; color: var(--fg-dim); }
+.gal-ident-status.error { color: var(--danger); }
+.gal-ident-head { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
+.gal-ident-img { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+.gal-ident-meta { font-size: 12px; color: var(--fg-dim); display: flex; flex-direction: column; gap: 4px; }
+.gal-threshold { color: var(--fg-dim); }
+.gal-ident-list { display: flex; flex-direction: column; gap: 10px; }
+.gal-ident-face { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.gal-ident-index { font-size: 12px; color: var(--fg-dim); margin-bottom: 6px; }
+.gal-match { display: flex; justify-content: space-between; font-size: 13px; padding: 2px 0; }
+.gal-match.hit .gal-match-name { color: var(--success); font-weight: 600; }
+.gal-match.miss { color: var(--fg-dim); }
+.gal-match-score { font-variant-numeric: tabular-nums; }
